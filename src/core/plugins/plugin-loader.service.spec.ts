@@ -75,7 +75,7 @@ import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
 import { HookManager } from '../hooks';
 import { PluginStorageService } from './plugin-storage.service';
-import { IPlugin, PluginManifest, PluginStatus, PluginType } from './plugin.interfaces';
+import { IPlugin, PluginContext, PluginManifest, PluginStatus, PluginType } from './plugin.interfaces';
 
 describe('PluginLoaderService.registerBuiltInPlugin config', () => {
   function makeLoader(): PluginLoaderService {
@@ -180,8 +180,12 @@ describe('PluginLoaderService — enable/config persistence', () => {
 
   it('writes registry.json without group/other access (plugin config can hold secrets)', () => {
     loader.registerBuiltInPlugin(manifest, {}, { apiKey: 'secret' });
-    const mode = fs.statSync(path.join(tmpDir, 'plugins', 'registry.json')).mode & 0o777;
-    expect(mode & 0o077).toBe(0);
+    const registryPath = path.join(tmpDir, 'plugins', 'registry.json');
+    expect(fs.existsSync(registryPath)).toBe(true);
+    if (process.platform !== 'win32') {
+      const mode = fs.statSync(registryPath).mode & 0o777;
+      expect(mode & 0o077).toBe(0);
+    }
   });
 
   it('restores the operator config on the next load instead of resetting to the default', () => {
@@ -292,6 +296,50 @@ describe('PluginLoaderService — uninstall', () => {
   });
 });
 
+describe('PluginLoaderService — skips dot-prefixed directories on load (crash-leftover .bak)', () => {
+  let tmpDir: string;
+  let pluginsDir: string;
+  let loader: PluginLoaderService;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-dotskip-'));
+    pluginsDir = path.join(tmpDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const config = {
+      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
+    } as unknown as ConfigService;
+    loader = new PluginLoaderService(
+      config,
+      new HookManager(),
+      new PluginStorageService(config),
+      {} as unknown as ModuleRef,
+    );
+  });
+  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const writePlugin = (dirName: string, id: string): void => {
+    const dir = path.join(pluginsDir, dirName);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'manifest.json'),
+      JSON.stringify({ id, name: id, version: '1.0.0', type: 'extension', main: 'index.js' }),
+    );
+    fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
+  };
+
+  it('does not scan a crash-leftover .<id>.bak directory (no duplicate-id load race)', () => {
+    writePlugin('svc-plg', 'svc-plg');
+    writePlugin('.svc-plg.bak', 'svc-plg'); // a leftover update backup carrying the SAME manifest id
+
+    const loadSpy = jest.spyOn(loader, 'loadPlugin');
+    loader.onModuleInit();
+
+    const scanned = loadSpy.mock.calls.map(c => c[0]);
+    expect(scanned).toContain(path.join(pluginsDir, 'svc-plg'));
+    expect(scanned).not.toContain(path.join(pluginsDir, '.svc-plg.bak'));
+  });
+});
+
 describe('PluginLoaderService — enable concurrency', () => {
   let tmpDir: string;
   let loader: PluginLoaderService;
@@ -370,5 +418,47 @@ describe('PluginLoaderService — graceful shutdown (onModuleDestroy)', () => {
     // The failing plugin's onDisable error didn't block the other from being disabled.
     expect(okDisable).toHaveBeenCalledTimes(1);
     expect(loader.getPlugin('ok-plg')?.status).toBe(PluginStatus.DISABLED);
+  });
+});
+
+describe('PluginLoaderService — enable-failure hook cleanup', () => {
+  let tmpDir: string;
+  let hooks: HookManager;
+  let loader: PluginLoaderService;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-enfail-'));
+    const config = { get: (k: string) => (k === 'dataDir' ? tmpDir : undefined) } as unknown as ConfigService;
+    hooks = new HookManager();
+    loader = new PluginLoaderService(config, hooks, new PluginStorageService(config), {} as unknown as ModuleRef);
+  });
+  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  it('does not leak hook registrations when an enable attempt fails, so a later enable does not double-dispatch', async () => {
+    let shouldThrow = true;
+    const instance = {
+      onEnable: (ctx: PluginContext): Promise<void> => {
+        // The plugin subscribes a hook, then its enable fails (e.g. a transient connect timeout).
+        ctx.registerHook('message:received', () => Promise.resolve({ continue: true }));
+        return shouldThrow ? Promise.reject(new Error('transient onEnable failure')) : Promise.resolve();
+      },
+    } as unknown as IPlugin;
+    loader.registerBuiltInPlugin(
+      { id: 'flaky-plg', name: 'Flaky', version: '1.0.0', type: PluginType.EXTENSION, main: 'index.js' },
+      instance,
+    );
+
+    // First enable fails AFTER the hook was registered → the registration must not survive.
+    await expect(loader.enablePlugin('flaky-plg')).rejects.toThrow(/transient/);
+    expect(loader.getPlugin('flaky-plg')?.status).toBe(PluginStatus.ERROR);
+
+    // Retry succeeds.
+    shouldThrow = false;
+    await loader.enablePlugin('flaky-plg');
+    expect(loader.getPlugin('flaky-plg')?.status).toBe(PluginStatus.ENABLED);
+
+    // Exactly one handler — the failed attempt left nothing behind. Without cleanup this is 2,
+    // and every message:received would dispatch to the plugin twice.
+    expect(hooks.getHookCount('message:received')).toBe(1);
   });
 });

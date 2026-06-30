@@ -21,7 +21,7 @@ import {
   Channel,
   ChannelMessage,
   Status,
-  TextStatusOptions,
+  StatusPostOptions,
   StatusResult,
   Catalog,
   Product,
@@ -33,6 +33,7 @@ import {
   RevokedMessage,
   ReactionEvent,
 } from '../interfaces/whatsapp-engine.interface';
+import { resolveWebVersionPin } from '../wa-web-version';
 import { createLogger } from '../../common/services/logger.service';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
@@ -47,11 +48,15 @@ import {
   GroupCreateResult,
 } from '../types/whatsapp-web-js.types';
 import { buildIncomingMessageBase, mapContactFields } from './message-mapper';
+import { buildVCard } from './vcard';
 import {
   capInboundMedia,
+  coerceDeclaredSize,
   inboundMediaConcurrency,
   inboundMediaMaxBytes,
-  coerceDeclaredSize,
+  inboundMediaTimeoutMs,
+  isMediaDownloadEnabled,
+  withInboundDownloadTimeout,
 } from './inbound-media-cap';
 import { ConcurrencyLimiter } from './concurrency-limiter';
 
@@ -66,6 +71,18 @@ export function wwebjsAckToDeliveryStatus(ack: number): DeliveryStatus {
   if (ack === 2) return 'delivered';
   if (ack === 1) return 'sent';
   return 'pending';
+}
+
+/**
+ * Extract call detail from a whatsapp-web.js `call_log` message, or `undefined` for any other type.
+ * The public Message wrapper doesn't expose call fields, so we read them off the raw `_data`. An
+ * incoming call (`!fromMe`) with no recorded `callDuration` was never answered → missed; an outgoing
+ * call is never "missed". Used by getChatHistory, where `call_log` entries actually appear.
+ */
+export function extractWwebjsCall(msg: Message): { video: boolean; missed: boolean } | undefined {
+  if ((msg.type as string) !== 'call_log') return undefined;
+  const d = (msg as unknown as { _data?: { isVideoCall?: boolean; callDuration?: number } })._data ?? {};
+  return { video: Boolean(d.isVideoCall), missed: !msg.fromMe && !d.callDuration };
 }
 
 /**
@@ -125,28 +142,9 @@ export interface WhatsAppWebJsConfig {
 const READY_RECONCILE_INTERVAL_MS = 2000;
 const READY_RECONCILE_TIMEOUT_MS = 90_000;
 
-/**
- * Optional pin for the WhatsApp Web client version. whatsapp-web.js 1.34.x can get stuck at
- * "authenticating" when the auto-fetched WA-Web version is incompatible (#251/#273). Set
- * WWEBJS_WEB_VERSION to a known-good version string to pin it; WWEBJS_WEB_VERSION_REMOTE_PATH
- * overrides the URL template (use `{version}` as the placeholder) if you self-host the HTML.
- * Unset (or `latest`/`off`/`auto`) keeps whatsapp-web.js's default auto-version behavior.
- */
-export function resolveWebVersionPin():
-  | { webVersion: string; webVersionCache: { type: 'remote'; remotePath: string } }
-  | undefined {
-  const version = process.env.WWEBJS_WEB_VERSION?.trim();
-  if (!version || ['off', 'latest', 'auto'].includes(version.toLowerCase())) {
-    return undefined;
-  }
-  const template =
-    process.env.WWEBJS_WEB_VERSION_REMOTE_PATH?.trim() ||
-    'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
-  return {
-    webVersion: version,
-    webVersionCache: { type: 'remote', remotePath: template.replace('{version}', version) },
-  };
-}
+// WhatsApp Web version resolution (the #488 auto-resolve) lives in a dependency-free module so infra
+// status can import it without loading whatsapp-web.js (engine lazy-loading). The adapter imports
+// resolveWebVersionPin above for use in initialize().
 
 /**
  * Optional override for whatsapp-web.js's initial boot/inject wait (#353). On slow first boots
@@ -218,6 +216,15 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
    * download through the concurrency limiter for backpressure. Returns undefined when there's no media.
    */
   private async capInboundMediaFor(msg: Message): Promise<IncomingMessage['media'] | undefined> {
+    if (!isMediaDownloadEnabled()) {
+      const data = (msg as unknown as { _data?: { size?: number; mimetype?: string; filename?: string } })._data;
+      return {
+        mimetype: data?.mimetype ?? '',
+        filename: data?.filename || undefined,
+        omitted: true,
+        sizeBytes: coerceDeclaredSize(data?.size),
+      };
+    }
     const maxBytes = inboundMediaMaxBytes();
     const data = (msg as unknown as { _data?: { size?: number; mimetype?: string; filename?: string } })._data;
     const declared = coerceDeclaredSize(data?.size);
@@ -233,7 +240,38 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         sizeBytes: declared,
       };
     }
-    const media = await this.inboundLimiter.run(() => msg.downloadMedia());
+    // msg.downloadMedia() can't be aborted, so freeing the slot the moment the wall-clock deadline fires
+    // would admit a fresh download while the abandoned one is still materialising in heap — letting the
+    // number of in-flight downloads exceed inboundMediaConcurrency(). Instead, HOLD the slot until the real
+    // download settles; the caller still unblocks on the timeout race and emits the message without media.
+    // boundedReady adopts the timeout-bounded race (a Promise resolving a Promise flattens), so awaiting it
+    // unblocks the caller once the task is admitted AND the deadline-or-download settles — yielding the
+    // media or null on timeout.
+    let resolveBounded: (value: MessageMedia | null | PromiseLike<MessageMedia | null>) => void = () => undefined;
+    const boundedReady = new Promise<MessageMedia | null>(resolve => {
+      resolveBounded = resolve;
+    });
+    const slotHeld = this.inboundLimiter.run(() => {
+      const download = msg.downloadMedia();
+      resolveBounded(
+        withInboundDownloadTimeout(download, inboundMediaTimeoutMs(), () =>
+          this.logger.warn(
+            'Inbound media download timed out (MEDIA_DOWNLOAD_TIMEOUT_MS); emitting message without media',
+            {
+              msgId: msg.id._serialized,
+            },
+          ),
+        ),
+      );
+      // Keep the slot occupied until the underlying download truly settles, not the timeout race.
+      return download.then(
+        () => undefined,
+        () => undefined,
+      );
+    });
+    // The slot-holder runs in the background; never let it surface as an unhandled rejection.
+    void slotHeld.catch(() => undefined);
+    const media = await boundedReady;
     if (!media) return undefined;
     const capped = capInboundMedia({
       mimetype: media.mimetype,
@@ -281,7 +319,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
       // Pin the WA-Web version when configured (fixes the 1.34.x "stuck at authenticating"
       // hang on some setups, #251). Opt-in: unset leaves whatsapp-web.js to auto-select.
-      const versionPin = resolveWebVersionPin();
+      const versionPin = await resolveWebVersionPin();
       if (versionPin) {
         this.logger.log(`Pinning WhatsApp Web version ${versionPin.webVersion}`);
       }
@@ -324,6 +362,13 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
     // eslint-disable-next-line @typescript-eslint/no-misused-promises
     this.client.on('qr', async (qr: string) => {
+      // A 'qr' buffered by a wedged page can flush during the awaited client.destroy() (teardown sets
+      // tearingDown + DISCONNECTED first) or after recoverFromStuckAuth() nulls this.client. Ignore it so a
+      // late event can't resurrect a disconnecting adapter to QR_READY and re-emit a stale QR. Mirrors the
+      // 'authenticated' guard below; the normal first QR is unaffected (not tearing down, not FAILED, client set).
+      if (this.tearingDown || this.status === EngineStatus.FAILED || !this.client) {
+        return;
+      }
       try {
         this.qrCode = await qrcode.toDataURL(qr);
         this.setStatus(EngineStatus.QR_READY);
@@ -412,6 +457,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
             this.logger.error('Error getting quoted message', String(error));
           }
         }
+
+        // Surface call-log detail on the live path too (getChatHistory already does this), so a missed/
+        // video incoming call renders a labeled bubble instead of a generic "Call".
+        const call = extractWwebjsCall(msg);
+        if (call) incomingMessage.call = call;
 
         this.callbacks.onMessage?.(incomingMessage);
       } catch (error) {
@@ -745,9 +795,13 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     return this.pushName;
   }
 
-  async sendTextMessage(chatId: string, text: string): Promise<MessageResult> {
+  async sendTextMessage(chatId: string, text: string, mentions?: string[]): Promise<MessageResult> {
     this.ensureReady();
-    const msg = await this.client!.sendMessage(chatId, text);
+    // wwebjs accepts neutral `<phone>@c.us` WIDs directly as mentionedJidList, so no de-normalization
+    // is needed. Omit the options object entirely when none are given to keep today's send behavior.
+    const msg = mentions?.length
+      ? await this.client!.sendMessage(chatId, text, { mentions })
+      : await this.client!.sendMessage(chatId, text);
     return {
       id: msg.id._serialized,
       timestamp: msg.timestamp,
@@ -790,6 +844,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
     const msg = await this.client!.sendMessage(chatId, messageMedia, {
       caption: media.caption,
+      ...(media.mentions?.length ? { mentions: media.mentions } : {}),
     });
 
     return {
@@ -904,14 +959,9 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async sendContactMessage(chatId: string, contact: ContactCard): Promise<MessageResult> {
     this.ensureReady();
-    // Create vCard format
-    const vcard = [
-      'BEGIN:VCARD',
-      'VERSION:3.0',
-      `FN:${contact.name}`,
-      `TEL;type=CELL;type=VOICE;waid=${contact.number}:+${contact.number}`,
-      'END:VCARD',
-    ].join('\n');
+    // Shared builder sanitizes name/number (strips CR/LF, digits-only waid) so a crafted contact
+    // can't inject extra vCard fields — the previous inline build interpolated raw values.
+    const vcard = buildVCard(contact);
 
     const msg = await this.client!.sendMessage(chatId, vcard, {
       parseVCards: true,
@@ -1315,6 +1365,8 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       out.chatId = chatId;
       out.isGroup = chatId.endsWith('@g.us');
       out.isStatusBroadcast = chatId === 'status@broadcast';
+      const call = extractWwebjsCall(msg);
+      if (call) out.call = call;
       if (includeMedia && msg.hasMedia) {
         try {
           // Same pre-gate + limiter as live media: a large historical blob shouldn't bloat the response/heap.
@@ -1412,21 +1464,21 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     return [];
   }
 
-  async postTextStatus(_text: string, _options?: TextStatusOptions): Promise<StatusResult> {
+  async postTextStatus(_text: string, _options?: StatusPostOptions): Promise<StatusResult> {
     this.ensureReady();
     // whatsapp-web.js doesn't have native status posting
     // This would require using the underlying WhatsApp Web API directly
-    throw new EngineNotSupportedError('postTextStatus');
+    throw new EngineNotSupportedError('postTextStatus (Baileys-only; wwebjs blocked upstream, see #455)');
   }
 
-  async postImageStatus(_media: MediaInput, _caption?: string): Promise<StatusResult> {
+  async postImageStatus(_media: MediaInput, _options?: StatusPostOptions): Promise<StatusResult> {
     this.ensureReady();
-    throw new EngineNotSupportedError('postImageStatus');
+    throw new EngineNotSupportedError('postImageStatus (Baileys-only; wwebjs blocked upstream, see #455)');
   }
 
-  async postVideoStatus(_media: MediaInput, _caption?: string): Promise<StatusResult> {
+  async postVideoStatus(_media: MediaInput, _options?: StatusPostOptions): Promise<StatusResult> {
     this.ensureReady();
-    throw new EngineNotSupportedError('postVideoStatus');
+    throw new EngineNotSupportedError('postVideoStatus (Baileys-only; wwebjs blocked upstream, see #455)');
   }
 
   async deleteStatus(_statusId: string): Promise<void> {
@@ -1493,7 +1545,8 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         isGroup: Boolean(chat.isGroup),
         unreadCount: chat.unreadCount || 0,
         timestamp: chat.timestamp || 0,
-        lastMessage: chat.lastMessage?.body || undefined,
+        // A location message's body is the base64 map thumbnail; don't surface it as the chat preview.
+        lastMessage: chat.lastMessage?.type === MessageTypes.LOCATION ? '📍' : chat.lastMessage?.body || undefined,
       });
     }
 

@@ -303,9 +303,11 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   }
 
   /**
-   * Emit a live delivery-status update (neutral DeliveryStatus, e.g. delivered/read/failed).
+   * Emit a live delivery-status update. The payload mirrors the `message.ack` webhook exactly
+   * (`id`, `messageId`, neutral `status`, and the deprecated legacy numeric `ack`) so a socket
+   * client and a webhook consumer see the same shape.
    */
-  emitMessageAck(sessionId: string, data: { messageId: string; status: DeliveryStatus }) {
+  emitMessageAck(sessionId: string, data: { id: string; messageId: string; status: DeliveryStatus; ack: number }) {
     this.emitToRooms(sessionId, 'message.ack', data);
   }
 
@@ -321,18 +323,5 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    */
   emitMessageReaction(sessionId: string, data: Record<string, unknown>) {
     this.emitToRooms(sessionId, 'message.reaction', data);
-  }
-
-  /**
-   * Emit webhook delivery status (broadcast to all - no session context)
-   */
-  emitWebhookStatus(webhookId: string, success: boolean, error?: string) {
-    // This one broadcasts to all since webhooks don't have session context in the same way
-    this.server.emit('webhook:delivery', {
-      webhookId,
-      success,
-      error,
-      timestamp: new Date().toISOString(),
-    });
   }
 }

@@ -6,6 +6,7 @@ export default () => ({
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
     password: process.env.REDIS_PASSWORD,
+    connectTimeoutMs: parseInt(process.env.REDIS_CONNECT_TIMEOUT_MS || '5000', 10),
   },
 
   // Queue configuration
@@ -52,6 +53,11 @@ export default () => ({
     logging: process.env.DATABASE_LOGGING === 'true',
     // Connection pooling (PostgreSQL)
     poolSize: parseInt(process.env.DATABASE_POOL_SIZE || '10', 10),
+    // Pool/query timeouts (PostgreSQL). statement_timeout is server-side per query; idle/connection
+    // are pool-side. Set any to 0 to disable. Applied to the runtime connection only (see app.module).
+    statementTimeoutMs: parseInt(process.env.DATABASE_STATEMENT_TIMEOUT_MS || '30000', 10),
+    idleTimeoutMs: parseInt(process.env.DATABASE_IDLE_TIMEOUT_MS || '30000', 10),
+    connectionTimeoutMs: parseInt(process.env.DATABASE_CONNECTION_TIMEOUT_MS || '10000', 10),
     // SSL configuration
     ssl: process.env.DATABASE_SSL === 'true',
     sslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false',
@@ -77,6 +83,12 @@ export default () => ({
     baileys: {
       authDir: process.env.BAILEYS_AUTH_DIR || './data/baileys',
     },
+  },
+
+  sessions: {
+    // 0 = unlimited/backwards-compatible. Set to a positive integer to cap concurrently running or
+    // initializing WhatsApp engines, which protects memory/Chromium-constrained deployments.
+    maxConcurrent: parseInt(process.env.MAX_CONCURRENT_SESSIONS || '0', 10),
   },
 
   // Webhook configuration

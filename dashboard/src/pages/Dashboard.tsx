@@ -1,4 +1,5 @@
-import { lazy, Suspense } from 'react';
+import { Suspense } from 'react';
+import { lazyWithRetry as lazy } from '../utils/lazyWithRetry';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { MessageSquare, Send, Webhook, Activity, ArrowUpRight, ArrowDownRight, Loader2 } from 'lucide-react';
@@ -106,7 +107,6 @@ export function Dashboard() {
       <div className="stats-grid">
         {statsCards.map(({ label, value, icon: Icon, trend, trendUp }) => (
           <div key={label} className="stat-card">
-            <Icon className="stat-watermark" />
             <div className="stat-header">
               <span className="stat-label">{label}</span>
               <Icon size={20} className="stat-icon" />

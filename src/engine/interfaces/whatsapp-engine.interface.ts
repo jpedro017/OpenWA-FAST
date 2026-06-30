@@ -33,6 +33,8 @@ export interface MediaInput {
   data: Buffer | string; // Buffer or base64 or URL
   filename?: string;
   caption?: string;
+  /** Neutral WIDs (`<phone>@c.us`) to @mention in the caption. The adapter de-normalizes per engine. */
+  mentions?: string[];
 }
 
 /**
@@ -51,6 +53,7 @@ export type MessageType =
   | 'sticker'
   | 'location'
   | 'contact'
+  | 'call'
   | 'revoked'
   | 'unknown';
 
@@ -69,10 +72,16 @@ export interface IncomingMessage {
    * code can skip these without matching an engine-specific pseudo-JID (e.g. `status@broadcast`).
    */
   isStatusBroadcast?: boolean;
+  /** WhatsApp ephemeral/disappearing-messages timer in seconds. Set per-chat on each message
+   *  in the raw payload. 0 or undefined = no disappearing timer.
+   *  Known values: 86400 (24h), 604800 (7d), 7776000 (90d). */
+  ephemeralDuration?: number;
   /** For group messages, the WID of the participant who actually sent it (`from` is the group JID there). */
   author?: string;
   /** WIDs @mentioned in the message (empty/absent when none). Surfaced for command targeting. */
   mentionedIds?: string[];
+  /** Set for `call` (call_log) messages: video vs voice, and whether an incoming call went unanswered. */
+  call?: { video: boolean; missed: boolean };
   /**
    * Set by the adapter when the sender is identified by a privacy id (e.g. a WhatsApp `@lid`) rather
    * than a phone number, so engine-neutral code can decide whether to attempt phone resolution without
@@ -227,9 +236,15 @@ export interface Status {
   expiresAt: Date;
 }
 
-export interface TextStatusOptions {
+export interface StatusPostOptions {
+  /** REQUIRED. Neutral JIDs (@c.us / @lid) permitted to see the status. Maps to Baileys statusJidList. */
+  recipients: string[];
+  /** Hex background colour (#RRGGBB). Text status only. */
   backgroundColor?: string;
+  /** Font index. Text status only. */
   font?: number;
+  /** Caption. Image/video status only. */
+  caption?: string;
 }
 
 export interface StatusResult {
@@ -397,7 +412,7 @@ export interface IWhatsAppEngine {
   getPushName(): string | null;
 
   // Messaging - Basic
-  sendTextMessage(chatId: string, text: string): Promise<MessageResult>;
+  sendTextMessage(chatId: string, text: string, mentions?: string[]): Promise<MessageResult>;
   sendImageMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
   sendVideoMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
   sendAudioMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
@@ -421,8 +436,9 @@ export interface IWhatsAppEngine {
   getContactById(contactId: string): Promise<Contact | null>;
   checkNumberExists(number: string): Promise<boolean>;
   /**
-   * Resolve a phone number to its canonical chat id in the engine's native format, or null if the
-   * number is not registered. The engine owns the JID scheme, so callers never build it themselves.
+   * Resolve a phone number to its canonical chat id in the neutral dialect (`<phone>@c.us`), or null
+   * if the number is not registered. The engine owns the JID scheme and returns it already neutralized,
+   * so the value is engine-agnostic and round-trips back to a send on any engine.
    */
   getNumberId(number: string): Promise<string | null>;
   /**
@@ -474,9 +490,9 @@ export interface IWhatsAppEngine {
   // Status/Stories (Phase 3)
   getContactStatuses(): Promise<Status[]>;
   getContactStatus(contactId: string): Promise<Status[]>;
-  postTextStatus(text: string, options?: TextStatusOptions): Promise<StatusResult>;
-  postImageStatus(media: MediaInput, caption?: string): Promise<StatusResult>;
-  postVideoStatus(media: MediaInput, caption?: string): Promise<StatusResult>;
+  postTextStatus(text: string, options: StatusPostOptions): Promise<StatusResult>;
+  postImageStatus(media: MediaInput, options: StatusPostOptions): Promise<StatusResult>;
+  postVideoStatus(media: MediaInput, options: StatusPostOptions): Promise<StatusResult>;
   deleteStatus(statusId: string): Promise<void>;
 
   // Catalog (Phase 3) - WhatsApp Business only
