@@ -7,9 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Incoming WhatsApp Business interactive messages no longer arrive with an empty body on the Baileys engine.** Messages sent as interactive/button/template shapes — which businesses use for one-time codes and verification prompts — were saved with `type: "unknown"` and a blank body, dropping the text (e.g. an OTP) entirely. The engine now extracts the display text from `interactiveMessage`, `buttonsMessage`, `templateMessage`, and `interactiveResponseMessage` into the message body and classifies them as `text`, so the content is retrievable over the standard messages API and rendered in the dashboard. (#562)
+
+## [0.7.17] - 2026-07-01
+
+### Added
+
+- **Send true WhatsApp voice notes (PTT).** The `send-audio` endpoint, bulk send, and the `MessageSendAudio` agent tool now accept an optional `ptt` boolean; when set, the message is delivered as a real voice note — the microphone bubble with a waveform — instead of a plain audio file, on both the Baileys and whatsapp-web.js engines. Voice notes require `audio/ogg; codecs=opus` audio, so the server defaults the mimetype to that when `ptt` is set without one (supply OGG/Opus bytes for reliable playback), and stores the message as `type: "voice"`. Fulfills FR-MSG-004. (OpenWA-n8n #13)
+
+### Fixed
+
+- **Sending to — or operating on — a WhatsApp Channel (newsletter) no longer logs internal errors.** On the whatsapp-web.js engine a channel JID (`…@newsletter`) resolves to a `Channel`, which has none of the per-chat operations; the gateway now skips those for channels instead of throwing. The typing indicator that precedes a send, the typing/recording presence endpoint and its MCP tool, mark-unread, and delete-chat now cleanly no-op for a channel (presence does nothing; mark-unread and delete-chat report no change) rather than emitting an internal `TypeError`. Fetching chat labels for a channel previously failed with HTTP 500 — it now returns an empty list. Direct chats, groups, and broadcast lists are unaffected. (#554) Thanks @DanielOberlechner.
+- **Adding and removing chat labels now works on the whatsapp-web.js engine.** The add- and remove-label endpoints called a method that does not exist in the engine, so every request failed with HTTP 500. They now apply the change correctly (reading the chat's current labels and writing back the updated set). Because labels are a WhatsApp Business feature, a request on a non-Business account — or against a chat type that has no labels, such as a channel — now returns a clear HTTP 422 instead of an internal error. (#556)
+
+## [0.7.16] - 2026-06-30
+
 ### Added
 
 - **Link a WhatsApp session by pairing code from the dashboard.** The session connect modal now offers a "Link with Phone Number" tab next to the QR code: enter a phone number in international format and the dashboard requests an 8-character pairing code — via the existing `POST /sessions/:id/pairing-code` endpoint — to type into WhatsApp on the phone, a QR-free way to link a device. The phone field is constrained to digits with a numeric keypad, the code/instructions are fully localized across all 10 dashboard locales, and the pairing panel is keyboard- and screen-reader-accessible. (#551) Thanks @akash247777.
+
+### Fixed
+
+- **Pairing code renders in the correct order in right-to-left locales.** In Arabic/Hebrew the 8-character code's two halves could be transposed by the bidi algorithm (a code like `1234ABCD` shown as `ABCD - 1234`), causing the user to type the wrong code; the code display is now isolated to left-to-right. The pairing connect modal also no longer disappears mid-link on the whatsapp-web.js engine (it stayed mounted only through `authenticating`), and a rapid double-Enter can no longer fire overlapping pairing-code requests. (#552)
 
 ## [0.7.15] - 2026-06-30
 

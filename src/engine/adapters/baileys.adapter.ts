@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as qrcode from 'qrcode';
 import type * as BaileysLib from '@whiskeysockets/baileys';
 import type { AnyMessageContent, MiscMessageGenerationOptions, WAMessage, WASocket } from '@whiskeysockets/baileys';
-import { buildIncomingMessageFromBaileys, mapBaileysStatus } from './baileys-message-mapper';
+import { buildIncomingMessageFromBaileys, extractBaileysBody, mapBaileysStatus } from './baileys-message-mapper';
 import { mapBaileysGroup, mapBaileysGroupInfo } from './baileys-group-mapper';
 import type { ILogger } from '@whiskeysockets/baileys/lib/Utils/logger.js';
 import {
@@ -534,7 +534,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
   async sendAudioMessage(chatId: string, media: MediaInput): Promise<MessageResult> {
     this.ensureReady();
     const { data, mimetype } = await this.resolveMediaBuffer(media);
-    return this.sendContent(chatId, { audio: data, mimetype, ptt: false });
+    return this.sendContent(chatId, { audio: data, mimetype, ptt: media.ptt ?? false });
   }
 
   async sendDocumentMessage(chatId: string, media: MediaInput): Promise<MessageResult> {
@@ -1056,14 +1056,8 @@ export class BaileysAdapter implements IWhatsAppEngine {
     // an inner message, so the raw wrapper exposes none at top level. Identity no-op when unwrapped.
     const normalized = b.normalizeMessageContent(content) ?? content;
 
-    // Body: text first, then media caption as fallback.
-    const body =
-      normalized.conversation ??
-      normalized.extendedTextMessage?.text ??
-      normalized.imageMessage?.caption ??
-      normalized.videoMessage?.caption ??
-      normalized.documentMessage?.caption ??
-      '';
+    // Body: text first, then media caption, then WhatsApp Business interactive shapes (#562).
+    const body = extractBaileysBody(normalized);
 
     // --- location ---
     // ILocationMessage has name/address; ILiveLocationMessage does not — use the static variant only.

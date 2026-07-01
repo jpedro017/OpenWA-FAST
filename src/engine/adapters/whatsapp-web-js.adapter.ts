@@ -34,6 +34,8 @@ import {
   ReactionEvent,
 } from '../interfaces/whatsapp-engine.interface';
 import { resolveWebVersionPin } from '../wa-web-version';
+import { isChannelJid } from '../identity/wa-id';
+import { ChatLabelsUnsupportedError } from '../../common/errors/chat-labels-unsupported.error';
 import { createLogger } from '../../common/services/logger.service';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
@@ -817,14 +819,18 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   }
 
   async sendAudioMessage(chatId: string, media: MediaInput): Promise<MessageResult> {
-    return this.sendMediaMessage(chatId, media);
+    return this.sendMediaMessage(chatId, media, media.ptt ? { sendAudioAsVoice: true } : undefined);
   }
 
   async sendDocumentMessage(chatId: string, media: MediaInput): Promise<MessageResult> {
     return this.sendMediaMessage(chatId, media);
   }
 
-  private async sendMediaMessage(chatId: string, media: MediaInput): Promise<MessageResult> {
+  private async sendMediaMessage(
+    chatId: string,
+    media: MediaInput,
+    extraOptions?: { sendAudioAsVoice?: boolean },
+  ): Promise<MessageResult> {
     this.ensureReady();
 
     let messageMedia: MessageMedia;
@@ -845,6 +851,8 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     const msg = await this.client!.sendMessage(chatId, messageMedia, {
       caption: media.caption,
       ...(media.mentions?.length ? { mentions: media.mentions } : {}),
+      // sendAudioAsVoice only for audio; {...undefined} contributes no keys.
+      ...extraOptions,
     });
 
     return {
@@ -1242,6 +1250,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async getChatLabels(chatId: string): Promise<Label[]> {
     this.ensureReady();
+    if (isChannelJid(chatId)) {
+      // A channel resolves to a wwebjs `Channel`, which has no getLabels() and carries no chat labels.
+      // Return empty instead of letting the unguarded call throw a TypeError (HTTP 500).
+      return [];
+    }
     const chat = await this.client!.getChatById(chatId);
     const labels = await (chat as unknown as GroupChat).getLabels();
     if (!labels) {
@@ -1257,16 +1270,45 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async addLabelToChat(chatId: string, labelId: string): Promise<void> {
     this.ensureReady();
-    const chat = await this.client!.getChatById(chatId);
-    await (chat as unknown as GroupChat).addLabel(labelId);
-    this.logger.log(`Added label ${labelId} to chat ${chatId}`);
+    await this.changeChatLabel(chatId, labelId, true);
   }
 
   async removeLabelFromChat(chatId: string, labelId: string): Promise<void> {
     this.ensureReady();
-    const chat = await this.client!.getChatById(chatId);
-    await (chat as unknown as GroupChat).removeLabel(labelId);
-    this.logger.log(`Removed label ${labelId} from chat ${chatId}`);
+    await this.changeChatLabel(chatId, labelId, false);
+  }
+
+  /**
+   * whatsapp-web.js has no add-/remove-one-label primitive: `client.addOrRemoveLabels(ids, chats)` REPLACES
+   * a chat's label set with `ids` (adding the listed labels, removing any existing label not listed). So
+   * toggle a single label by reading the current set, mutating it, and writing the whole set back.
+   * Labels are a WhatsApp Business feature — the write throws `[LT01]` on a personal account; channels
+   * carry no labels at all. Both are surfaced as a 422 rather than an opaque 500.
+   *
+   * The read and write are separate calls, so two concurrent single-label writes to the SAME chat can
+   * lose an update (last write wins, as a full-set replace). Acceptable for low-frequency label admin;
+   * serialize per (sessionId, chatId) if that ever becomes a real workload.
+   */
+  private async changeChatLabel(chatId: string, labelId: string, add: boolean): Promise<void> {
+    if (isChannelJid(chatId)) {
+      throw new ChatLabelsUnsupportedError('Channels do not support chat labels.');
+    }
+    const ids = new Set((await this.getChatLabels(chatId)).map(label => label.id));
+    if (add) {
+      ids.add(labelId);
+    } else {
+      ids.delete(labelId);
+    }
+    try {
+      await this.client!.addOrRemoveLabels([...ids], [chatId]);
+    } catch (error) {
+      // whatsapp-web.js throws `[LT01] Only Whatsapp business` from the page context on a personal account.
+      if (String(error instanceof Error ? error.message : error).includes('LT01')) {
+        throw new ChatLabelsUnsupportedError();
+      }
+      throw error;
+    }
+    this.logger.log(`${add ? 'Added' : 'Removed'} label ${labelId} ${add ? 'to' : 'from'} chat ${chatId}`);
   }
 
   // Channels/Newsletter (Phase 3)
@@ -1570,6 +1612,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async markUnread(chatId: string): Promise<boolean> {
     this.ensureReady();
+    if (isChannelJid(chatId)) {
+      // A channel resolves to a wwebjs `Channel`, which has no markUnread() — there is no unread
+      // state to toggle on a channel. Report the no-op rather than throwing a TypeError.
+      return false;
+    }
     try {
       const chat = await this.client!.getChatById(chatId);
       // Chat.markUnread() resolves void, so synthesize the boolean from a clean call.
@@ -1583,6 +1630,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async deleteChat(chatId: string): Promise<boolean> {
     this.ensureReady();
+    if (isChannelJid(chatId)) {
+      // A channel resolves to a wwebjs `Channel`, which has no delete() (only the destructive
+      // deleteChannel()); a generic chat-delete must not silently unsubscribe a channel.
+      return false;
+    }
     try {
       const chat = await this.client!.getChatById(chatId);
       return await chat.delete();
@@ -1594,6 +1646,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async sendChatState(chatId: string, state: ChatState): Promise<void> {
     this.ensureReady();
+    if (isChannelJid(chatId)) {
+      // A channel resolves to a wwebjs `Channel`, which has no presence methods
+      // (sendStateTyping/sendStateRecording/clearState). Presence is best-effort, so no-op.
+      return;
+    }
     try {
       const chat = await this.client!.getChatById(chatId);
       if (state === 'typing') {
