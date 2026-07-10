@@ -594,6 +594,8 @@
       "useBuiltIn": "استخدام حاوية PostgreSQL المدمجة",
       "builtInDesc": "سيدير OpenWA حاوية PostgreSQL نيابةً عنك",
       "dbName": "اسم قاعدة البيانات",
+      "schema": "المخطط",
+      "schemaDesc": "مخطط PostgreSQL (يُتجاهل لـ SQLite). الافتراضي 'public'. يجب أن يكون المخطط موجوداً مسبقاً.",
       "poolSize": "حجم المجموعة",
       "ssl": "اتصال SSL",
       "sslDesc": "تفعيل TLS/SSL لاتصالات آمنة بقاعدة البيانات",
@@ -839,5 +841,14 @@
         "actionFailed": "فشل الإجراء"
       }
     }
+  },
+  "search": {
+    "placeholder": "ابحث في الرسائل…",
+    "results": "{{count}} نتيجة",
+    "empty": "لم يتم العثور على رسائل.",
+    "error": "فشل البحث. حاول مرة أخرى.",
+    "unavailable": "البحث غير مُكون.",
+    "scope": { "current": "هذه الجلسة" },
+    "loading": "جارٍ البحث…"
   }
 }

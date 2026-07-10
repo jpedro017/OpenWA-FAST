@@ -16,14 +16,14 @@ Java 17+, one runtime dependency ([Gson](https://github.com/google/gson)).
 <dependency>
   <groupId>com.rmyndharis</groupId>
   <artifactId>openwa</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 ```
 
 **Gradle**
 
 ```groovy
-implementation 'com.rmyndharis:openwa:0.1.0'
+implementation 'com.rmyndharis:openwa:0.1.1'
 ```
 
 ## Quickstart
@@ -66,8 +66,8 @@ The client exposes the same fluent resource surface as the JavaScript, Python,
 and PHP SDKs:
 
 `sessions` · `messages` · `contacts` · `groups` · `webhooks` · `chats` ·
-`labels` · `channels` · `catalog` · `status` · `templates` · `health`, plus
-`client.auth()`.
+`labels` · `channels` · `catalog` · `status` · `templates` · `health` · `search`,
+plus `client.auth()`.
 
 Operator-only modules (`docker`, `metrics`, `infra`, `plugins`, `mcp`) are
 intentionally not exposed; all user-facing resources are.

@@ -23,7 +23,7 @@
  * @packageDocumentation
  */
 
-import { request, encodeSegment, type ClientConfig, type FetchLike, type RequestOptions } from './http.js';
+import { request, encodeSegment, warnIfInsecureHttpUrl, type ClientConfig, type FetchLike, type RequestOptions } from './http.js';
 import { CatalogResource } from './resources/catalog.js';
 import { ChannelsResource } from './resources/channels.js';
 import { ChatsResource } from './resources/chats.js';
@@ -32,6 +32,7 @@ import { GroupsResource } from './resources/groups.js';
 import { HealthResource } from './resources/health.js';
 import { LabelsResource } from './resources/labels.js';
 import { MessagesResource } from './resources/messages.js';
+import { SearchResource } from './resources/search.js';
 import { SessionsResource } from './resources/sessions.js';
 import { StatusResource } from './resources/status.js';
 import { TemplatesResource } from './resources/templates.js';
@@ -65,6 +66,8 @@ export class OpenWAClient {
       defaultHeaders: options.defaultHeaders ?? {},
       fetch: options.fetch ?? globalThis.fetch,
     };
+
+    warnIfInsecureHttpUrl(options.baseUrl);
   }
 
   // ── Resources ────────────────────────────────────────────────────
@@ -81,6 +84,7 @@ export class OpenWAClient {
   readonly channels = new ChannelsResource(this);
   readonly catalog = new CatalogResource(this);
   readonly templates = new TemplatesResource(this);
+  readonly search = new SearchResource(this);
 
   // ── Auth ─────────────────────────────────────────────────────────
 

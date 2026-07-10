@@ -590,6 +590,8 @@
       "useBuiltIn": "使用內置 PostgreSQL 容器",
       "builtInDesc": "OpenWA 會為你管理 PostgreSQL 容器",
       "dbName": "資料庫名稱",
+      "schema": "結構描述",
+      "schemaDesc": "PostgreSQL 結構描述（SQLite 會忽略）。預設為 'public'。該結構描述必須已存在。",
       "poolSize": "連線池大小",
       "ssl": "SSL 連線",
       "sslDesc": "啟用 TLS/SSL 以保障資料庫連線安全",
@@ -835,5 +837,14 @@
         "actionFailed": "操作失敗"
       }
     }
+  },
+  "search": {
+    "placeholder": "搜尋訊息…",
+    "results": "{{count}} 個結果",
+    "empty": "未找到訊息。",
+    "error": "搜尋失敗。請重試。",
+    "unavailable": "搜尋未設定。",
+    "scope": { "current": "目前工作階段" },
+    "loading": "搜尋中…"
   }
 }

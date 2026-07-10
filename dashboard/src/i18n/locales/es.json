@@ -590,6 +590,8 @@
       "useBuiltIn": "Usar contenedor PostgreSQL integrado",
       "builtInDesc": "OpenWA gestionará un contenedor PostgreSQL por ti",
       "dbName": "Nombre de la base de datos",
+      "schema": "Esquema",
+      "schemaDesc": "Esquema de PostgreSQL (ignorado para SQLite). Predeterminado 'public'. El esquema debe existir previamente.",
       "poolSize": "Tamaño del pool",
       "ssl": "Conexión SSL",
       "sslDesc": "Habilitar TLS/SSL para conexiones seguras a la base de datos",
@@ -835,5 +837,14 @@
         "actionFailed": "La acción falló"
       }
     }
+  },
+  "search": {
+    "placeholder": "Buscar mensajes…",
+    "results": "{{count}} resultados",
+    "empty": "No se encontraron mensajes.",
+    "error": "Error en la búsqueda. Inténtalo de nuevo.",
+    "unavailable": "La búsqueda no está configurada.",
+    "scope": { "current": "Esta sesión" },
+    "loading": "Buscando…"
   }
 }

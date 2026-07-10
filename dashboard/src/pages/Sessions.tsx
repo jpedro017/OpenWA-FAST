@@ -9,6 +9,7 @@ import { useToast } from '../components/Toast';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useRole } from '../hooks/useRole';
 import { PageHeader } from '../components/PageHeader';
+import { CustomSelect } from '../components/CustomSelect';
 import './Sessions.css';
 
 export function Sessions() {
@@ -354,22 +355,26 @@ export function Sessions() {
 
         <div className="filter-group">
           <Filter size={16} />
-          <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
-            <option value="all">{t('sessions.filter.all')}</option>
-            <option value="active">{t('sessions.filter.active')}</option>
-            <option value="inactive">{t('sessions.filter.inactive')}</option>
-            <option value="connecting">{t('sessions.filter.connecting')}</option>
-          </select>
+          <CustomSelect
+            value={statusFilter}
+            onChange={setStatusFilter}
+            options={[
+              { value: 'all', label: t('sessions.filter.all') },
+              { value: 'active', label: t('sessions.filter.active') },
+              { value: 'inactive', label: t('sessions.filter.inactive') },
+              { value: 'connecting', label: t('sessions.filter.connecting') },
+            ]}
+          />
         </div>
       </div>
 
       {error && (
         <div
           style={{
-            background: '#FEE2E2',
+            background: 'rgba(239, 68, 68, 0.12)',
             padding: '1rem',
             borderRadius: '8px',
-            color: '#DC2626',
+            color: 'var(--error)',
             marginBottom: '1rem',
           }}
         >
@@ -445,7 +450,7 @@ export function Sessions() {
                 <span className="session-name">{qrData.sessionName}</span>
               </div>
               <button className="btn-close" onClick={handleCloseQRModal} aria-label={t('common.close')}>
-                <X size={20} color="#64748b" />
+                <X size={20} style={{ color: 'var(--text-muted)' }} />
               </button>
             </div>
             <div className="modal-body" style={{ textAlign: 'center' }}>

@@ -32,6 +32,13 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
+      # `nest build` uses tsconfig.build.json which excludes **/*spec.ts, and ts-jest/eslint don't
+      # full-program type-check specs — so without this gate, type errors in spec files are invisible
+      # to CI. tsconfig.json already includes both `src` and `test`, so this is the cheapest full-program
+      # check covering specs (no separate tsconfig.spec.json needed).
+      - name: Type-check full program (including specs)
+        run: npx tsc --noEmit -p tsconfig.json
+
       - name: Check formatting
         run: npm run format -- --check
 
@@ -65,6 +72,63 @@ jobs:
         with:
           files: ./coverage/lcov.info
           fail_ci_if_error: false
+
+  test-postgres:
+    name: Test (PostgreSQL migrations)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: openwa
+          POSTGRES_PASSWORD: openwa
+          POSTGRES_DB: openwa
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openwa"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (compiles the data migrations to dist/)
+        run: npm run build
+
+      # Applies the full data-migration chain to a real Postgres and asserts every generated-uuid PK
+      # has a DB DEFAULT — the dialect gap SQLite-only tests can't see.
+      - name: Migrate + uuid-default smoke against PostgreSQL
+        run: npm run test:pg-smoke
+        env:
+          DATABASE_TYPE: postgres
+          DATABASE_HOST: localhost
+          DATABASE_PORT: '5432'
+          DATABASE_USERNAME: openwa
+          DATABASE_PASSWORD: openwa
+          DATABASE_NAME: openwa
+
+      # Runtime-proves BuiltInFtsProvider on Postgres (websearch_to_tsquery + ts_headline against the
+      # STORED body_ts tsvector). The spec self-skips unless DATABASE_TYPE=postgres, so it is a no-op
+      # in the default test job and only executes here against the postgres:16 service.
+      - name: Postgres FTS provider spec
+        run: npx jest src/database/migrations/__tests__/1782400000000-AddMessagesFts.pg.spec.ts
+        env:
+          DATABASE_TYPE: postgres
+          DATABASE_HOST: localhost
+          DATABASE_PORT: '5432'
+          DATABASE_USERNAME: openwa
+          DATABASE_PASSWORD: openwa
+          DATABASE_NAME: openwa
 
   dashboard:
     name: Dashboard

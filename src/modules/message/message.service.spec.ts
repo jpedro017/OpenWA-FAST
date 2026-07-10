@@ -70,10 +70,11 @@ describe('MessageService', () => {
     };
 
     hookManager = {
-      execute: jest.fn().mockResolvedValue({
-        continue: true,
-        data: { sessionId: 'sess-1', input: { chatId: '628123456789@c.us', text: 'Hello' }, type: 'text' },
-      }),
+      // Echo the input straight back so the message:sending gate is a pass-through by default; specific
+      // tests override with continue:false (block) or a modified input.
+      execute: jest
+        .fn()
+        .mockImplementation((_event: string, data: unknown) => Promise.resolve({ continue: true, data })),
     };
 
     templateService = {
@@ -188,6 +189,17 @@ describe('MessageService', () => {
       expect(hookManager.execute).not.toHaveBeenCalledWith('message:sent', expect.anything(), expect.anything());
     });
 
+    it('emits message:persisted after saving an outbound message', async () => {
+      await service.sendText('sess-1', { chatId: '628123456789@c.us', text: 'hello' });
+
+      const calls = (hookManager.execute as jest.Mock).mock.calls.filter(
+        ([ev]: unknown[]) => ev === 'message:persisted',
+      ) as unknown[][];
+      expect(calls).toHaveLength(1);
+      expect(calls[0][1]).toMatchObject({ sessionId: 'sess-1', message: { chatId: '628123456789@c.us' } });
+      expect(calls[0][2]).toMatchObject({ sessionId: 'sess-1', source: 'MessageService' });
+    });
+
     it('should throw BadRequestException when plugin blocks sending', async () => {
       (hookManager.execute as jest.Mock).mockResolvedValueOnce({ continue: false, data: {} });
 
@@ -290,6 +302,64 @@ describe('MessageService', () => {
     });
   });
 
+  // ── send-hook chokepoint ──────────────────────────────────────────
+
+  describe('send-hook chokepoint (message:sending gate + message:failed across all senders)', () => {
+    it('runs the message:sending gate for a media send (sendImage) tagged with the media type', async () => {
+      await service.sendImage('sess-1', { chatId: '628@c.us', url: 'https://e.com/i.jpg', caption: 'hi' });
+      expect(hookManager.execute).toHaveBeenCalledWith(
+        'message:sending',
+        expect.objectContaining({ type: 'image' }),
+        expect.any(Object),
+      );
+    });
+
+    it('runs the message:sending gate for an extended send (sendPoll)', async () => {
+      await service.sendPoll('sess-1', { chatId: '628@c.us', name: 'Q?', options: ['a', 'b'] });
+      expect(hookManager.execute).toHaveBeenCalledWith(
+        'message:sending',
+        expect.objectContaining({ type: 'poll' }),
+        expect.any(Object),
+      );
+    });
+
+    it('lets a plugin block a media send (continue:false) before the engine is called', async () => {
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({ continue: false, data: {} });
+      await expect(service.sendImage('sess-1', { chatId: '628@c.us', url: 'https://e.com/i.jpg' })).rejects.toThrow(
+        'Message sending blocked by plugin',
+      );
+      expect(mockEngine.sendImageMessage).not.toHaveBeenCalled();
+    });
+
+    it('threads a plugin-modified media input through to the engine', async () => {
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: {
+          sessionId: 'sess-1',
+          type: 'image',
+          input: { chatId: '999@c.us', url: 'https://e.com/mod.jpg', caption: 'edited' },
+        },
+      });
+      await service.sendImage('sess-1', { chatId: '628@c.us', url: 'https://e.com/i.jpg', caption: 'orig' });
+      expect(mockEngine.sendImageMessage).toHaveBeenCalledWith(
+        '999@c.us',
+        expect.objectContaining({ data: 'https://e.com/mod.jpg', caption: 'edited' }),
+      );
+    });
+
+    it('fires message:failed when a media send fails (previously only sendText did)', async () => {
+      mockEngine.sendImageMessage.mockRejectedValueOnce(new Error('engine down'));
+      await expect(service.sendImage('sess-1', { chatId: '628@c.us', url: 'https://e.com/i.jpg' })).rejects.toThrow(
+        'engine down',
+      );
+      expect(hookManager.execute).toHaveBeenCalledWith(
+        'message:failed',
+        expect.objectContaining({ type: 'image', error: 'engine down' }),
+        expect.any(Object),
+      );
+    });
+  });
+
   // ── sendImage ─────────────────────────────────────────────────────
 
   describe('sendImage', () => {
@@ -343,6 +413,24 @@ describe('MessageService', () => {
       await expect(
         service.sendImage('sess-1', { chatId: '628123456789@c.us', url: 'http://127.0.0.1/x.png' }),
       ).rejects.toMatchObject({ response: { message: 'Destination address is not allowed' } });
+    });
+
+    it('does not leak the SSRF internal address into the message:failed hook payload (media sends now route there)', async () => {
+      mockEngine.sendImageMessage.mockRejectedValueOnce(
+        new SsrfBlockedError('Host x resolves to a blocked internal address: 169.254.169.254'),
+      );
+
+      await expect(
+        service.sendImage('sess-1', { chatId: '628123456789@c.us', url: 'http://127.0.0.1/x.png' }),
+      ).rejects.toThrow();
+
+      const calls = (hookManager.execute as jest.Mock).mock.calls as [string, { error?: string }, unknown][];
+      const failedCall = calls.find(c => c[0] === 'message:failed');
+      expect(failedCall).toBeDefined();
+      // The hook payload (now delivered to plugins for media sends) carries the generic message, NOT
+      // the resolved internal IP that the raw SsrfBlockedError.message contains.
+      expect(failedCall![1].error).toBe('Destination address is not allowed');
+      expect(failedCall![1].error).not.toContain('169.254.169.254');
     });
 
     it('rejects a base64 image over the media cap before sending or persisting', async () => {
@@ -566,6 +654,24 @@ describe('MessageService', () => {
       expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({ type: 'voice' }));
     });
 
+    it('labels the message:sending gate "voice" for a voice note (matches the persisted/failed type)', async () => {
+      await service.sendAudio('sess-1', { chatId: 'test@c.us', url: 'https://example.com/voice', ptt: true });
+      expect(hookManager.execute).toHaveBeenCalledWith(
+        'message:sending',
+        expect.objectContaining({ type: 'voice' }),
+        expect.any(Object),
+      );
+    });
+
+    it('labels the message:sending gate "audio" for a plain (non-ptt) audio send', async () => {
+      await service.sendAudio('sess-1', { chatId: 'test@c.us', url: 'https://example.com/audio.ogg' });
+      expect(hookManager.execute).toHaveBeenCalledWith(
+        'message:sending',
+        expect.objectContaining({ type: 'audio' }),
+        expect.any(Object),
+      );
+    });
+
     it('persists a plain audio send (no ptt) as type "audio"', async () => {
       await service.sendAudio('sess-1', { chatId: 'test@c.us', url: 'https://example.com/audio.ogg' });
       expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({ type: 'audio' }));
@@ -748,6 +854,27 @@ describe('MessageService', () => {
           base64: 'data...',
         }),
       ).rejects.toThrow('mimetype is required when using base64 data');
+    });
+
+    it('prefers base64 over url when both are provided (#670)', async () => {
+      // When both are sent, base64 is the explicit local payload and must win over `url` — otherwise
+      // a stale `url` is fetched and silently shadows the image. This aligns the send selection with
+      // the base64-first persisted metadata and the `@ValidateIf((o) => !o.base64)` intent on `url`.
+      await service.sendImage('sess-1', {
+        chatId: '628123456789@c.us',
+        url: 'https://example.com/img.jpg',
+        base64: 'iVBORw0KGgoAAAAN...',
+        mimetype: 'image/png',
+      });
+
+      expect(mockEngine.sendImageMessage).toHaveBeenCalledWith(
+        '628123456789@c.us',
+        expect.objectContaining({ data: 'iVBORw0KGgoAAAAN...' }),
+      );
+      expect(mockEngine.sendImageMessage).not.toHaveBeenCalledWith(
+        '628123456789@c.us',
+        expect.objectContaining({ data: 'https://example.com/img.jpg' }),
+      );
     });
   });
 

@@ -103,7 +103,8 @@ export interface PluginManifest {
   sdkVersion?: string;
 
   // Inbound webhook routes this plugin claims (requires the `webhook:ingress` permission). Validated
-  // by validateIngressManifest; not yet wired into the loader (see that function's doc comment).
+  // by validateIngressManifest, which the loader calls on every external plugin load (loadPlugin).
+  // (Built-in registration declares no ingress and bypasses that validation.)
   ingress?: PluginIngressRoute[];
 }
 
@@ -229,7 +230,7 @@ export const SUPPORTED_SDK_MAJOR = 1;
  * Validates a manifest's `ingress` declarations: SDK major compatibility, the `webhook:ingress`
  * permission, route uniqueness, and that a declared `toleranceSec` is usable (> 0 — a replay window
  * of zero or less would make the tolerance check a no-op). A manifest with no `ingress` entries is a
- * no-op. Pure validation — not yet called from the plugin loader (wiring lands in a later task).
+ * no-op. Called from PluginLoaderService.loadPlugin, so a malformed declaration is rejected at load time.
  */
 export function validateIngressManifest(manifest: PluginManifest): void {
   if (!manifest.ingress?.length) return; // no ingress declared → nothing to validate
@@ -252,6 +253,29 @@ export function validateIngressManifest(manifest: PluginManifest): void {
     if (r.signature.toleranceSec !== undefined && r.signature.toleranceSec <= 0) {
       throw new Error(
         `Plugin ${manifest.id}: route '${r.route}' toleranceSec must be > 0 (a replay guard would be a no-op)`,
+      );
+    }
+  }
+}
+
+/**
+ * Warns about each ingress route declared with `scheme: 'none'` — a fully-unauthenticated public endpoint
+ * that anyone who can reach the host can use to trigger WhatsApp sends. Purely additive (a warning): a
+ * deployment that legitimately relies on scheme:'none' (a provider that offers no HMAC) still boots; the
+ * loud log surfaces the exposure so an operator can front the URL with a network/reverse-proxy guard.
+ * Called from PluginLoaderService.loadPlugin at boot and on dynamic install.
+ */
+export function warnUnauthenticatedIngressRoutes(
+  manifest: PluginManifest,
+  logger: { warn: (message: string, context?: Record<string, unknown>) => void },
+): void {
+  for (const r of manifest.ingress ?? []) {
+    if (r.signature.scheme === 'none') {
+      logger.warn(
+        `Ingress route '${r.route}' of plugin '${manifest.id}' uses signature scheme 'none' — it is an ` +
+          `UNAUTHENTICATED public endpoint that can trigger WhatsApp sends. Only keep this if the provider ` +
+          `offers no HMAC and the URL is guarded by a network/reverse-proxy ACL.`,
+        { pluginId: manifest.id, route: r.route, action: 'ingress_unauthenticated_route' },
       );
     }
   }

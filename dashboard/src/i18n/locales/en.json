@@ -590,6 +590,8 @@
       "useBuiltIn": "Use Built-in PostgreSQL Container",
       "builtInDesc": "OpenWA will manage a PostgreSQL container for you",
       "dbName": "Database Name",
+      "schema": "Schema",
+      "schemaDesc": "PostgreSQL schema (ignored for SQLite). Default 'public'. The schema must already exist.",
       "poolSize": "Pool Size",
       "ssl": "SSL Connection",
       "sslDesc": "Enable TLS/SSL for secure database connections",
@@ -835,5 +837,14 @@
         "actionFailed": "Action failed"
       }
     }
+  },
+  "search": {
+    "placeholder": "Search messages…",
+    "results": "{{count}} results",
+    "empty": "No messages found.",
+    "error": "Search failed. Try again.",
+    "unavailable": "Search is not configured.",
+    "scope": { "current": "This session" },
+    "loading": "Searching…"
   }
 }

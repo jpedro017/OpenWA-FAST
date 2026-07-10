@@ -1,10 +1,26 @@
+import { computeFeatureFlags } from './feature-flags';
+
 export default () => ({
   port: parseInt(process.env.PORT || '2785', 10),
+
+  // Global message search. Opt-out via SEARCH_ENABLED=false. Provider defaults to 'auto' (the
+  // built-in DB full-text provider — Postgres tsvector/GIN, SQLite FTS5); 'none' disables the
+  // /search route + module at runtime while keeping the config namespace loaded.
+  search: {
+    enabled: process.env.SEARCH_ENABLED !== 'false',
+    provider: process.env.SEARCH_PROVIDER || 'auto',
+    limitMax: Number(process.env.SEARCH_LIMIT_MAX) || 100,
+  },
+
+  // Runtime feature flags. Single source of truth: src/config/feature-flags.ts. Exposed here so the
+  // full set is discoverable via ConfigService (`features.*`) instead of scattered process.env reads.
+  features: computeFeatureFlags(),
 
   // Redis configuration
   redis: {
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    username: process.env.REDIS_USERNAME,
     password: process.env.REDIS_PASSWORD,
     connectTimeoutMs: parseInt(process.env.REDIS_CONNECT_TIMEOUT_MS || '5000', 10),
   },
@@ -44,6 +60,12 @@ export default () => ({
     // DATABASE_NAME env as the migration CLI (data-source.ts) so the runtime factory and
     // migrations never target different databases. Distinct sqlite-vs-pg defaults.
     name: process.env.DATABASE_NAME || 'openwa',
+    // PostgreSQL schema (used when type is postgres). Default 'public' preserves the historical
+    // behavior; set POSTGRES_SCHEMA to place OpenWA's tables + the TypeORM migration ledger in a
+    // dedicated schema (e.g. a managed-Postgres project schema, or to isolate OpenWA from other
+    // apps sharing the database). The schema must already exist — a missing one fails fast at
+    // migration time rather than silently falling back to public. SQLite ignores this.
+    schema: process.env.POSTGRES_SCHEMA || 'public',
     // PostgreSQL/MySQL connection (used when type is postgres/mysql)
     host: process.env.DATABASE_HOST || 'localhost',
     port: parseInt(process.env.DATABASE_PORT || '5432', 10),

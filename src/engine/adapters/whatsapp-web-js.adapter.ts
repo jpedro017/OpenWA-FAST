@@ -43,6 +43,7 @@ import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error'
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { MessageNotFoundError } from '../../common/errors/message-not-found.error';
 import { ChannelNotFoundError } from '../../common/errors/channel-not-found.error';
+import { ChannelMediaNotSupportedError } from '../../common/errors/channel-media-not-supported.error';
 import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
 import {
   GroupChat,
@@ -395,6 +396,14 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         puppeteer: {
           headless: this.config.puppeteer?.headless ?? true,
           args: puppeteerArgs,
+          // Do NOT let Puppeteer install its own process signal handlers. By default it handles
+          // SIGINT (→ synchronous process.exit(130), which would skip the graceful drain entirely)
+          // and SIGTERM/SIGHUP (→ kills Chromium at signal time, defeating the drain window). We own
+          // signal handling in main.ts. Puppeteer's unconditional `exit` hook still SIGKILLs this
+          // browser when the process actually exits, so nothing is orphaned.
+          handleSIGINT: false,
+          handleSIGTERM: false,
+          handleSIGHUP: false,
           // Only override the executable when explicitly configured; otherwise let
           // whatsapp-web.js fall back to Puppeteer's bundled Chromium.
           ...(this.config.puppeteer?.executablePath ? { executablePath: this.config.puppeteer.executablePath } : {}),
@@ -712,7 +721,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   private async clearLocalAuth(): Promise<void> {
     const dir = path.join(path.resolve(this.config.sessionDataPath), `session-${this.config.sessionId}`);
     await fs.promises.rm(dir, { recursive: true, force: true }).catch((error: unknown) => {
-      this.logger.warn(`Could not clear stale auth at ${dir}`, String(error));
+      this.logger.warn(`Could not clear stale auth at ${dir}`, { error: String(error) });
     });
   }
 
@@ -763,7 +772,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       // This allows reconnecting without needing to scan QR again
       await client.destroy();
     } catch (error) {
-      this.logger.warn('Destroy client failed:', String(error));
+      this.logger.warn('Destroy client failed:', { error: String(error) });
       // Already destroyed or not initialized - ignore
     } finally {
       this.finishClientTeardown(client);
@@ -778,12 +787,12 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       // Logout clears session data - user will need to scan QR again
       await client.logout();
     } catch (error) {
-      this.logger.warn('Logout failed:', String(error));
+      this.logger.warn('Logout failed:', { error: String(error) });
       // Fall back to destroy if logout fails
       try {
         await client.destroy();
       } catch (destroyError) {
-        this.logger.warn('Client destroy also failed during logout fallback', String(destroyError));
+        this.logger.warn('Client destroy also failed during logout fallback', { error: String(destroyError) });
       }
     } finally {
       this.finishClientTeardown(client);
@@ -964,6 +973,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     extraOptions?: { sendAudioAsVoice?: boolean },
   ): Promise<MessageResult> {
     this.ensureReady();
+    this.ensureNotChannelRecipient(chatId);
 
     let messageMedia: MessageMedia;
 
@@ -1023,7 +1033,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         isBlocked: contact.isBlocked,
       };
     } catch (error) {
-      this.logger.warn(`Failed to get contact: ${contactId}`, String(error));
+      this.logger.warn(`Failed to get contact: ${contactId}`, { error: String(error) });
       return null;
     }
   }
@@ -1119,6 +1129,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async sendStickerMessage(chatId: string, media: MediaInput): Promise<MessageResult> {
     this.ensureReady();
+    // Sticker has its own send path (sendMediaAsSticker), not the sendMediaMessage funnel, but it
+    // hits the same channel crash: for a channel wwjs drops the sticker form and runs processMediaData
+    // with sendToChannel, which still ends at msg.avParams() (Utils.js:518). Guard it too (#673).
+    this.ensureNotChannelRecipient(chatId);
     let messageMedia: MessageMedia;
 
     if (typeof media.data === 'string') {
@@ -1260,7 +1274,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         linkedParentJID: extractLinkedParentJID(groupChat.groupMetadata),
       };
     } catch (error) {
-      this.logger.warn(`Failed to get group: ${groupId}`, String(error));
+      this.logger.warn(`Failed to get group: ${groupId}`, { error: String(error) });
       return null;
     }
   }
@@ -1845,7 +1859,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       // Presence is best-effort and already swallowed here — it never breaks the surrounding send —
       // so log at WARN, not ERROR: a migrated contact routinely yields `No LID for user` on the
       // presence path and an ERROR line reads as a fault when nothing actually failed (#582).
-      this.logger.warn(`Could not set chat state '${state}' for ${chatId} (best-effort)`, String(error));
+      this.logger.warn(`Could not set chat state '${state}' for ${chatId} (best-effort)`, { error: String(error) });
     }
   }
 
@@ -1855,6 +1869,15 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       // instead of a 500 when an engine op is attempted while the session is
       // disconnected / reconnecting / still initializing (#100).
       throw new EngineNotReadyError();
+    }
+  }
+
+  private ensureNotChannelRecipient(chatId: string): void {
+    // whatsapp-web.js crashes building a channel media message (`msg.avParams is not a function`,
+    // upstream wwebjs#201823 — WA Web removed Msg.avParams). Text→channel works; media does not.
+    // Fail fast with a typed 501 instead of surfacing the raw TypeError as a 500 (#673).
+    if (isChannelJid(chatId)) {
+      throw new ChannelMediaNotSupportedError();
     }
   }
 }

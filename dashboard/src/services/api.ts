@@ -1,6 +1,8 @@
 // API Service Layer for OpenWA Dashboard
 // Centralized API client with TypeScript types
 
+import { warnIfInsecureHttpUrl } from '../utils/urlSecurity';
+
 // Resolve the API base URL. By default this is the same-origin relative path '/api',
 // correct when the dashboard and API are served from the same origin (the default
 // single-container setup). For a split-origin deployment (dashboard hosted separately
@@ -10,7 +12,11 @@
 // same-origin '/api' and a split deployment failed with "Invalid API Key" (#91).
 // Exported so direct fetches (e.g. auth/validate in Login.tsx / App.tsx) honor VITE_API_URL
 // too — otherwise split-origin deployments break. Empty VITE_API_URL → '/api'.
-export const API_BASE_URL = `${(import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')}/api`;
+const API_ORIGIN = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '');
+export const API_BASE_URL = `${API_ORIGIN}/api`;
+// Warn (not refuse — would break dev + TLS-terminating-proxy) when the API origin is an
+// insecure http:// URL pointing at a non-localhost host (API keys sent in cleartext).
+if (API_ORIGIN) warnIfInsecureHttpUrl(API_ORIGIN, 'VITE_API_URL');
 
 // =============================================================================
 // Types
@@ -237,6 +243,7 @@ export interface SavedConfig {
     port: string;
     username: string;
     database: string;
+    schema: string;
     poolSize: number;
     sslEnabled: boolean;
     sslRejectUnauthorized: boolean;
@@ -265,6 +272,7 @@ export interface SaveConfigPayload {
     username?: string;
     password?: string;
     database?: string;
+    schema?: string;
     poolSize?: number;
     sslEnabled?: boolean;
     sslRejectUnauthorized?: boolean;
@@ -301,6 +309,47 @@ export interface Settings {
   general: { apiBaseUrl: string; sessionTimeout: number; autoReconnect: boolean; debugMode: boolean };
   api: { rateLimit: number; rateLimitWindow: number; enableDocs: boolean };
   notifications: { emailEnabled: boolean; notificationEmail: string; webhookAlerts: boolean };
+}
+
+// Global message search (mirrors the backend GET /search contract from #664).
+// `timestamp` is epoch-seconds (the messages column is seconds, not ms); `dateFrom`/`dateTo`
+// are epoch-ms on the wire — see `dateFrom`/`dateTo` JSDoc below.
+export interface SearchParams {
+  q: string;
+  sessionId?: string;
+  chatId?: string;
+  direction?: string;
+  type?: string;
+  from?: string;
+  /** Epoch-ms lower bound (inclusive) — the backend binds against messages.timestamp (/1000). */
+  dateFrom?: number;
+  /** Epoch-ms upper bound (inclusive). */
+  dateTo?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SearchHit {
+  messageId: string;
+  waMessageId: string;
+  sessionId: string;
+  chatId: string;
+  body: string;
+  /** Provider-generated excerpt with `<mark>` highlight markers — render as text, never as HTML. */
+  snippet: string;
+  /** Epoch-seconds (mirrors the persisted messages.timestamp column). */
+  timestamp: number;
+  type: string;
+  direction: string;
+  from: string;
+  score?: number;
+}
+
+export interface SearchResults {
+  hits: SearchHit[];
+  total: number;
+  tookMs: number;
+  provider: string;
 }
 
 // =============================================================================
@@ -598,6 +647,20 @@ export const messageApi = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+};
+
+// =============================================================================
+// Search API
+// =============================================================================
+
+export const searchApi = {
+  search: (params: SearchParams) => {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') query.set(key, String(value));
+    });
+    return request<SearchResults>(`/search?${query.toString()}`);
+  },
 };
 
 // =============================================================================
