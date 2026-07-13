@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+
+## [0.8.17] - 2026-07-13
+
+### Added
+
 - **`AuditAction` emit-coverage gate.** A structural test now fails the build when an `AuditAction`
   enum value is neither emitted at a real call site nor registered (with a reason) in a new
   intentionally-unemitted registry. A declared audit event can no longer silently exist with no
