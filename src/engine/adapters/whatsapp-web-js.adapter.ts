@@ -64,7 +64,7 @@ import {
   isMediaDownloadEnabled,
   withInboundDownloadTimeout,
 } from './inbound-media-cap';
-import { ConcurrencyLimiter } from './concurrency-limiter';
+import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
 
 /**
  * Map a whatsapp-web.js MessageAck integer to the neutral DeliveryStatus.
@@ -141,6 +141,18 @@ export function buildProxyLaunchConfig(url: string): ProxyLaunchConfig {
  */
 export function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
+}
+
+/**
+ * Detect Puppeteer's "Execution context was destroyed" error. During `Client.inject()` this is most
+ * often a persistent browser profile left stale by an OpenWA upgrade that changed the Chromium/Chrome
+ * binary (e.g. the v0.8.12 amd64 Debian Chromium → Chrome for Testing switch, #663 / #708) — but it is
+ * not exclusively that: Puppeteer also raises it on a page navigation or a renderer crash (see
+ * puppeteer-core `ExecutionContext` / `IsolatedWorld`), so the caller advises rather than asserts.
+ * Pure so the detection is unit-testable without mocking the whatsapp-web.js `Client`.
+ */
+export function isExecutionContextDestroyedError(reason: string): boolean {
+  return /execution context was destroyed/i.test(reason);
 }
 
 /**
@@ -256,7 +268,12 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   private readonly logger = createLogger('WhatsAppWebJsAdapter');
   // Bound concurrent inbound media downloads: downloadMedia() materialises the full base64 blob, so an
   // unbounded burst could stack many multi-MB allocations.
-  private readonly inboundLimiter = new ConcurrencyLimiter(inboundMediaConcurrency());
+  private readonly inboundLimiter = new ConcurrencyLimiter(
+    inboundMediaConcurrency(),
+    // Queue cap == active slots: beyond (active + queued) concurrent media messages, reject instead of
+    // parking, so a burst can't grow heap without bound (each parked closure holds the message).
+    inboundMediaConcurrency(),
+  );
 
   /**
    * Download inbound media safely. downloadMedia() can't be size-bounded at the source, so (1) pre-gate
@@ -317,8 +334,16 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         () => undefined,
       );
     });
-    // The slot-holder runs in the background; never let it surface as an unhandled rejection.
-    void slotHeld.catch(() => undefined);
+    // The slot-holder runs in the background. It only rejects when the limiter's waiter queue is
+    // saturated (queue full) — in which case the download task never ran and boundedReady would hang.
+    // Resolve null so the caller unblocks and emits the message without media, matching the
+    // timeout/byte-cap no-media path. Never let it surface as an unhandled rejection either.
+    void slotHeld.catch(() => {
+      this.logger.warn('Inbound media limiter saturated; emitting message without media', {
+        msgId: msg.id._serialized,
+      });
+      resolveBounded(null);
+    });
     const media = await boundedReady;
     if (!media) return undefined;
     const capped = capInboundMedia({
@@ -418,6 +443,24 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     } catch (error) {
       this.setStatus(EngineStatus.FAILED);
       const reason = error instanceof Error ? error.message : String(error);
+      if (isExecutionContextDestroyedError(reason)) {
+        // #708: Puppeteer's "Execution context was destroyed" during inject reads like a Puppeteer bug.
+        // During initialize() its dominant cause is a browser profile left stale by an upgrade that
+        // changed the Chromium/Chrome binary (e.g. v0.8.12 amd64: Debian Chromium → Chrome for Testing,
+        // #663) — but it can also follow a page navigation or a renderer crash, so advise, don't assert.
+        // The profile dir is the same one clearLocalAuth() removes on a clean re-pair. Safe to compute
+        // here: sessionDataPath is a required config field already resolved in the try block above, so
+        // this can't throw and mask the original error we are about to rethrow.
+        this.logger.warn(
+          `"${reason}" during initialize. If this followed an OpenWA upgrade that changed the ` +
+            `Chromium/Chrome binary (v0.8.12 amd64 switched Debian Chromium → Chrome for Testing), the ` +
+            `session's browser profile is likely stale — delete the profile dir ` +
+            `"${path.join(path.resolve(this.config.sessionDataPath), `session-${this.config.sessionId}`)}" ` +
+            `and start again to re-scan. If no upgrade happened, Puppeteer also raises this on a page ` +
+            `navigation or renderer crash (check for memory pressure or a WhatsApp Web reload). ` +
+            `See docs/12-troubleshooting-faq.md.`,
+        );
+      }
       this.callbacks.onError?.(reason);
       throw error;
     }
@@ -1688,38 +1731,125 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async getContactStatuses(): Promise<Status[]> {
     this.ensureReady();
-    // whatsapp-web.js has limited Status API support
-    // This is a stub that can be enhanced when the library adds support
-    this.logger.warn('getContactStatuses not fully implemented in whatsapp-web.js');
-    return [];
+    return this.collectStatuses(await this.client!.getBroadcasts());
   }
 
-  async getContactStatus(_contactId: string): Promise<Status[]> {
+  async getContactStatus(contactId: string): Promise<Status[]> {
     this.ensureReady();
-    this.logger.warn('getContactStatus not fully implemented in whatsapp-web.js');
-    return [];
+    // A contact with no active 24h story resolves to an "empty" Broadcast (id/msgs/getContact
+    // undefined — Broadcast._patch only runs when data is truthy). That is the common case, so guard
+    // it: return [] rather than dereferencing undefined inside collectStatuses (→ 500).
+    const broadcast = await this.client!.getBroadcastById(contactId);
+    return broadcast?.msgs?.length ? this.collectStatuses([broadcast]) : [];
   }
 
-  async postTextStatus(_text: string, _options?: StatusPostOptions): Promise<StatusResult> {
-    this.ensureReady();
-    // whatsapp-web.js doesn't have native status posting
-    // This would require using the underlying WhatsApp Web API directly
-    throw new EngineNotSupportedError('postTextStatus (Baileys-only; wwebjs blocked upstream, see #455)');
+  /**
+   * Map whatsapp-web.js story Broadcasts (+ their Messages) into the neutral Status shape. Each
+   * Broadcast is one contact's story (its `msgs`); we flatten across broadcasts. type collapses to
+   * the Status union (image/video, else text — audio/other stories are rare and become 'text').
+   * expiresAt is timestamp + 24h (WhatsApp status TTL). Broadcasts without msgs are skipped (a story
+   * that expired between getBroadcasts and here, or a phantom entry).
+   */
+  private async collectStatuses(
+    broadcasts: ReadonlyArray<{
+      msgs?: Message[];
+      getContact: () => Promise<{ id: { _serialized: string }; name?: string; pushname?: string }>;
+    }>,
+  ): Promise<Status[]> {
+    const statuses: Status[] = [];
+    for (const broadcast of broadcasts) {
+      if (!broadcast?.msgs?.length) {
+        continue;
+      }
+      const contact = await broadcast.getContact();
+      const contactSummary = {
+        id: contact.id._serialized,
+        ...(contact.name ? { name: contact.name } : {}),
+        ...(contact.pushname ? { pushName: contact.pushname } : {}),
+      };
+      for (const msg of broadcast.msgs) {
+        const ts = new Date(msg.timestamp * 1000);
+        statuses.push({
+          id: msg.id._serialized,
+          contact: contactSummary,
+          type: msg.type === MessageTypes.IMAGE ? 'image' : msg.type === MessageTypes.VIDEO ? 'video' : 'text',
+          ...(msg.body ? { caption: msg.body } : {}),
+          timestamp: ts,
+          expiresAt: new Date(ts.getTime() + 24 * 3_600_000),
+        });
+      }
+    }
+    return statuses;
   }
 
-  async postImageStatus(_media: MediaInput, _options?: StatusPostOptions): Promise<StatusResult> {
+  private warnedStatusRecipients = false;
+
+  async postTextStatus(text: string, options: StatusPostOptions): Promise<StatusResult> {
     this.ensureReady();
-    throw new EngineNotSupportedError('postImageStatus (Baileys-only; wwebjs blocked upstream, see #455)');
+    this.warnStatusRecipientsOnce(options);
+    // whatsapp-web.js posts a text status by messaging status@broadcast with styling in `extra`
+    // (Client.js maps options.extra → page extraOptions → sendStatusTextMsgAction in Utils.js).
+    // backgroundColor is a #RRGGBB hex; font is the fontStyle index 0-7.
+    const msg = await this.client!.sendMessage('status@broadcast', text, {
+      extra: {
+        ...(options.backgroundColor !== undefined ? { backgroundColor: options.backgroundColor } : {}),
+        ...(options.font !== undefined ? { fontStyle: options.font } : {}),
+      },
+    });
+    return this.toStatusResult(msg);
   }
 
-  async postVideoStatus(_media: MediaInput, _options?: StatusPostOptions): Promise<StatusResult> {
-    this.ensureReady();
-    throw new EngineNotSupportedError('postVideoStatus (Baileys-only; wwebjs blocked upstream, see #455)');
+  async postImageStatus(media: MediaInput, options: StatusPostOptions): Promise<StatusResult> {
+    return this.postMediaStatus(media, options);
   }
 
-  async deleteStatus(_statusId: string): Promise<void> {
+  async postVideoStatus(media: MediaInput, options: StatusPostOptions): Promise<StatusResult> {
+    return this.postMediaStatus(media, options);
+  }
+
+  private async postMediaStatus(media: MediaInput, options: StatusPostOptions): Promise<StatusResult> {
     this.ensureReady();
-    throw new EngineNotSupportedError('deleteStatus');
+    this.warnStatusRecipientsOnce(options);
+    const messageMedia = await this.toStatusMessageMedia(media);
+    const msg = await this.client!.sendMessage('status@broadcast', messageMedia, {
+      ...(options.caption !== undefined ? { caption: options.caption } : {}),
+    });
+    return this.toStatusResult(msg);
+  }
+
+  /** Build a MessageMedia from a MediaInput (URL → fetched, base64/Buffer → wrapped). */
+  private async toStatusMessageMedia(media: MediaInput): Promise<MessageMedia> {
+    if (typeof media.data === 'string') {
+      if (isHttpUrl(media.data)) return loadRemoteMedia(media.data);
+      return new MessageMedia(media.mimetype, media.data, media.filename);
+    }
+    return new MessageMedia(media.mimetype, media.data.toString('base64'), media.filename);
+  }
+
+  private toStatusResult(msg: Message | undefined): StatusResult {
+    const ts = msg?.timestamp ? new Date(msg.timestamp * 1000) : new Date();
+    return {
+      statusId: msg?.id?._serialized ?? '',
+      timestamp: ts,
+      expiresAt: new Date(ts.getTime() + 24 * 3_600_000),
+    };
+  }
+
+  private warnStatusRecipientsOnce(options: StatusPostOptions): void {
+    if (this.warnedStatusRecipients || !options.recipients?.length) return;
+    this.warnedStatusRecipients = true;
+    this.logger.warn(
+      "postStatus on the whatsapp-web.js engine broadcasts to the account's status-privacy audience; " +
+        'the recipients allow-list is not honored by whatsapp-web.js (it is on the Baileys engine).',
+    );
+  }
+
+  async deleteStatus(statusId: string): Promise<void> {
+    this.ensureReady();
+    // Revokes the caller's own status post. revokeStatusMessage resolves the message by id and
+    // throws if it isn't fromMe/isn't a status — the statusId returned by postText/Image/VideoStatus
+    // (msg.id._serialized) is the id it expects.
+    await this.client!.revokeStatusMessage(statusId);
   }
 
   // ========== Catalog (Phase 3) ==========

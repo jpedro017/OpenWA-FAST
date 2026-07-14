@@ -38,6 +38,12 @@ class FakeSock extends EventEmitter {
   public updateBlockStatus = jest.fn().mockResolvedValue(undefined);
   public readMessages = jest.fn().mockResolvedValue(undefined);
   public chatModify = jest.fn().mockResolvedValue(undefined);
+  public addChatLabel = jest.fn().mockResolvedValue(undefined);
+  public removeChatLabel = jest.fn().mockResolvedValue(undefined);
+  public newsletterMetadata = jest.fn();
+  public newsletterFollow = jest.fn().mockResolvedValue(undefined);
+  public newsletterUnfollow = jest.fn().mockResolvedValue(undefined);
+  public signalRepository: { lidMapping: { getLIDForPN: jest.Mock } } | undefined;
   fire(event: string, arg: unknown): void {
     this.emitter.emit(event, arg);
   }
@@ -57,6 +63,9 @@ jest.mock('@whiskeysockets/baileys', () => ({
   }),
   useMultiFileAuthState: jest.fn().mockResolvedValue({ state: { creds: {}, keys: {} }, saveCreds }),
   fetchLatestBaileysVersion: jest.fn().mockResolvedValue({ version: [2, 3000, 0] }),
+  // Identity passthrough — the adapter wraps state.keys with this for session-store caching; tests
+  // don't exercise the caching behavior itself, just need the real store object to flow through.
+  makeCacheableSignalKeyStore: jest.fn((store: unknown) => store),
   getContentType: jest.fn(() => 'conversation'),
   // The adapter now downloads via 'stream' mode, so resolve to an async-iterable of chunks (factory is
   // hoisted above imports, so this stays inline; tests override with the `streamOf` helper below).
@@ -84,6 +93,7 @@ import { BaileysAdapter } from './baileys.adapter';
 import { EngineStatus, EngineEventCallbacks } from '../interfaces/whatsapp-engine.interface';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
+import { ChannelNotFoundError } from '../../common/errors/channel-not-found.error';
 import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
 
 const fakeStore = {
@@ -102,8 +112,15 @@ function streamOf(...chunks: Buffer[]): AsyncIterable<Buffer> & { destroy: () =>
     destroy: jest.fn(),
   };
 }
+// sessionId (name) and dbSessionId (Session.id UUID) are deliberately distinct here so assertions
+// below prove auth-dir/logging use the name while messageStore (FK-bound) uses the UUID.
 const newAdapter = (): BaileysAdapter =>
-  new BaileysAdapter({ sessionId: 'sess-1', authDir: './data/baileys', messageStore: fakeStore });
+  new BaileysAdapter({
+    sessionId: 'sess-1',
+    dbSessionId: 'db-uuid-1',
+    authDir: './data/baileys',
+    messageStore: fakeStore,
+  });
 
 const noopCallbacks = (over: Partial<EngineEventCallbacks> = {}): EngineEventCallbacks => over;
 
@@ -562,6 +579,7 @@ describe('BaileysAdapter location + contact + poll sends', () => {
 describe('BaileysAdapter messaging', () => {
   beforeEach(() => {
     fakeSock.user = { id: '628999:1@s.whatsapp.net', name: 'Me' };
+    fakeSock.signalRepository = undefined;
     fakeSock.resetEmitter();
     jest.clearAllMocks();
   });
@@ -608,6 +626,23 @@ describe('BaileysAdapter messaging', () => {
     await new Promise(resolve => setImmediate(resolve));
 
     expect(onMessageCreate).not.toHaveBeenCalled();
+  });
+
+  it('sendTextMessage resolves a phone-dialect 1:1 id to the known LID (463 tctoken fix)', async () => {
+    fakeSock.sendMessage.mockResolvedValue({ key: { id: 'OUT1' }, messageTimestamp: 1700000001 });
+    fakeSock.signalRepository = { lidMapping: { getLIDForPN: jest.fn().mockResolvedValue('484848@lid') } };
+    const adapter = await readyAdapter();
+    await adapter.sendTextMessage('628111@c.us', 'hello');
+    expect(fakeSock.signalRepository.lidMapping.getLIDForPN).toHaveBeenCalledWith('628111@s.whatsapp.net');
+    expect(fakeSock.sendMessage).toHaveBeenCalledWith('484848@lid', { text: 'hello' });
+  });
+
+  it('sendTextMessage keeps the phone jid when no LID mapping is known', async () => {
+    fakeSock.sendMessage.mockResolvedValue({ key: { id: 'OUT1' }, messageTimestamp: 1700000001 });
+    fakeSock.signalRepository = { lidMapping: { getLIDForPN: jest.fn().mockResolvedValue(null) } };
+    const adapter = await readyAdapter();
+    await adapter.sendTextMessage('628111@c.us', 'hello');
+    expect(fakeSock.sendMessage).toHaveBeenCalledWith('628111@c.us', { text: 'hello' });
   });
 
   it('sendTextMessage honors the chat disappearing timer when one is cached (#473)', async () => {
@@ -866,8 +901,8 @@ describe('BaileysAdapter inbound fan-out', () => {
     const onMessage = jest.fn();
     const adapter = newAdapter();
     await adapter.initialize({ onMessage });
-    // No history-sync mapping this time; the inbound key itself carries senderLid + senderPn,
-    // which is the only place a fresh @lid sender's number is revealed in baileys@6.7.23.
+    // No history-sync mapping this time; the inbound key itself carries remoteJid + remoteJidAlt,
+    // which is the only place a fresh @lid sender's number is revealed on the key in baileys v7.
     fakeSock.fire('messages.upsert', {
       type: 'notify',
       messages: [
@@ -876,8 +911,7 @@ describe('BaileysAdapter inbound fan-out', () => {
             remoteJid: '111@lid',
             fromMe: false,
             id: 'IN_LID_KEY',
-            senderLid: '111@lid',
-            senderPn: '628111@s.whatsapp.net',
+            remoteJidAlt: '628111@s.whatsapp.net',
           },
           message: { conversation: 'hi from lid' },
           messageTimestamp: 1700000005,
@@ -887,7 +921,7 @@ describe('BaileysAdapter inbound fan-out', () => {
     await new Promise(r => setImmediate(r));
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const msg = onMessage.mock.calls[0][0] as { from: string; isLidSender?: boolean };
-    expect(msg.from).toBe('628111@c.us'); // resolved from the key's senderPn, neutral dialect
+    expect(msg.from).toBe('628111@c.us'); // resolved from the key's remoteJidAlt, neutral dialect
     expect(msg.isLidSender).toBe(true);
   });
 
@@ -933,17 +967,69 @@ describe('BaileysAdapter inbound fan-out', () => {
     expect(onMessage).not.toHaveBeenCalled();
   });
 
-  it('ignores append (history) upserts', async () => {
+  it('ignores an append upsert with no/old timestamp (real history backfill)', async () => {
     const onMessage = jest.fn();
     const adapter = newAdapter();
     await adapter.initialize({ onMessage });
+    fakeSock.fire('connection.update', { connection: 'open' }); // sets connectedAt
     fakeSock.fire('messages.upsert', {
       type: 'append',
       messages: [
-        { key: { remoteJid: '628111@s.whatsapp.net', fromMe: false, id: 'OLD' }, message: { conversation: 'old' } },
+        {
+          key: { remoteJid: '628111@s.whatsapp.net', fromMe: false, id: 'OLD' },
+          message: { conversation: 'old' },
+          messageTimestamp: Math.floor(Date.now() / 1000) - 3600, // an hour before connectedAt
+        },
       ],
     });
     expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('still processes an append upsert timestamped after this connection opened (reconnect edge case, #703)', async () => {
+    // Baileys can tag a genuinely new message 'append' when it arrives in the same window as a
+    // reconnect's state-sync handshake; only the message's own timestamp vs. connectedAt should
+    // decide history vs. live, not the batch's type tag.
+    const onMessage = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessage });
+    fakeSock.fire('connection.update', { connection: 'open' }); // sets connectedAt
+    fakeSock.fire('messages.upsert', {
+      type: 'append',
+      messages: [
+        {
+          key: { remoteJid: '628111@s.whatsapp.net', fromMe: false, id: 'FRESH' },
+          message: { conversation: 'hi right after reconnect' },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ],
+    });
+    await new Promise(r => setImmediate(r));
+    expect(onMessage).toHaveBeenCalled();
+  });
+
+  it('does not double-fire onMessageCreate for a recent append echo of our own send', async () => {
+    // Baileys echoes our own just-sent messages back through messages.upsert tagged 'append' too.
+    // sendContent() already emits onMessageCreate for those via emitOwnSendEcho() (not exercised by
+    // this fakeSock harness) — the recency override must stay scoped to fromMe !== true so this
+    // path doesn't ALSO fire onMessageCreate a second time for the same send.
+    const onMessage = jest.fn();
+    const onMessageCreate = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessage, onMessageCreate });
+    fakeSock.fire('connection.update', { connection: 'open' }); // sets connectedAt
+    fakeSock.fire('messages.upsert', {
+      type: 'append',
+      messages: [
+        {
+          key: { remoteJid: '628111@s.whatsapp.net', fromMe: true, id: 'OWN_ECHO' },
+          message: { conversation: 'sent by us' },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ],
+    });
+    await new Promise(r => setImmediate(r));
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(onMessageCreate).not.toHaveBeenCalled();
   });
 
   it('emits onMessageAck from messages.update with a neutral status', async () => {
@@ -1595,7 +1681,7 @@ describe('BaileysAdapter store-backed ops', () => {
     fakeStore.getMessage.mockResolvedValue(stored);
     const adapter = await ready();
     await adapter.replyToMessage('628111@s.whatsapp.net', 'TARGET', 'my reply');
-    expect(fakeStore.getMessage).toHaveBeenCalledWith('sess-1', 'TARGET');
+    expect(fakeStore.getMessage).toHaveBeenCalledWith('db-uuid-1', 'TARGET');
     expect(fakeSock.sendMessage).toHaveBeenCalledWith(
       '628111@s.whatsapp.net',
       { text: 'my reply' },
@@ -1667,9 +1753,85 @@ describe('BaileysAdapter store-backed ops', () => {
     await expect(adapter.replyToMessage('c', 'GONE', 'x')).rejects.toThrow(/not found/i);
   });
 
-  it('deleteMessage for-me (forEveryone=false) is not supported', async () => {
+  it('deleteMessage for-me (forEveryone=false) deletes via chatModify({ deleteForMe })', async () => {
+    fakeStore.getMessage.mockResolvedValue({ ...stored, messageTimestamp: 1700000007 });
     const adapter = await ready();
-    await expect(adapter.deleteMessage('c', 'TARGET', false)).rejects.toBeInstanceOf(EngineNotSupportedError);
+    await adapter.deleteMessage('628111@s.whatsapp.net', 'TARGET', false);
+    expect(fakeSock.chatModify).toHaveBeenCalledWith(
+      { deleteForMe: { deleteMedia: true, key: stored.key, timestamp: 1700000007 } },
+      '628111@s.whatsapp.net',
+    );
+    expect(fakeSock.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('addLabelToChat wires 1:1 to sock.addChatLabel(chatId, labelId)', async () => {
+    const adapter = await ready();
+    await adapter.addLabelToChat('628111@s.whatsapp.net', 'LABEL8');
+    expect(fakeSock.addChatLabel).toHaveBeenCalledWith('628111@s.whatsapp.net', 'LABEL8');
+  });
+
+  it('removeLabelFromChat wires 1:1 to sock.removeChatLabel(chatId, labelId)', async () => {
+    const adapter = await ready();
+    await adapter.removeLabelFromChat('628111@s.whatsapp.net', 'LABEL8');
+    expect(fakeSock.removeChatLabel).toHaveBeenCalledWith('628111@s.whatsapp.net', 'LABEL8');
+  });
+
+  it('getChannelById maps newsletterMetadata(jid) → Channel (optionals only when present)', async () => {
+    fakeSock.newsletterMetadata.mockResolvedValue({
+      id: '120363N@newsletter',
+      name: 'Announcements',
+      description: 'News',
+      invite: 'ABC123',
+      subscribers: 421,
+      picture: { url: 'https://x/p.png' },
+      verification: 'VERIFIED',
+      creation_time: 1700000000,
+    });
+    const adapter = await ready();
+    const channel = await adapter.getChannelById('120363N@newsletter');
+    expect(fakeSock.newsletterMetadata).toHaveBeenCalledWith('jid', '120363N@newsletter');
+    expect(channel).toEqual({
+      id: '120363N@newsletter',
+      name: 'Announcements',
+      description: 'News',
+      inviteCode: 'ABC123',
+      subscriberCount: 421,
+      picture: 'https://x/p.png',
+      verified: true,
+      createdAt: 1700000000,
+    });
+  });
+
+  it('getChannelById returns null when newsletterMetadata resolves null', async () => {
+    fakeSock.newsletterMetadata.mockResolvedValue(null);
+    const adapter = await ready();
+    expect(await adapter.getChannelById('unknown@newsletter')).toBeNull();
+  });
+
+  it('subscribeToChannel resolves invite→jid via newsletterMetadata then follows', async () => {
+    fakeSock.newsletterMetadata.mockResolvedValue({ id: '120363S@newsletter', name: 'Solo', invite: 'CODE1' });
+    const adapter = await ready();
+    const channel = await adapter.subscribeToChannel('CODE1');
+    expect(fakeSock.newsletterMetadata).toHaveBeenCalledWith('invite', 'CODE1');
+    expect(fakeSock.newsletterFollow).toHaveBeenCalledWith('120363S@newsletter');
+    expect(channel).toEqual({ id: '120363S@newsletter', name: 'Solo', inviteCode: 'CODE1' });
+  });
+
+  it('subscribeToChannel throws ChannelNotFoundError when the invite resolves null', async () => {
+    fakeSock.newsletterMetadata.mockResolvedValue(null);
+    const adapter = await ready();
+    await expect(adapter.subscribeToChannel('BADCODE')).rejects.toBeInstanceOf(ChannelNotFoundError);
+  });
+
+  it('unsubscribeFromChannel wires 1:1 to sock.newsletterUnfollow(channelId)', async () => {
+    const adapter = await ready();
+    await adapter.unsubscribeFromChannel('120363U@newsletter');
+    expect(fakeSock.newsletterUnfollow).toHaveBeenCalledWith('120363U@newsletter');
+  });
+
+  it('getChannelMessages remains unsupported (raw BinaryNode — no library parser)', async () => {
+    const adapter = await ready();
+    await expect(adapter.getChannelMessages('120363M@newsletter', 10)).rejects.toBeInstanceOf(EngineNotSupportedError);
   });
 
   it('populates the store on an inbound message', async () => {
@@ -1684,7 +1846,7 @@ describe('BaileysAdapter store-backed ops', () => {
     await new Promise(r => setImmediate(r));
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const inboundMatcher = expect.objectContaining({ key: expect.objectContaining({ id: 'IN9' }) });
-    expect(fakeStore.put).toHaveBeenCalledWith('sess-1', inboundMatcher);
+    expect(fakeStore.put).toHaveBeenCalledWith('db-uuid-1', inboundMatcher);
   });
 
   it('populates the store on an outgoing send', async () => {
@@ -1692,13 +1854,13 @@ describe('BaileysAdapter store-backed ops', () => {
     await adapter.sendTextMessage('628111@s.whatsapp.net', 'hello');
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const outboundMatcher = expect.objectContaining({ key: expect.objectContaining({ id: 'OUT' }) });
-    expect(fakeStore.put).toHaveBeenCalledWith('sess-1', outboundMatcher);
+    expect(fakeStore.put).toHaveBeenCalledWith('db-uuid-1', outboundMatcher);
   });
 
   it('clears the store on logout', async () => {
     const adapter = await ready();
     await adapter.logout();
-    expect(fakeStore.clearSession).toHaveBeenCalledWith('sess-1');
+    expect(fakeStore.clearSession).toHaveBeenCalledWith('db-uuid-1');
   });
 });
 

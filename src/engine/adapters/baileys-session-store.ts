@@ -3,19 +3,6 @@ import { ChatSummary, Contact } from '../interfaces/whatsapp-engine.interface';
 import { parseWaId, toNeutralJid as canonicalizeWaId, userPart } from '../identity/wa-id';
 import type { LidMappingStore } from '../identity/lid-mapping-store.service';
 
-/**
- * Baileys `Contact` does not include a `phoneNumber` field, but WhatsApp Business events may supply
- * the resolved phone JID alongside the lid-based id. We extend the input type locally so callers can
- * pass `phoneNumber` when available (e.g. from `contacts.upsert` payloads that carry lid+pn pairs).
- *
- * `jid` is declared locally as well: it carries the contact's phone `@s.whatsapp.net` on
- * `@whiskeysockets/baileys` 6.7.x, but the field was dropped from `Contact` in 6.17.x. Declaring it
- * here (optional) keeps the `merged.jid` phone fallback type-safe across both engine versions — the
- * value is read at runtime on 6.7.x and is simply `undefined` (harmlessly skipped) on newer Baileys,
- * instead of becoming an `error`-typed access that trips the type-aware `no-unsafe-*` lint rules.
- */
-type BaileysContactWithPhone = BaileysContact & { phoneNumber?: string; jid?: string };
-
 interface LastMessage {
   key: WAMessageKey;
   timestamp: number;
@@ -28,7 +15,7 @@ interface LastMessage {
  * each connect) and is mapped to the neutral `Contact`/`ChatSummary` on read. Holds no socket — pure data.
  */
 export class BaileysSessionStore {
-  private readonly contacts = new Map<string, BaileysContactWithPhone>();
+  private readonly contacts = new Map<string, BaileysContact>();
   private readonly chats = new Map<string, Chat>();
   private readonly lastMessages = new Map<string, LastMessage>();
   private readonly lidToPn = new Map<string, string>();
@@ -52,18 +39,18 @@ export class BaileysSessionStore {
     private readonly sessionId?: string,
   ) {}
 
-  upsertContacts(records: Partial<BaileysContactWithPhone>[] = []): void {
+  upsertContacts(records: Partial<BaileysContact>[] = []): void {
     for (const r of records) {
       if (!r.id) {
         continue;
       }
       const existing = this.contacts.get(r.id) ?? { id: r.id };
-      const merged: BaileysContactWithPhone = { ...existing, ...r };
+      const merged: BaileysContact = { ...existing, ...r };
       this.contacts.set(r.id, merged);
       // Capture a lid->phone pair from the merged record (lid + phone can arrive in separate updates).
-      // The phone is `jid` on a Baileys Contact (`@s.whatsapp.net`); `phoneNumber` only appears on the
-      // WhatsApp Business event shape we extend in locally.
-      const phone = merged.phoneNumber ?? merged.jid;
+      // `phoneNumber` is the authoritative PN field; fall back to `id` itself only when it's already
+      // in the phone dialect (a lid-only contact's `id` is `<lid>@lid`, which is not a usable phone).
+      const phone = merged.phoneNumber ?? (merged.id.endsWith('@s.whatsapp.net') ? merged.id : undefined);
       if (merged.lid && phone) {
         this.lidToPn.set(merged.lid, phone);
         this.persistLidMapping(merged.lid, phone);
@@ -91,18 +78,32 @@ export class BaileysSessionStore {
   }
 
   /**
-   * Learn lid->pn mappings from an inbound message key (#362). Baileys attaches the sender's phone JID
-   * (`senderPn` / `participantPn`) next to its privacy id (`senderLid` / `participantLid`) on the message
-   * key — the only place a fresh `@lid` sender's number is revealed in @whiskeysockets/baileys@6.7.23
-   * (there is no `getPNForLID` lookup and `contacts.*` / `messaging-history.set` don't fire for it). This
-   * lets `resolvePhone` (senderPhone, `GET /contacts/:id/phone`) and lid canonicalization succeed. The
+   * Learn lid->pn mappings from an inbound message key (#362). Baileys v7 replaced the 6.7.x
+   * `senderLid`/`senderPn`/`participantLid`/`participantPn` fields with `remoteJidAlt` (DM) and
+   * `participantAlt` (group) — the "Alt" is always the other dialect of the same field
+   * (`remoteJid`/`participant`): if one side is `@lid`, the Alt is the phone JID, and vice versa. This
+   * is still the only place a fresh `@lid` sender's number is revealed on the message key itself; the
    * pairs flow through addLidMappings, so they also write through to the persistent table.
    */
-  recordKeyLidMappings(key: Pick<WAMessageKey, 'senderLid' | 'senderPn' | 'participantLid' | 'participantPn'>): void {
+  recordKeyLidMappings(key: Pick<WAMessageKey, 'remoteJid' | 'remoteJidAlt' | 'participant' | 'participantAlt'>): void {
     this.addLidMappings([
-      { lid: key.senderLid ?? undefined, pn: key.senderPn ?? undefined },
-      { lid: key.participantLid ?? undefined, pn: key.participantPn ?? undefined },
+      this.lidPnPair(key.remoteJid, key.remoteJidAlt),
+      this.lidPnPair(key.participant, key.participantAlt),
     ]);
+  }
+
+  /** Sorts a JID and its WhatsApp-supplied "Alt" counterpart into { lid, pn } by @lid suffix. */
+  private lidPnPair(jid?: string | null, alt?: string | null): { lid?: string; pn?: string } {
+    if (!jid || !alt) {
+      return {};
+    }
+    if (jid.endsWith('@lid')) {
+      return { lid: jid, pn: alt };
+    }
+    if (alt.endsWith('@lid')) {
+      return { lid: alt, pn: jid };
+    }
+    return {};
   }
 
   /** Write a learned lid->phone pair through to the persistent table (bare digits, fire-and-forget). */
@@ -272,7 +273,7 @@ export class BaileysSessionStore {
     return parsed.kind === 'user' ? `${parsed.userPart}@s.whatsapp.net` : jid;
   }
 
-  private toNeutralContact(c: BaileysContactWithPhone): Contact {
+  private toNeutralContact(c: BaileysContact): Contact {
     const number = c.phoneNumber ? userPart(c.phoneNumber) : c.id.endsWith('@s.whatsapp.net') ? userPart(c.id) : '';
     return {
       id: this.toNeutralJid(c.id),
@@ -286,11 +287,15 @@ export class BaileysSessionStore {
   }
 
   private toNeutralChat(c: Chat): ChatSummary {
-    const last = this.lastMessages.get(c.id);
+    // Chat.id is nullable on Baileys' own type (it's the raw proto.IConversation field), but
+    // upsertChats() only ever stores a record under a truthy r.id, so every value in `this.chats`
+    // is provably keyed by a real id.
+    const id = c.id!;
+    const last = this.lastMessages.get(id);
     return {
-      id: this.toNeutralJid(c.id),
-      name: c.name ?? this.resolveContactName(c.id),
-      isGroup: c.id.endsWith('@g.us'),
+      id: this.toNeutralJid(id),
+      name: c.name ?? this.resolveContactName(id),
+      isGroup: id.endsWith('@g.us'),
       unreadCount: c.unreadCount ?? 0,
       timestamp: last?.timestamp ?? this.toUnixSeconds(c.conversationTimestamp),
       lastMessage: last?.text,

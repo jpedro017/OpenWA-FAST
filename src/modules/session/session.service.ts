@@ -20,6 +20,7 @@ import { Template } from '../template/entities/template.entity';
 import { BaileysStoredMessage } from '../../engine/adapters/baileys-stored-message.entity';
 import { CreateSessionDto } from './dto';
 import { EngineFactory } from '../../engine/engine.factory';
+import { resolveAuthTimeoutMs } from '../../engine/adapters/whatsapp-web-js.adapter';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
 import { userPart } from '../../engine/identity/wa-id';
 import { paginate, ListOptions, resolveListWindow } from '../../common/utils/paginate';
@@ -96,6 +97,19 @@ export function resolveMaxConcurrentSessions(configService?: Pick<ConfigService,
   const configured = configService?.get<number>('sessions.maxConcurrent', 0) ?? 0;
   if (!Number.isFinite(configured) || configured <= 0) return null;
   return Math.floor(configured);
+}
+
+/**
+ * Distinguishes a wedged-initialization timeout from a real engine.initialize() rejection. Only the
+ * timeout case is handled inside initializeEngine(); real rejections must propagate untouched so the
+ * caller's catch (start() → FAILED+reason, executeReconnect() → retry) keeps the behavior #600/#631
+ * established. See initializeEngine().
+ */
+export class EngineInitTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`engine.initialize() timed out after ${timeoutMs}ms`);
+    this.name = 'EngineInitTimeoutError';
+  }
 }
 
 @Injectable()
@@ -472,6 +486,12 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       // A fresh start intentionally (re-)creates the engine — clear any stale stop/delete mark.
       this.stoppingSessions.delete(id);
 
+      // Cancel any reconnect timer a prior failed executeReconnect left pending, BEFORE the awaited
+      // session:starting hook and engine init — otherwise the stale timer can fire during that I/O
+      // and destroy/replace the engine this start() is about to create (or orphan the Chromium
+      // process). Idempotent: a no-op when no reconnect state exists (the common fresh-start case).
+      this.cancelReconnect(id);
+
       // Execute hook before starting
       await this.hookManager.execute(
         'session:starting',
@@ -634,6 +654,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
 
     const engine = this.engineFactory.create({
       sessionId: session.name,
+      dbSessionId: id,
       proxyUrl: session.proxyUrl || undefined,
       proxyType: session.proxyType || undefined,
     });
@@ -646,7 +667,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     // initializes, so writing INITIALIZING afterwards would clobber that progress.
     await this.updateStatus(id, SessionStatus.INITIALIZING);
 
-    await engine.initialize({
+    const initPromise = engine.initialize({
       onQRCode: (qr: string): void => {
         if (!this.isLiveEngine(id, engine)) return;
         this.logger.log('QR code generated', {
@@ -1130,6 +1151,62 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         this.evictAndForceDestroy(id, engine);
       },
     });
+
+    // engine.initialize() launches Chromium and navigates to WhatsApp Web with no internal timeout:
+    // whatsapp-web.js calls page.goto(..., { timeout: 0 }) and its web-version-cache fetch has none
+    // either. If the browser stalls under container memory pressure (observed in prod: a session
+    // wedged in INITIALIZING with no error logged and GET /sessions/:id/qr 400ing forever), this
+    // await never settles. Race it against a deadline so a wedged init fails fast instead.
+    //
+    // ONLY the timeout case mutates state here. A REAL rejection (e.g. Chromium can't launch) must
+    // propagate untouched so start()'s catch keeps owning FAILED+reason (the diagnosability #600/#631
+    // added) — pre-deleting the engine and writing DISCONNECTED here would make start()'s
+    // `engines.get(id)` return undefined, skip its FAILED write, and hide the failure reason.
+    // The deadline MUST exceed the auth wait whatsapp-web.js runs INSIDE engine.initialize()
+    // (authTimeoutMs — the inject() poll for WA Web's JS to bootstrap, raisable via
+    // WWEBJS_AUTH_TIMEOUT_MS for slow first boots, e.g. WSL2/low-resource containers). A shorter
+    // outer deadline would SIGKILL a legitimate slow init mid-auth. Floor 60s for the hang case;
+    // otherwise give the configured auth window + 30s for launch/navigation/post-inject overhead.
+    const engineInitTimeoutMs = Math.max(60_000, (resolveAuthTimeoutMs() ?? 30_000) + 30_000);
+    // Promise.race can't cancel the losing promise, so swallow a late rejection from initPromise.
+    initPromise.catch(() => undefined);
+
+    let initTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        initPromise,
+        new Promise<never>((_, reject) => {
+          initTimer = setTimeout(() => reject(new EngineInitTimeoutError(engineInitTimeoutMs)), engineInitTimeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      if (err instanceof EngineInitTimeoutError) {
+        this.logger.error(`Engine initialization timed out for session ${session.name}`, undefined, {
+          sessionId: id,
+          action: 'engine_init_timeout',
+        });
+        this.sessionErrors.set(id, err.message);
+        // Evict from the map BEFORE tearing down. forceDestroy() → beginClientTeardown → setStatus
+        // fires onStateChanged SYNCHRONOUSLY while the engine is still live, so isLiveEngine would
+        // pass and the callback would run a redundant DISCONNECTED write against this path; removing
+        // the engine first makes isLiveEngine return false. Unlike delete()/stop()/forceKill(), this
+        // path has no stoppingSessions + cancelReconnect wrap to fall back on. Matches the canonical
+        // delete-before-teardown at evictAndForceDestroy() and start()'s catch.
+        //
+        // Do NOT port this reorder to delete()/stop()/forceKill(): there, engines.has(id) staying
+        // TRUE for the duration of the teardown await is the sole deterministic block on a concurrent
+        // start() (start() clears stoppingSessions rather than rejecting on it), so delete-first would
+        // open a start()-during-teardown orphan-engine window. Verified in the teardown-ordering audit.
+        this.engines.delete(id);
+        // Force-kill whatever got launched so a retry doesn't collide with an orphaned browser.
+        // teardownEngineSafely is itself time-bound, so this can't wedge a second time.
+        await this.teardownEngineSafely(id, engine, e => e.forceDestroy(), 'force-destroy');
+        await this.updateStatus(id, SessionStatus.DISCONNECTED);
+      }
+      throw err;
+    } finally {
+      if (initTimer) clearTimeout(initTimer);
+    }
   }
 
   /**
