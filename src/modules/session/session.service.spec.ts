@@ -1,9 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
-import { NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { NotFoundException, ConflictException, BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SessionService, ACK_RECONCILE_DELAY_MS, EngineInitTimeoutError } from './session.service';
+import { SessionService, ACK_RECONCILE_DELAY_MS } from './session.service';
 import { Session, SessionStatus } from './entities/session.entity';
 import { Message, MessageStatus } from '../message/entities/message.entity';
 import { MessageBatch } from '../message/entities/message-batch.entity';
@@ -420,6 +420,26 @@ describe('SessionService', () => {
       expect(mockEngine.destroy).not.toHaveBeenCalled();
     });
 
+    it('maps a whatsapp-web.js auth timeout (bare string) to HTTP 504, not a bare 500 (#733)', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(createMockSession());
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+      (engineFactory.create as jest.Mock).mockClear().mockReturnValue(mockEngine);
+      // whatsapp-web.js throws the PRIMITIVE STRING 'auth timeout' (not an Error) when its inject poll
+      // for WA Web's login bootstrap times out — e.g. a dead/unreachable proxy (the proxy.example.com
+      // placeholder) blocks the WebSocket so no QR is ever delivered. This must surface as a diagnostic
+      // 504, not escape as a meaningless bare 500.
+      mockEngine.initialize.mockRejectedValueOnce('auth timeout');
+
+      let caught: unknown;
+      try {
+        await service.start('sess-uuid-1');
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(HttpException);
+      expect((caught as HttpException).getStatus()).toBe(HttpStatus.GATEWAY_TIMEOUT);
+    });
+
     it('allows a fresh start after the previous one completed (reservation is cleared)', async () => {
       (repository.findOne as jest.Mock).mockResolvedValue(createMockSession());
       (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
@@ -706,8 +726,12 @@ describe('SessionService', () => {
         await jest.advanceTimersByTimeAsync(60_000);
         await settled;
 
-        expect(caught).toBeInstanceOf(EngineInitTimeoutError);
-        expect(String(caught)).toMatch(/timed out after 60000ms/i);
+        // The outer init-hang deadline now maps to a diagnostic 504 (like the auth-timeout) instead of
+        // escaping as a bare 500 (#733 follow-up). Cleanup (force-destroy + evict + DISCONNECTED) still
+        // runs inside initializeEngine before the mapped error is thrown — asserted below.
+        expect(caught).toBeInstanceOf(HttpException);
+        expect((caught as HttpException).getStatus()).toBe(HttpStatus.GATEWAY_TIMEOUT);
+        expect((caught as HttpException).getResponse() as string).toMatch(/timed out after 60000ms/i);
         expect(mockEngine.forceDestroy).toHaveBeenCalled(); // wedged browser reaped
         expect(intern().engines.has('sess-uuid-1')).toBe(false); // slot freed for retry
         expect(repository.update).toHaveBeenCalledWith('sess-uuid-1', { status: SessionStatus.DISCONNECTED });
@@ -743,8 +767,9 @@ describe('SessionService', () => {
         // Past the derived 150s deadline the race finally fires.
         await jest.advanceTimersByTimeAsync(90_000); // 60s + 90s = 150s
         await settled;
-        expect(caught).toBeInstanceOf(EngineInitTimeoutError);
-        expect(String(caught)).toMatch(/timed out after 150000ms/i);
+        expect(caught).toBeInstanceOf(HttpException);
+        expect((caught as HttpException).getStatus()).toBe(HttpStatus.GATEWAY_TIMEOUT);
+        expect((caught as HttpException).getResponse() as string).toMatch(/timed out after 150000ms/i);
       } finally {
         jest.useRealTimers();
         delete process.env.WWEBJS_AUTH_TIMEOUT_MS;

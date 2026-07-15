@@ -185,17 +185,43 @@ ls -la ./data/.wwebjs_auth/session-{sessionId}/
 | Auth folder corrupted | Delete and rescan |
 | Browser crash | Restart container |
 | Network issues | Check firewall/proxy |
-| WhatsApp blocked | Use proxy |
+| WhatsApp blocked | Set a per-session proxy (`proxyUrl`) |
 
 ```bash
 # Clear auth and restart
 rm -rf ./data/.wwebjs_auth/session-{sessionId}
 docker compose restart openwa
-
-# If using proxy
-export PROXY_URL=http://proxy:8080
-docker compose up -d
 ```
+
+Proxy egress (if WhatsApp is blocked on your network) is configured **per session** via the
+`proxyUrl`/`proxyType` fields on `POST /api/sessions` — it is **not** an environment variable, and an
+unreachable proxy silently blocks the WhatsApp WebSocket (see the *No QR code appears, or `/start`
+returns `504`* entry below).
+
+### Issue: No QR code appears, or `POST /api/sessions/:id/start` returns `504`
+
+**Symptoms:**
+- `POST /api/sessions/:id/start` returns `504 Gateway Timeout`
+  (`WhatsApp Web authentication timed out...`)
+- No QR code is ever produced — `GET /api/sessions/:id/qr` never has one
+- Engine log shows `Session engine failed: auth timeout` after ~30s
+
+**Cause:** The session was created with a `proxyUrl` that doesn't resolve to a real, reachable proxy
+(e.g. the `http://proxy.example.com:8080` placeholder copied from an example). The engine launches
+Chromium pinned to that proxy, the WhatsApp WebSocket can never connect, no QR is produced, and the
+auth poll times out.
+
+**Fix:** Don't set a proxy unless your network actually requires one. Recreate the session without
+`proxyUrl`, or set it to a real, reachable proxy server:
+
+```bash
+# No proxy needed (the common case):
+curl -X POST "$BASE/api/sessions" -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{ "name": "my-bot" }'
+```
+
+> ℹ️ Proxy egress for the `whatsapp-web.js` engine is configured **per session** via the
+> `proxyUrl`/`proxyType` fields on `POST /api/sessions` — not via environment variables.
 
 ### Issue: Session stuck at `authenticating`, never reaches `ready`
 

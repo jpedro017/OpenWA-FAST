@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+- **Send-response semantics clarified (docs only).** The send endpoints' Swagger response and `docs/06` now state explicitly that `201` means the gateway accepted the message for sending — not that the recipient received it — and that WhatsApp does not reject an unregistered recipient synchronously, so a message to a number that is not on WhatsApp still returns `201` with a `messageId` but never delivers. `GET /sessions/{id}/contacts/check/{number}` is cross-referenced as the way to pre-validate a new recipient, and the async message `status` lifecycle (`sent → delivered → read`, or `failed`) as the source of real delivery state. No behavior change. Refs #738.
+
+### Fixed
+
+- **Engine start timeouts now return a diagnostic 504 instead of a bare 500.** Two
+  `POST /api/sessions/:id/start` failure modes previously escaped to NestJS's default handler as a
+  meaningless `500 Internal Server Error`: (1) the **auth-timeout** — whatsapp-web.js throws the
+  primitive string `'auth timeout'` when its login poll exhausts `authTimeoutMs` (default 30s), e.g.
+  an unreachable session proxy means the browser launches but no QR is ever delivered; and (2) the
+  **outer init-hang deadline** (`EngineInitTimeoutError`) — a wedged `initialize()` that never settles
+  within `max(60s, WWEBJS_AUTH_TIMEOUT_MS+30s)`, usually a container memory/resource limit or a stalled
+  Chromium. Both now map to `504 Gateway Timeout` with a diagnostic message (proxy/network vs resource
+  limits respectively) and the `WWEBJS_AUTH_TIMEOUT_MS` knob for slow first boots. Engine cleanup
+  (force-destroy + evict + status) still runs before mapping; generic non-timeout init rejections
+  (e.g. "chromium launch failed") still propagate untouched.
+
+- **S3 storage no longer falls back to local without an `endpoint`.** The S3 client init required an
+  `endpoint`, which only S3-compatible stores (MinIO, R2) need — standard AWS S3 (whose endpoint is
+  derived from region) silently initialized no client and served all media from local disk (#735).
+  `endpoint` and `forcePathStyle` are now applied only when an endpoint is configured, so AWS S3 uses
+  its default virtual-hosted addressing while MinIO-compatible stores keep path-style.
+
+- **`.env.example` no longer ships a default `S3_ENDPOINT`.** The template's pre-filled
+  `http://localhost:9000` silently re-routed a copy-paste AWS S3 config to MinIO/path-style mode and the
+  local fallback; it is now commented out so the default is AWS virtual-hosted mode (#735 follow-up).
+
+- **WhatsApp Engine selection on the Infrastructure page no longer reverts to the running engine.**
+  The engine radio was re-stamped from the live `/engines/current` value on every emission, so a late
+  first resolution (or a window-focus refetch) overwrote an operator's in-progress, unsaved selection
+  (#735). The selection now seeds once and freezes on the first user interaction, matching the
+  one-time hydration lock the other infrastructure fields already had.
+
+- **Message Tester supports uploading local media files.** Media messages could previously only be
+  sent from a URL; a file picker is now available alongside the URL field (mutually exclusive with
+  it), reading the file as base64 (#735). The backend already accepted `base64`; this adds the
+  dashboard UI for it. Uploads are client-capped at 18 MiB (the effective base64-over-JSON body
+  limit) so an oversized pick surfaces a clear error instead of freezing the tab, and switching the
+  message category after picking a file now clears it so stale bytes aren't routed to the wrong
+  endpoint.
+
+### Security
+
+- **Plugin archive extraction hardened against CVE-2026-39244 (adm-zip declared-size zip-bomb OOM).**
+  The `adm-zip` bump to `0.6.0` in #728 brings upstream's fix for CVE-2026-39244: a crafted archive
+  declaring a huge entry size could drive an unbounded `Buffer.alloc` and exhaust memory during
+  extraction. This closes the declared-size allocation vector on the plugin marketplace install path
+  (`src/modules/plugins/plugin-installer.ts`), complementing the project's own `readEntryData()` guard
+  that already caps *decompressed* bytes via zlib `maxOutputLength`. The two adm-zip 0.6.0 behavior
+  changes (`extractEntryTo` subdirectory preservation, non-fatal `utimes`) touch APIs this project does
+  not use. The now-redundant `@types/adm-zip` devDependency is dropped as well — adm-zip 0.6.0 ships its
+  own `types.d.ts`.
 
 ## [0.8.17] - 2026-07-13
 
