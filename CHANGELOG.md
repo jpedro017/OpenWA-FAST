@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-07-18
 
 ### Added
 
@@ -16,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `GET /api/settings` no longer returns the incorrect, always-zero `general.sessionTimeout` field. Clients
-  reading that admin-only field should remove the read; no equivalent session timeout exists.
+- ⚠️ **Breaking:** `GET /api/settings` no longer returns the incorrect, always-zero
+  `general.sessionTimeout` field. Migration: remove reads, destructuring, or schema requirements for that
+  admin-only field; there is no replacement because OpenWA has no equivalent session-timeout setting.
 - Java SDK callers sending audio/voice notes now pass `SendAudioRequest` to `sendAudio`; other media sends
   continue to use `SendMediaRequest`. Bulk media uses the nested `BulkMediaRequest` type.
 - The PHP SDK's configured `timeout` now applies to every request, including calls made through an injected
