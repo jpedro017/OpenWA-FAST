@@ -2771,6 +2771,73 @@ describe('BaileysAdapter call events (call offer) + rejectCall', () => {
     expect(firstCallEvent(onCall).from).toBe('628222@c.us');
   });
 
+  // Baileys folds both the `offer` and `offer_notice` wire tags onto status 'offer' with the same
+  // call-id, so one ringing call can reach the handler more than once.
+  it('emits once per call id even when the same offer arrives repeatedly', async () => {
+    const { onCall } = await readyWithCallEvents();
+
+    fakeSock.fire('call', [offer()]);
+    fakeSock.fire('call', [offer()]);
+    fakeSock.fire('call', [offer()]);
+
+    expect(onCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('deduplicates repeats delivered in a single batch', async () => {
+    const { onCall } = await readyWithCallEvents();
+
+    fakeSock.fire('call', [offer(), offer()]);
+
+    expect(onCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits for a genuinely different call id', async () => {
+    const { onCall } = await readyWithCallEvents();
+
+    fakeSock.fire('call', [offer({ id: 'CALL1' }), offer({ id: 'CALL2' })]);
+
+    expect(onCall).toHaveBeenCalledTimes(2);
+  });
+
+  it('a deduplicated repeat does not evict the live call', async () => {
+    const { adapter } = await readyWithCallEvents();
+
+    fakeSock.fire('call', [offer()]);
+    fakeSock.fire('call', [offer()]);
+
+    await expect(adapter.rejectCall('CALL1')).resolves.toBeUndefined();
+  });
+
+  // Discriminating on the REFRESH specifically: the second offer lands 90s in, so the entry is only
+  // expired at 150s if its expiry was never extended. LIVE_CALL_TTL_MS is 120s.
+  it('a repeat extends the rejectable window from the latest offer, not the first', async () => {
+    const { adapter } = await readyWithCallEvents();
+    jest.useFakeTimers();
+    try {
+      fakeSock.fire('call', [offer()]);
+      jest.advanceTimersByTime(90_000);
+      fakeSock.fire('call', [offer()]);
+      jest.advanceTimersByTime(60_000); // 150s after the first offer, 60s after the second
+
+      await expect(adapter.rejectCall('CALL1')).resolves.toBeUndefined();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('a call still expires when no repeat arrives', async () => {
+    const { adapter } = await readyWithCallEvents();
+    jest.useFakeTimers();
+    try {
+      fakeSock.fire('call', [offer()]);
+      jest.advanceTimersByTime(150_000);
+
+      await expect(adapter.rejectCall('CALL1')).rejects.toBeInstanceOf(CallNotFoundError);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it.each(['ringing', 'preaccept', 'transport', 'relaylatency', 'timeout', 'reject', 'accept', 'terminate'])(
     'skips status %s (lifecycle update, not a new incoming call)',
     async status => {
