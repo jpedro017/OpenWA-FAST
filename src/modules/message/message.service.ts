@@ -2,13 +2,14 @@ import { Injectable, BadRequestException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { QueryDeepPartialEntity } from 'typeorm';
 import { SessionService } from '../session/session.service';
 import { SendTextMessageDto, SendMediaMessageDto, SendAudioMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
-import { assertBase64WithinMediaCap } from './media-cap.util';
+import { assertBase64WithinMediaCap, stripBase64DataUri } from './media-cap.util';
 import { MediaInput, IWhatsAppEngine, MessageResult } from '../../engine/interfaces/whatsapp-engine.interface';
 import { Message, MessageDirection, MessageStatus } from './entities/message.entity';
-import { HookManager } from '../../core/hooks';
+import { HookManager, applySendingGate } from '../../core/hooks';
 import { TemplateService } from '../template/template.service';
 import { renderTemplate } from '../../common/utils/template-render';
 import { createLogger } from '../../common/services/logger.service';
@@ -16,6 +17,7 @@ import { SsrfBlockedError, SSRF_BLOCKED_CLIENT_MESSAGE } from '../../common/secu
 import { userPart } from '../../engine/identity/wa-id';
 import { resolveFeatureFlags } from '../../config/feature-flags';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
+import { isUniqueConstraintError } from '../../common/utils/unique-constraint.util';
 
 export interface GetMessagesOptions {
   chatId?: string;
@@ -91,20 +93,12 @@ export class MessageService {
   /**
    * Run the pre-send `message:sending` plugin gate for one outbound message and return the
    * (possibly plugin-modified) input, or throw BadRequestException if a plugin blocked the send.
-   * Centralised so EVERY public sender — text, media, and extended (location/contact/poll/sticker/
-   * reply/forward) — passes through the same moderation chokepoint, instead of only `sendText`.
+   * Centralised so EVERY public sender — text, media, extended (location/contact/poll/sticker/
+   * reply/forward) and edit — passes through the same moderation chokepoint, instead of only
+   * `sendText`. The implementation is shared with StatusService via core/hooks/sending-gate.
    */
-  private async applySendingGate<T extends object>(sessionId: string, type: string, input: T): Promise<T> {
-    const { continue: shouldContinue, data: hookData } = await this.hookManager.execute(
-      'message:sending',
-      { sessionId, input, type },
-      { sessionId, source: 'MessageService' },
-    );
-    if (!shouldContinue) {
-      throw new BadRequestException('Message sending blocked by plugin');
-    }
-    // Use the potentially plugin-modified input.
-    return (hookData as { input: T }).input;
+  private applySendingGate<T extends object>(sessionId: string, type: string, input: T): Promise<T> {
+    return applySendingGate(this.hookManager, sessionId, type, input, 'MessageService');
   }
 
   /**
@@ -174,7 +168,7 @@ export class MessageService {
       body: finalDto.caption || '',
       type: 'image',
       metadata: {
-        media: { mimetype: finalDto.mimetype, filename: finalDto.filename, data: finalDto.base64 || finalDto.url },
+        media: { mimetype: finalDto.mimetype, filename: finalDto.filename, data: media.data },
       },
     });
 
@@ -198,7 +192,7 @@ export class MessageService {
       body: finalDto.caption || '',
       type: 'video',
       metadata: {
-        media: { mimetype: finalDto.mimetype, filename: finalDto.filename, data: finalDto.base64 || finalDto.url },
+        media: { mimetype: finalDto.mimetype, filename: finalDto.filename, data: media.data },
       },
     });
 
@@ -231,7 +225,7 @@ export class MessageService {
       chatId: finalDto.chatId,
       type: finalDto.ptt ? 'voice' : 'audio',
       metadata: {
-        media: { mimetype: audioDto.mimetype, filename: finalDto.filename, data: finalDto.base64 || finalDto.url },
+        media: { mimetype: audioDto.mimetype, filename: finalDto.filename, data: media.data },
       },
     });
 
@@ -255,7 +249,7 @@ export class MessageService {
       body: finalDto.caption || finalDto.filename || '',
       type: 'document',
       metadata: {
-        media: { mimetype: finalDto.mimetype, filename: finalDto.filename, data: finalDto.base64 || finalDto.url },
+        media: { mimetype: finalDto.mimetype, filename: finalDto.filename, data: media.data },
       },
     });
 
@@ -417,7 +411,7 @@ export class MessageService {
       chatId: finalDto.chatId,
       type: 'sticker',
       metadata: {
-        media: { mimetype: finalDto.mimetype, filename: finalDto.filename, data: finalDto.base64 || finalDto.url },
+        media: { mimetype: finalDto.mimetype, filename: finalDto.filename, data: media.data },
       },
     });
 
@@ -524,7 +518,13 @@ export class MessageService {
     const session = await this.sessionService.findOne(sessionId);
     const message = this.messageRepository.create({
       sessionId,
-      waMessageId: data.waMessageId,
+      // An engine that sent a message but could not read its id back reports an empty id (see the
+      // whatsapp-web.js adapter's `toMessageResult`). Store NULL rather than '': the
+      // (sessionId, waMessageId) unique index is not partial, so a second id-less send in the same
+      // session collides on '' while NULLs stay exempt — and in the bulk path that violation is
+      // swallowed into a warning, losing the row silently. Normalizing at this one chokepoint covers
+      // every caller instead of relying on each to remember.
+      waMessageId: data.waMessageId || undefined,
       chatId: data.chatId,
       from: session?.phone || 'me',
       to: data.chatId,
@@ -565,17 +565,44 @@ export class MessageService {
    * `message:failed`. Log and return success instead.
    */
   private async persistSentState(message: Message, result: MessageResult): Promise<MessageResponseDto> {
-    // A forward whose engine couldn't recover the sent copy's id returns an empty id — leave waMessageId
-    // unset (NULL) so no ack mis-matches it. Every other send path carries a real id.
+    // A send whose engine couldn't read the sent message's id back reports an empty id — a forward that
+    // can't recover the copy, or a WhatsApp Web build that renamed the id field out from under the
+    // engine. Leave waMessageId unset (NULL) so no ack mis-matches it.
     if (result.id) message.waMessageId = result.id;
     message.status = MessageStatus.SENT;
     message.timestamp = result.timestamp;
     try {
       await this.messageRepository.save(message);
     } catch (persistError) {
-      this.logger.warn(`Persisting SENT state failed after a successful send (id=${result.id})`, {
-        error: persistError instanceof Error ? persistError.message : String(persistError),
-      });
+      if (result.id && isUniqueConstraintError(persistError)) {
+        // The engine's own-send echo (onMessageCreate) won the race and already persisted a row with
+        // this waMessageId. That row carries only a media-less marker — merge our SENT state AND our
+        // metadata (the actual media payload) onto it BEFORE dropping this redundant PENDING row, or
+        // the payload-bearing row is the one that gets deleted and the media is gone after a reload.
+        // Best-effort throughout: the send itself already succeeded.
+        this.logger.debug(
+          `Send echo already persisted ${result.id}; merging state and dropping the redundant pending row`,
+          {
+            messageId: message.id,
+          },
+        );
+        const patch: QueryDeepPartialEntity<Message> = { status: MessageStatus.SENT, timestamp: result.timestamp };
+        if (message.metadata) {
+          patch.metadata = message.metadata as QueryDeepPartialEntity<Record<string, unknown>>;
+        }
+        await this.messageRepository
+          .update({ sessionId: message.sessionId, waMessageId: result.id }, patch)
+          .catch(err =>
+            this.logger.warn(`Merging SENT state onto the echo-persisted row failed (id=${result.id})`, {
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        await this.messageRepository.delete({ id: message.id }).catch(() => undefined);
+      } else {
+        this.logger.warn(`Persisting SENT state failed after a successful send (id=${result.id})`, {
+          error: persistError instanceof Error ? persistError.message : String(persistError),
+        });
+      }
     }
     return { messageId: result.id, timestamp: result.timestamp };
   }
@@ -633,6 +660,26 @@ export class MessageService {
     }
   }
 
+  // ========== Edit Message ==========
+
+  async editMessage(
+    sessionId: string,
+    dto: { chatId: string; messageId: string; body: string },
+  ): Promise<MessageResponseDto> {
+    const engine = this.getEngine(sessionId);
+    // An edit replaces the text the recipient sees, so it is content leaving the account and goes
+    // through the same moderation chokepoint as every other sender. A plugin can rewrite `body`
+    // here exactly as it can for a first send.
+    const finalDto = await this.applySendingGate(sessionId, 'edit', dto);
+    const result = await engine.editMessage(finalDto.chatId, finalDto.messageId, finalDto.body);
+
+    // Best-effort: reflect the new body in the stored copy (mirrors deleteMessage's revoked flag),
+    // serialized with the inbound edit/reaction writers through the session's per-message mutation
+    // queue. A missing row must not fail the request — the engine edit already succeeded.
+    await this.sessionService.recordOutboundMessageEdit(sessionId, finalDto.messageId, finalDto.body);
+    return { messageId: result.id, timestamp: result.timestamp };
+  }
+
   private getEngine(sessionId: string) {
     const engine = this.sessionService.getEngine(sessionId);
     if (!engine) {
@@ -678,17 +725,18 @@ export class MessageService {
   }
 
   private buildMediaInput(dto: SendMediaMessageDto): MediaInput {
-    if (!dto.url && !dto.base64) {
+    const base64 = stripBase64DataUri(dto.base64);
+    if (!dto.url && !base64) {
       throw new BadRequestException('Either url or base64 must be provided');
     }
 
-    if (dto.base64 && !dto.mimetype) {
+    if (base64 && !dto.mimetype) {
       throw new BadRequestException('mimetype is required when using base64 data');
     }
 
     // Bound an outbound base64 payload to the same byte cap as URL/inbound media, before it is
     // persisted or handed to the engine. URL media is already capped while streaming.
-    assertBase64WithinMediaCap(dto.base64);
+    assertBase64WithinMediaCap(base64);
 
     return {
       mimetype: dto.mimetype || 'application/octet-stream',
@@ -696,7 +744,7 @@ export class MessageService {
       // `url` (e.g. a Swagger/example default left in the body) must not be fetched in its place.
       // Aligns the send selection with the base64-first persisted metadata and the url field's
       // `@ValidateIf((o) => !o.base64)` (which skips @IsUrl when base64 is present) — #670.
-      data: dto.base64 || dto.url!,
+      data: base64 || dto.url!,
       filename: dto.filename,
       caption: dto.caption,
       mentions: dto.mentions,

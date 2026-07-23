@@ -42,6 +42,7 @@ describe('BaileysSessionStore', () => {
         id: '628111@c.us', // listing ids are emitted in the neutral dialect
         name: 'Alice',
         isGroup: false,
+        kind: 'individual',
         unreadCount: 2,
         timestamp: 200,
         lastMessage: 'newest',
@@ -65,6 +66,21 @@ describe('BaileysSessionStore', () => {
       messageTimestamp: 100,
     });
     expect(store.lastMessage('c@s.whatsapp.net')?.key.id).toBe('NEW');
+  });
+
+  it('updates the chat preview only when the edited message is the current last message', () => {
+    store.upsertChats([{ id: '628111@s.whatsapp.net', name: 'Alice' }]);
+    store.recordMessage({
+      key: { remoteJid: '628111@s.whatsapp.net', id: 'LATEST' },
+      message: { conversation: 'before edit' },
+      messageTimestamp: 200,
+    });
+
+    store.recordMessageEdit('628111@c.us', 'OLDER', 'must not replace preview');
+    expect(store.listChats()[0]).toEqual(expect.objectContaining({ lastMessage: 'before edit', timestamp: 200 }));
+
+    store.recordMessageEdit('628111@c.us', 'LATEST', 'after edit');
+    expect(store.listChats()[0]).toEqual(expect.objectContaining({ lastMessage: 'after edit', timestamp: 200 }));
   });
 
   it('flags a group chat by jid', () => {

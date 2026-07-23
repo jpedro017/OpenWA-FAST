@@ -7,25 +7,17 @@
   },
   "common": {
     "appName": "OpenWA",
-    "appSubtitle": "ממשק WhatsApp API",
     "loading": "טוען...",
-    "save": "שמירה",
     "cancel": "ביטול",
     "delete": "מחיקה",
-    "edit": "עריכה",
     "create": "יצירה",
     "close": "סגירה",
     "showApiKey": "הצג מפתח API",
     "hideApiKey": "הסתר מפתח API",
-    "submit": "שליחה",
-    "confirm": "אישור",
     "search": "חיפוש",
-    "filter": "סינון",
-    "actions": "פעולות",
     "status": "סטטוס",
     "name": "שם",
     "role": "תפקיד",
-    "type": "סוג",
     "url": "כתובת URL",
     "port": "פורט",
     "host": "כתובת שרת",
@@ -33,8 +25,6 @@
     "password": "סיסמה",
     "active": "פעיל",
     "inactive": "מושבת",
-    "enabled": "מופעל",
-    "disabled": "מושבת",
     "connected": "מחובר",
     "disconnected": "מנותק",
     "never": "אף פעם",
@@ -43,8 +33,6 @@
     "hoursAgo": "לפני {{count}} שעות",
     "optional": "אופציונלי",
     "language": "שפה",
-    "english": "English",
-    "hebrew": "עברית",
     "back": "חזרה",
     "next": "הבא",
     "previous": "הקודם",
@@ -63,7 +51,7 @@
     "label": "ערכת נושא: {{value}}",
     "appearance": "מראה",
     "mode": "מצב",
-    "palette": "לוח צבעים"
+    "toggleTo": "עבור ל{{value}}"
   },
   "nav": {
     "dashboard": "דאשבורד",
@@ -96,6 +84,7 @@
     "loadingChats": "טוען שיחות...",
     "empty": "אין שיחות",
     "noMessageYet": "אין הודעות עדיין",
+    "unreadBadge": "{{count}} הודעות שלא נקראו",
     "loadingMessages": "טוען הודעות...",
     "noMessagesInChat": "אין הודעות עדיין. שלח את ההודעה הראשונה כדי להתחיל!",
     "downloadDocument": "הורדת מסמך",
@@ -116,13 +105,36 @@
     "send": "שלח",
     "placeholderTitle": "התחל לשלוח הודעות",
     "placeholderDesc": "בחר שיחה פעילה מהסרגל הצדדי כדי להתחיל לקרוא ולשלוח הודעות WhatsApp.",
+    "scrollToBottom": "גלול לאחרון",
+    "groupSubtitle": "קבוצה",
+    "privateContactSubtitle": "איש קשר פרטי",
     "deleteConfirm": "למחוק הודעה זו עבור כולם?",
     "messageDeleted": "🚫 הודעה זו נמחקה",
     "messageMasked": "🔒 הוסתר על ידי וואטסאפ במכשירים המקושרים — בדוק בטלפון הראשי שלך",
+    "kind": {
+      "group": "קבוצה",
+      "channel": "ערוץ",
+      "status": "סטטוס",
+      "broadcast": "שידור"
+    },
+    "tab": {
+      "chats": "שיחות",
+      "channels": "ערוצים",
+      "status": "סטטוס"
+    },
+    "status": {
+      "placeholderTitle": "סטטוס",
+      "placeholderDesc": "עדכוני סטטוס לפי איש קשר יגיעו בעדכון עתידי."
+    },
+    "channels": {
+      "notSupported": "ערוצים אינם נתמכים במנוע Baileys.",
+      "empty": "עדיין אינך רשום/ה לאף ערוץ.",
+      "notReady": "הסשן עדיין אינו מוכן.",
+      "subscribers": "{{count}} מנויים"
+    },
     "errors": {
       "loadSessions": "טעינת הסשנים נכשלה",
       "loadChats": "טעינת השיחות נכשלה",
-      "loadMessages": "טעינת ההודעות נכשלה",
       "markRead": "סימון השיחה כנקראה נכשל",
       "send": "שליחת ההודעה נכשלה",
       "react": "התגובה להודעה נכשלה",
@@ -152,10 +164,10 @@
     "title": "דאשבורד",
     "subtitle": "סקירה כללית של ה-Sessions והפעילות שלך ב-WhatsApp",
     "stats": {
-      "activeSessions": "Sessions פעילים",
+      "activeSessions": "סשנים מחוברים",
+      "sessionsDetail": "{{running}} רצים · {{total}} בסך הכול",
       "messagesToday": "הודעות היום",
       "webhooksConfigured": "Webhooks מוגדרים",
-      "apiCalls": "קריאות API (24 שעות)",
       "totalMessages": "סה\"כ הודעות"
     },
     "sessionsOverview": "סקירת Sessions",
@@ -243,7 +255,6 @@
       "step3": "<strong>3.</strong> יש להקיש על <strong>קישור מכשיר</strong> ולסרוק את ה-QR",
       "autoRefresh": "ה-QR מתעדכן אוטומטית כל 5 שניות",
       "generating": "יוצר קוד QR...",
-      "unavailable": "קוד ה-QR אינו זמין כעת. יש לנסות שוב בעוד רגע.",
       "preparing": "מכין קוד QR...",
       "showQr": "הצגת QR",
       "loading": "טוען...",
@@ -326,7 +337,6 @@
     "filters": {
       "badge": "{{count}} מסנן",
       "badge_two": "שני מסננים",
-      "badge_other": "{{count}} מסננים",
       "title": "מסננים (אופציונלי)",
       "hint": "הפעלה רק כאשר כל התנאים מתקיימים. חל על אירועי הודעות.",
       "addCondition": "הוספת תנאי",
@@ -531,7 +541,13 @@
       "image": "תמונה",
       "video": "וידאו",
       "audio": "אודיו",
-      "document": "מסמך"
+      "document": "מסמך",
+      "location": "מיקום",
+      "contact": "איש קשר",
+      "sticker": "מדבקה",
+      "poll": "סקר",
+      "forward": "העברה",
+      "bulk": "מרובה"
     },
     "messageContent": "תוכן ההודעה",
     "messagePlaceholder": "יש להזין כאן את ההודעה...",
@@ -545,48 +561,66 @@
     "filename": "שם קובץ",
     "captionPlaceholder": "יש להזין כיתוב...",
     "filenamePlaceholder": "document.pdf",
+    "locationLatitude": "קו רוחב",
+    "locationLongitude": "קו אורך",
+    "locationDescription": "תיאור",
+    "locationAddress": "כתובת",
+    "contactName": "שם איש הקשר",
+    "contactNamePlaceholder": "ישראל ישראלי",
+    "contactNumber": "מספר איש הקשר",
+    "pollQuestion": "שאלת הסקר",
+    "pollQuestionPlaceholder": "איפה ניפגש?",
+    "pollOptions": "אפשרויות הסקר",
+    "pollOptionPlaceholder": "אפשרות {{index}}",
+    "pollOptionsHint": "בין 2 ל-12 אפשרויות",
+    "addOption": "הוספת אפשרות",
+    "removeOption": "הסרת אפשרות",
+    "allowMultipleAnswers": "לאפשר מספר תשובות",
+    "forwardFromChatId": "מזהה צ'אט מקור",
+    "forwardFromPlaceholder": "628123456789@c.us",
+    "forwardFromHint": "השאר ריק כדי להעביר מהנמען הנוכחי",
+    "forwardToChatId": "מזהה צ'אט יעד",
+    "forwardToPlaceholder": "מספר טלפון או מזהה צ'אט",
+    "forwardMessageId": "מזהה הודעה",
+    "forwardMessageIdHint": "מזהה ההודעה להעברה",
+    "bulkRecipients": "נמענים",
+    "bulkRecipientsPlaceholder": "+62812345678",
+    "bulkRecipientsHint": "מספר טלפון או מזהה צ'אט אחד בכל שורה (עד 100)",
+    "bulkRecipientsCount": "נמענים: {{count}}",
+    "bulkDelay": "השהיה בין הודעות (אלפיות שנייה)",
+    "bulkDelayHint": "1000–60000 אלפיות שנייה (ברירת מחדל 3000)",
     "send": "שליחת הודעה",
     "sending": "שולח...",
     "viewOnly": "צפייה בלבד",
     "responseEmpty": "יש לשלוח הודעה כדי לראות את תגובת ה-API",
-    "successLabel": "200 OK - הצלחה",
-    "failedLabel": "400 - נכשל",
+    "successLabel": "הצלחה",
+    "failedLabel": "נכשל",
     "response": {
       "timestamp": "חותמת זמן",
       "messageId": "מזהה הודעה",
+      "batchId": "מזהה אצווה",
       "error": "שגיאה"
     },
     "sendFailed": "שליחת ההודעה נכשלה",
-    "notOnWhatsApp": "מספר זה אינו רשום בוואטסאפ"
+    "notOnWhatsApp": "מספר זה אינו רשום בוואטסאפ",
+    "batch": {
+      "status": {
+        "pending": "ממתין",
+        "processing": "מעבד",
+        "completed": "הושלם",
+        "cancelled": "בוטל",
+        "failed": "נכשל"
+      },
+      "progress": "נשלחו {{sent}} מתוך {{total}} · {{failed}} נכשלו · {{pending}} ממתינים",
+      "cancel": "ביטול אצווה",
+      "cancelling": "מבטל..."
+    }
   },
   "infrastructure": {
     "title": "תשתית",
     "subtitle": "הגדרת השרת, מסד נתונים, מטמון, אחסון ומנוע WhatsApp",
     "saveConfig": "שמירת תצורה",
     "saving": "שומר...",
-    "server": {
-      "title": "הגדרות שרת",
-      "production": "ייצור",
-      "development": "פיתוח",
-      "environment": "סביבה",
-      "domain": "דומיין",
-      "apiPort": "פורט API",
-      "dashboardPort": "פורט דאשבורד",
-      "corsOrigins": "מקורות CORS",
-      "corsPlaceholder": "* או רשימה מופרדת בפסיקים",
-      "publicApiUrl": "כתובת API ציבורית (אופציונלי)",
-      "publicDashboardUrl": "כתובת דאשבורד ציבורית (אופציונלי)"
-    },
-    "webhook": {
-      "title": "Webhooks והגבלת קצב",
-      "settings": "הגדרות Webhook",
-      "timeout": "זמן קצוב (ms)",
-      "maxRetries": "ניסיונות מקסימליים",
-      "retryDelay": "השהיה בין ניסיונות (ms)",
-      "rateLimit": "הגבלת קצב",
-      "window": "חלון זמן (שניות)",
-      "maxReq": "מקסימום בקשות בחלון"
-    },
     "database": {
       "title": "הגדרות מסד נתונים",
       "sqlite": "SQLite",
@@ -609,7 +643,6 @@
     },
     "engine": {
       "title": "מנוע WhatsApp",
-      "subtitle": "בחר והגדר את מנוע החיבור של WhatsApp.",
       "builtIn": "מובנה",
       "headless": "מצב ללא ממשק",
       "headlessDesc": "הרצת הדפדפן ללא ממשק גלוי (מומלץ לסביבת ייצור).",
@@ -709,43 +742,29 @@
     "title": "תוספים",
     "subtitle": "התקנה, הגדרה וניהול של הרחבות",
     "refresh": "רענון",
-    "engineCard": "מנוע WhatsApp פעיל",
-    "running": "פועל",
-    "supportedFeatures": "תכונות נתמכות:",
     "builtIn": "מובנה",
     "noDescription": "אין תיאור זמין",
-    "required": "נדרש",
-    "active": "פעיל",
-    "activate": "הפעלה",
     "enable": "הפעלה",
     "disable": "השבתה",
     "healthCheck": "בדיקת תקינות",
     "configure": "הגדרה",
-    "available": "זמינים",
     "install": "התקנת תוסף",
     "uninstall": "הסרה",
     "uninstallConfirm": "להסיר את \"{{name}}\"? פעולה זו תמחק את הקבצים שלו.",
-    "engineSwitchHint": "יש להגדיר כמנוע הפעיל בהגדרות ולאחר מכן לאתחל",
     "empty": {
       "title": "לא נמצאו תוספים",
       "description": "ניתן להתקין תוספים כדי להרחיב את היכולות של OpenWA"
     },
     "config": {
       "title": "הגדרת {{name}}",
-      "restartNotice": "השינויים דורשים אתחול שרת כדי להיכנס לתוקף",
-      "engineType": "סוג מנוע",
-      "headless": "מצב Headless",
-      "headlessDesc": "הרצת דפדפן ללא ממשק גרפי (מומלץ לייצור)",
-      "sessionDataPath": "נתיב נתוני Session",
-      "browserArgs": "ארגומנטים של הדפדפן",
       "noOptions": "אין אפשרויות הגדרה זמינות עבור תוסף זה",
+      "uiHandshakeError": "ממשק הגדרת התוסף לא אותחל. השתמשו בטופס שלמטה אם הוא זמין.",
       "save": "שמירת תצורה",
       "addItem": "הוספה",
       "tabConfig": "הגדרות",
       "tabSessions": "Sessions"
     },
     "rail": {
-      "engine": "מנוע פעיל",
       "enabled": "מופעלים",
       "installed": "מותקנים",
       "active": "תוספים פעילים",
@@ -769,7 +788,11 @@
       "installed": "התוסף הותקן",
       "installFailed": "ההתקנה נכשלה",
       "uninstalled": "התוסף הוסר",
-      "uninstallFailed": "ההסרה נכשלה"
+      "uninstallFailed": "ההסרה נכשלה",
+      "enableFailedTitle": "ההפעלה נכשלה",
+      "disableFailedTitle": "ההשבתה נכשלה",
+      "configRequiredTitle": "נדרשת הגדרה",
+      "configRequiredDesc": "מלא את שדות החובה לפני ההפעלה: {{fields}}"
     },
     "sessions": {
       "activationTitle": "הפעלה עבור",
@@ -801,6 +824,9 @@
         "sessionScopePlaceholder": "השאירו ריק לכל ה-Sessions",
         "verifyToken": "טוקן אימות (אופציונלי)",
         "verifyTokenPlaceholder": "הטוקן שהספק מחזיר בעת האימות",
+        "secret": "סוד Ingress (אופציונלי)",
+        "secretPlaceholder": "סוד ה-webhook של הספק (למשל Chatwoot)",
+        "secretHint": "השאר ריק ליצירה אוטומטית (מוצג פעם אחת). אם הספק קובע סוד webhook משלו, הדבק אותו כאן — סוד אוטומטי לא יתאים.",
         "config": "תצורה (JSON אופציונלי)",
         "configPlaceholder": "{ }"
       },
@@ -815,7 +841,9 @@
         "confirm": "ליצור מחדש את מפתח החתימה הסודי של {{id}}? הסוד הנוכחי יפסיק לעבוד באופן מיידי.",
         "action": "יצירה מחדש"
       },
-      "edit": { "title": "עריכת {{id}}" },
+      "edit": {
+        "title": "עריכת {{id}}"
+      },
       "delete": {
         "title": "מחיקת מופע",
         "confirm": "למחוק את המופע {{id}}? כתובת ה-URL והסוד שלו יפסיקו לעבוד באופן מיידי.",
@@ -833,6 +861,7 @@
       "errors": {
         "invalidId": "מזהה המופע חייב לכלול אותיות, מספרים, מקפים או קווים תחתונים (עד 64 תווים).",
         "invalidJson": "התצורה חייבת להיות JSON תקין.",
+        "invalidSecret": "הסוד חייב להכיל לפחות 16 תווים, או השאר ריק ליצירה אוטומטית.",
         "duplicateId": "כבר קיים מופע עם מזהה זה."
       },
       "toasts": {
@@ -850,7 +879,9 @@
     "empty": "לא נמצאו הודעות.",
     "error": "החיפוש נכשל. נסה שוב.",
     "unavailable": "החיפוש אינו מוגדר.",
-    "scope": { "current": "הפעלה זו" },
+    "scope": {
+      "current": "הפעלה זו"
+    },
     "loading": "מחפש…"
   }
 }

@@ -77,17 +77,47 @@ export function mergeDeliveryStatus(
 }
 
 /**
+ * Merge two metadata bags field-by-field. The incoming copy wins per field only when it actually
+ * carries a value — a live `message.sent` echo is built as `{media, quotedMessage, call}` with
+ * undefined leaves, and a wholesale `incoming ?? existing` swap would wipe the optimistic bubble's
+ * quote/call. Media has one extra rule: an incoming marker WITHOUT the payload (the engine's
+ * own-send echo and the media-less history fetch both emit `{media: {omitted: true}}` with no
+ * `data`) must not clobber an existing copy holding the real base64 — the optimistic send bubble is
+ * the only copy with the payload until a refetch, and the cache is staleTime: Infinity.
+ */
+function mergeMessageMetadata(
+  existing: ChatMessageView['metadata'],
+  incoming: ChatMessageView['metadata'],
+): ChatMessageView['metadata'] {
+  if (!incoming) return existing;
+  if (!existing) return incoming;
+  const media = (() => {
+    if (!incoming.media) return existing.media;
+    if (!existing.media) return incoming.media;
+    if (existing.media.data && !incoming.media.data) return existing.media;
+    return incoming.media;
+  })();
+  const merged: NonNullable<ChatMessageView['metadata']> = {};
+  if (media) merged.media = media;
+  const quotedMessage = incoming.quotedMessage ?? existing.quotedMessage;
+  if (quotedMessage) merged.quotedMessage = quotedMessage;
+  const reactions = incoming.reactions ?? existing.reactions;
+  if (reactions) merged.reactions = reactions;
+  const call = incoming.call ?? existing.call;
+  if (call) merged.call = call;
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+/**
  * Append `incoming` to `list`. If an entry with the same identity exists, replace it in place.
  * Identity uses the same `waMessageId ?? id` key as mergeChatMessages — a DB row (id=UUID,
  * waMessageId=WA id) and a live WS message (id=WA id) for the same WhatsApp message must dedupe,
  * not double-add. On replace, the delivery status only advances (a replayed lower `sent` echo can't
- * downgrade a delivered/read row) and existing metadata is kept when the incoming copy carries none.
+ * downgrade a delivered/read row) and metadata is merged per field (a payload-less echo can't erase
+ * the existing media/quote — see mergeMessageMetadata).
  * Returns a new array — does not mutate the input.
  */
-export function mergeOrAppend(
-  list: ChatMessageView[],
-  incoming: ChatMessageView,
-): ChatMessageView[] {
+export function mergeOrAppend(list: ChatMessageView[], incoming: ChatMessageView): ChatMessageView[] {
   const idx = list.findIndex(m => msgKey(m) === msgKey(incoming));
   if (idx === -1) return [...list, incoming];
   const existing = list[idx];
@@ -95,23 +125,8 @@ export function mergeOrAppend(
   next[idx] = {
     ...incoming,
     status: mergeDeliveryStatus(existing.status, incoming.status) ?? incoming.status,
-    metadata: incoming.metadata ?? existing.metadata,
+    metadata: mergeMessageMetadata(existing.metadata, incoming.metadata),
   };
-  return next;
-}
-
-/**
- * Swap the entry whose id === `oldId` with `replacement`. No-op if not found.
- */
-export function replaceMessageById(
-  list: ChatMessageView[],
-  oldId: string,
-  replacement: ChatMessageView,
-): ChatMessageView[] {
-  const idx = list.findIndex(m => m.id === oldId);
-  if (idx === -1) return list;
-  const next = list.slice();
-  next[idx] = replacement;
   return next;
 }
 
@@ -133,10 +148,44 @@ export function updateMessageById(
 /**
  * Filter out the entry with the matching id. No-op if not found.
  */
-export function removeMessageById(
-  list: ChatMessageView[],
-  id: string,
-): ChatMessageView[] {
+export function removeMessageById(list: ChatMessageView[], id: string): ChatMessageView[] {
   if (!list.some(m => m.id === id)) return list;
   return list.filter(m => m.id !== id);
+}
+
+/**
+ * Locate the message a `message.revoked` event refers to. Returns -1 if it isn't cached.
+ *
+ * The event carries two candidate ids: `id`, and `revokedId` — the ORIGINAL deleted message, which
+ * whatsapp-web.js resolves separately because its revoke event can carry an id of its own that never
+ * matches a stored row. Baileys sets the two identically, and wwebjs leaves `revokedId` undefined
+ * when the original isn't in its local store.
+ *
+ * Both candidates are tried rather than preferring `revokedId` (the `revokedId ?? id` shape the
+ * backend uses to key its own UPDATE): matching either id is a superset that stays correct whichever
+ * of the two the cached row was stored under, so it cannot regress the Baileys path. Each candidate
+ * is checked against both the DB row id and `waMessageId` — a live WS message and its persisted copy
+ * are keyed differently. `revokedId` is guarded because an undefined one would otherwise match a row
+ * whose `waMessageId` is also undefined.
+ */
+export function findRevokedIndex(list: ChatMessageView[], event: { id: string; revokedId?: string }): number {
+  const matches = (m: ChatMessageView, candidate: string): boolean => m.id === candidate || m.waMessageId === candidate;
+  return list.findIndex(m => matches(m, event.id) || (event.revokedId !== undefined && matches(m, event.revokedId)));
+}
+
+/**
+ * Replace the displayed body of a cached WhatsApp message after a `message.edited` event. Persisted
+ * rows use a local UUID in `id` and the WhatsApp identity in `waMessageId`; live rows often use the
+ * WhatsApp identity for both, so both candidates are required. Returns the original array on a miss.
+ */
+export function applyMessageEdit(
+  list: ChatMessageView[],
+  event: { messageId: string; body: string },
+): ChatMessageView[] {
+  if (!event.messageId) return list;
+  const idx = list.findIndex(m => m.id === event.messageId || m.waMessageId === event.messageId);
+  if (idx === -1) return list;
+  const next = list.slice();
+  next[idx] = { ...next[idx], body: event.body };
+  return next;
 }

@@ -146,6 +146,22 @@ export class PluginStorageService {
     }
   }
 
+  /**
+   * Record the operator's standing enable decision, which outlives the process (#856). Deliberately
+   * separate from setPluginStatus: `status` tracks where the runtime is right now and is reset on every
+   * load, so writing intent through it would lose it on the next boot. Call this only from the
+   * operator-facing enable/disable — never from the shutdown teardown, which disables every running
+   * plugin and would otherwise erase the decision on the way out.
+   */
+  setPluginEnabledByOperator(pluginId: string, enabled: boolean): void {
+    const entry = this.registry.get(pluginId);
+    if (entry) {
+      entry.enabledByOperator = enabled;
+      entry.updatedAt = new Date();
+      this.saveRegistry();
+    }
+  }
+
   // ============================================================================
   // Config Management
   // ============================================================================
@@ -220,6 +236,9 @@ export class PluginStorageService {
     // but new writes always use the encoded filename above.
     const resolveLegacyKeyPath = (key: string): string | null => {
       if (!isSafeStorageKey(key)) return null;
+      // These are package-owned files when package code and state share a directory. They must never
+      // be treated as legacy plugin storage (or get/delete/set migration can read or remove code).
+      if (key === 'manifest' || key === 'package') return null;
       const fileName = `${key}.json`;
       return isPathWithin(pluginDataDir, fileName) ? path.join(pluginDataDir, fileName) : null;
     };
@@ -257,11 +276,8 @@ export class PluginStorageService {
           // pre-existed (writeFileSync mode only applies on create). Mirrors saveRegistry's hardening.
           atomicWriteFileSync(filePath, JSON.stringify(value, null, 2), { mode: 0o600 });
           fs.chmodSync(filePath, 0o600);
-          // Migrate off any pre-encoding legacy file for this key so a stale copy can't shadow reads/lists.
-          const legacyPath = resolveLegacyKeyPath(key);
-          if (legacyPath && legacyPath !== filePath && fs.existsSync(legacyPath)) {
-            fs.unlinkSync(legacyPath);
-          }
+          // Keep any legacy file in place. Encoded-first reads and de-duplicated lists ensure it cannot
+          // shadow this write, while avoiding an unlink outside the service-owned key-* namespace.
           return Promise.resolve();
         } catch (error) {
           logger.error(`Failed to write plugin data: ${pluginId}/${key}`, String(error));

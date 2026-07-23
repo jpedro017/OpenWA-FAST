@@ -86,7 +86,7 @@ Design pattern used to create adapter instances based on configuration. Example:
 Unique identifier for a WhatsApp group. Format: `120363123456789@g.us`.
 
 ### GHCR
-GitHub Container Registry - registry for storing Docker images. The OpenWA image is available at `ghcr.io/rmyndharis/openwa`.
+GitHub Container Registry - registry for storing Docker images. The OpenWA image is available at `ghcr.io/rmyndharis/openwa` (and, mirrored per release, at `docker.io/rmyndharis/openwa`).
 
 ## H
 

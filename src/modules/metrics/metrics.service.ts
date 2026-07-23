@@ -3,6 +3,10 @@ import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { StatsService } from '../stats/stats.service';
 import { getWebhookDeliveryFailuresTotal } from '../../common/metrics/webhook-delivery-metrics';
+import {
+  getSessionReconnectAttemptsTotal,
+  getSessionReconnectLoopAlertsTotal,
+} from '../../common/metrics/session-reconnect-metrics';
 import { renderHttpRequestMetrics } from '../../common/metrics/request-metrics';
 
 /**
@@ -90,13 +94,13 @@ export class MetricsService {
       lines.push(`openwa_sessions{status="${this.escapeLabel(status)}"} ${count}`);
     }
 
-    lines.push('# HELP openwa_messages_total Total messages by direction.');
-    lines.push('# TYPE openwa_messages_total counter');
+    lines.push('# HELP openwa_messages_total Current stored messages by direction.');
+    lines.push('# TYPE openwa_messages_total gauge');
     lines.push(`openwa_messages_total{direction="outgoing"} ${overview.messages.sent}`);
     lines.push(`openwa_messages_total{direction="incoming"} ${overview.messages.received}`);
 
-    lines.push('# HELP openwa_messages_failed_total Total messages in FAILED state.');
-    lines.push('# TYPE openwa_messages_failed_total counter');
+    lines.push('# HELP openwa_messages_failed_total Current stored messages in FAILED state.');
+    lines.push('# TYPE openwa_messages_failed_total gauge');
     lines.push(`openwa_messages_failed_total ${overview.messages.failed}`);
 
     lines.push(
@@ -104,6 +108,16 @@ export class MetricsService {
     );
     lines.push('# TYPE openwa_webhook_delivery_failures_total counter');
     lines.push(`openwa_webhook_delivery_failures_total ${getWebhookDeliveryFailuresTotal()}`);
+
+    lines.push(
+      '# HELP openwa_session_reconnect_attempts_total Reconnect attempts scheduled across all sessions since process start.',
+    );
+    lines.push('# TYPE openwa_session_reconnect_attempts_total counter');
+    lines.push(`openwa_session_reconnect_attempts_total ${getSessionReconnectAttemptsTotal()}`);
+
+    lines.push('# HELP openwa_session_reconnect_loop_alerts_total Reconnect-loop alerts emitted since process start.');
+    lines.push('# TYPE openwa_session_reconnect_loop_alerts_total counter');
+    lines.push(`openwa_session_reconnect_loop_alerts_total ${getSessionReconnectLoopAlertsTotal()}`);
 
     // HTTP RED metrics (request rate + duration per route), recorded by RequestMetricsInterceptor.
     // Included in the same cached render — a few seconds of staleness is fine for Prometheus.

@@ -81,14 +81,16 @@ Start workflows when WhatsApp events occur.
 | `message.failed`        | Outgoing message failed             | Failure alerting          |
 | `message.revoked`       | Message deleted for everyone        | Deletion tracking         |
 | `message.reaction`      | Reaction added / changed / removed  | Reaction tracking         |
+| `message.edited`        | Message body or caption edited      | Content synchronization   |
 | `session.status`        | Session status changed              | Lifecycle tracking        |
 | `session.qr`            | QR code generated                   | Reconnection alerts       |
 | `session.authenticated` | Session logged in (phone available) | Startup notifications     |
 | `session.disconnected`  | Session lost connection             | Alert monitoring          |
-
-> **Reserved:** `group.join`, `group.leave`, and `group.update` are accepted by the
-> subscription API but are not emitted yet — don't depend on them until a release notes
-> them as live.
+| `session.reconnect_loop` | Every 5th consecutive reconnect attempt | Stuck-session alerting |
+| `group.join`           | Participant(s) joined a group          | Welcome messages        |
+| `group.leave`          | Participant(s) left a group            | Churn tracking          |
+| `group.update`         | Group subject/description/settings changed | Group administration |
+| `call.received`        | Incoming call started ringing          | Auto-reject + auto-reply bots |
 
 #### How It Works
 

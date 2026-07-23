@@ -1,5 +1,18 @@
-import { Controller, Get, Put, Post, Body, BadRequestException, HttpException, Optional } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
+import {
+  Controller,
+  Get,
+  Put,
+  Post,
+  Body,
+  BadRequestException,
+  HttpException,
+  HttpCode,
+  HttpStatus,
+  Optional,
+} from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import { IsArray, IsBoolean, IsIn, IsNumber, IsOptional, IsString, ValidateNested } from 'class-validator';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { QUEUE_NAMES } from '../queue/queue-names';
@@ -18,6 +31,8 @@ import { StorageService } from '../../common/storage/storage.service';
 import { ShutdownService } from '../../common/services/shutdown.service';
 import { createLogger } from '../../common/services/logger.service';
 import { isMissingTableError } from '../../common/utils/db-errors';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction } from '../audit/entities/audit-log.entity';
 import { ImportStorageDto } from './dto/import-storage.dto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -47,46 +62,203 @@ interface InfraStatus {
   };
 }
 
-interface SaveConfigDto {
-  database?: {
-    type: 'sqlite' | 'postgres';
-    builtIn?: boolean;
-    host?: string;
-    port?: string;
-    username?: string;
-    password?: string;
-    database?: string;
-    schema?: string;
-    poolSize?: number;
-    sslEnabled?: boolean;
-    sslRejectUnauthorized?: boolean;
-  };
-  redis?: {
-    enabled?: boolean;
-    builtIn?: boolean;
-    host?: string;
-    port?: string;
-    password?: string;
-  };
-  queue?: {
-    enabled?: boolean;
-  };
-  storage?: {
-    type: 'local' | 's3';
-    builtIn?: boolean;
-    localPath?: string;
-    s3Bucket?: string;
-    s3Region?: string;
-    s3AccessKey?: string;
-    s3SecretKey?: string;
-    s3Endpoint?: string;
-  };
-  engine?: {
-    type?: string;
-    headless?: boolean;
-    sessionDataPath?: string;
-    browserArgs?: string;
-  };
+class DatabaseConfigDto {
+  @ApiProperty({ enum: ['sqlite', 'postgres'] })
+  @IsIn(['sqlite', 'postgres'])
+  type!: 'sqlite' | 'postgres';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  builtIn?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  host?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  port?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  username?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  password?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  database?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  schema?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber()
+  poolSize?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  sslEnabled?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  sslRejectUnauthorized?: boolean;
+}
+
+class RedisConfigDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  builtIn?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  host?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  port?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  password?: string;
+}
+
+class QueueConfigDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+}
+
+class StorageConfigDto {
+  @ApiProperty({ enum: ['local', 's3'] })
+  @IsIn(['local', 's3'])
+  type!: 'local' | 's3';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  builtIn?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  localPath?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  s3Bucket?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  s3Region?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  s3AccessKey?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  s3SecretKey?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  s3Endpoint?: string;
+}
+
+class EngineConfigDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  type?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  headless?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  sessionDataPath?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  browserArgs?: string;
+}
+
+class SaveConfigDto {
+  @ApiPropertyOptional({ type: () => DatabaseConfigDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DatabaseConfigDto)
+  database?: DatabaseConfigDto;
+
+  @ApiPropertyOptional({ type: () => RedisConfigDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RedisConfigDto)
+  redis?: RedisConfigDto;
+
+  @ApiPropertyOptional({ type: () => QueueConfigDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => QueueConfigDto)
+  queue?: QueueConfigDto;
+
+  @ApiPropertyOptional({ type: () => StorageConfigDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => StorageConfigDto)
+  storage?: StorageConfigDto;
+
+  @ApiPropertyOptional({ type: () => EngineConfigDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => EngineConfigDto)
+  engine?: EngineConfigDto;
+}
+
+class RestartDto {
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  profiles?: string[];
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  profilesToRemove?: string[];
 }
 
 // Database migration types for export/import
@@ -129,6 +301,7 @@ interface MessageRow {
   sessionId: string;
   waMessageId: string | null;
   chatId: string;
+  chatName: string | null;
   from: string;
   to: string;
   body: string | null;
@@ -316,6 +489,12 @@ export class InfraController {
     @Optional()
     @InjectQueue(QUEUE_NAMES.WEBHOOK)
     private readonly webhookQueue?: Queue,
+    // Best-effort audit emission for the sensitive infra operations below. Injected @Optional and
+    // appended last so it never shifts the existing positional args: the running app always provides
+    // the @Global AuditService, while the direct-construction unit tests omit it — the `?.` at each
+    // call site then makes emission a no-op there instead of forcing every test to wire a mock.
+    @Optional()
+    private readonly auditService?: AuditService,
   ) {}
 
   /** Bound the DB liveness probe so a hung connection can't stall the status read. */
@@ -549,7 +728,7 @@ export class InfraController {
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Save infrastructure configuration to .env file' })
   @ApiResponse({ status: 200, description: 'Configuration saved' })
-  @ApiBody({ description: 'Configuration to save' })
+  @ApiBody({ description: 'Configuration to save', type: SaveConfigDto })
   saveConfig(@Body() config: SaveConfigDto): { message: string; saved: boolean; envPath: string; profiles: string[] } {
     try {
       const profiles: string[] = [];
@@ -733,6 +912,13 @@ export class InfraController {
       writeSecretFile(envPath, contents);
       this.logger.log('Configuration saved', { envPath });
 
+      // Audit the credential-bearing env mutation. Fire-and-forget (not awaited) so saveConfig stays
+      // synchronous — its validation rejections must remain synchronous throws the tests assert via
+      // `.toThrow`. Only section names + Docker profiles are recorded; secret values are never logged.
+      void this.auditService?.logInfo(AuditAction.INFRA_CONFIG_SAVED, {
+        metadata: { sections: Object.keys(config ?? {}), profiles },
+      });
+
       const profileMsg = profiles.length > 0 ? ` Docker profiles required: ${profiles.join(', ')}.` : '';
 
       return {
@@ -760,10 +946,12 @@ export class InfraController {
     }
   }
   @Post('restart')
+  @HttpCode(HttpStatus.OK)
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Request server restart with Docker orchestration' })
   @ApiResponse({ status: 200, description: 'Server will restart with new profiles' })
-  async requestRestart(@Body() body?: { profiles?: string[]; profilesToRemove?: string[] }): Promise<{
+  @ApiBody({ required: false, type: RestartDto })
+  async requestRestart(@Body() body?: RestartDto): Promise<{
     message: string;
     restarting: boolean;
     profiles: string[];
@@ -841,6 +1029,12 @@ export class InfraController {
         this.logger.error('Failed to write orchestration request', err instanceof Error ? err.message : String(err));
       }
     }
+
+    // Record the operational action (Docker orchestration + scheduled restart) BEFORE starting the
+    // shutdown, awaited so the row is persisted even as the process goes down.
+    await this.auditService?.logInfo(AuditAction.INFRA_RESTART_REQUESTED, {
+      metadata: { profiles, profilesToRemove },
+    });
 
     // Schedule graceful shutdown after the configurable bounded grace (SHUTDOWN_DELAY_MS,
     // default 3s) — readiness reports 503 during the window so traffic drains first.
@@ -983,6 +1177,26 @@ export class InfraController {
       this.logger.debug('integration_delivery_failures table not available for export', { error: String(error) });
     }
 
+    const counts = {
+      sessions: sessions.length,
+      webhooks: webhooks.length,
+      messages: messages.length,
+      messageBatches: messageBatches.length,
+      templates: templates.length,
+      baileysStoredMessages: baileysStoredMessages.length,
+      lidMappings: lidMappings.length,
+      pluginInstances: pluginInstances.length,
+      conversationMappings: conversationMappings.length,
+      ingressEvents: ingressEvents.length,
+      webhookDeliveryFailures: webhookDeliveryFailures.length,
+      integrationDeliveryFailures: integrationDeliveryFailures.length,
+    };
+
+    // Audit the full-DB export: this payload carries webhook + plugin-instance secrets, so WHO pulled
+    // a dump (and the per-table row counts) is exactly the trail C002 was missing. Data itself is never
+    // logged — only counts.
+    await this.auditService?.logInfo(AuditAction.INFRA_DATA_EXPORTED, { metadata: { counts } });
+
     return {
       exportedAt: new Date().toISOString(),
       dataDbType: this.configService.get<string>('dataDatabase.type', 'sqlite'),
@@ -1000,24 +1214,12 @@ export class InfraController {
         webhookDeliveryFailures,
         integrationDeliveryFailures,
       },
-      counts: {
-        sessions: sessions.length,
-        webhooks: webhooks.length,
-        messages: messages.length,
-        messageBatches: messageBatches.length,
-        templates: templates.length,
-        baileysStoredMessages: baileysStoredMessages.length,
-        lidMappings: lidMappings.length,
-        pluginInstances: pluginInstances.length,
-        conversationMappings: conversationMappings.length,
-        ingressEvents: ingressEvents.length,
-        webhookDeliveryFailures: webhookDeliveryFailures.length,
-        integrationDeliveryFailures: integrationDeliveryFailures.length,
-      },
+      counts,
     };
   }
 
   @Post('import-data')
+  @HttpCode(HttpStatus.OK)
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Import data to Data DB (replaces existing data)' })
   @ApiBody({
@@ -1082,6 +1284,18 @@ export class InfraController {
           this.logger.debug('Skipped clearing a table that does not exist during import', { table });
         }
       };
+      // The INSERTs below are written once, in Postgres' `$N` placeholder form. better-sqlite3 differs
+      // from the legacy sqlite3 driver on raw queries in two ways: SQLite parses `$N` as a NAMED
+      // parameter, which cannot be bound from the positional array TypeORM passes through (RangeError),
+      // and strict binding rejects booleans/undefined — which a Postgres-made backup carries (real
+      // booleans survive the JSON round-trip). Postgres needs `$N` and binds booleans natively, so both
+      // rewrites apply only on the SQLite path. Safe: every `$N` below occurs once, in ascending order.
+      const isPostgres = this.dataDataSource.options.type === 'postgres';
+      const insert = (text: string, params: unknown[]): Promise<unknown> =>
+        queryRunner.query(
+          isPostgres ? text : text.replace(/\$\d+/g, '?'),
+          isPostgres ? params : params.map(v => (typeof v === 'boolean' ? Number(v) : (v ?? null))),
+        );
       await queryRunner.query('DELETE FROM webhooks');
       await clearTable('messages');
       await clearTable('message_batches');
@@ -1111,7 +1325,7 @@ export class InfraController {
             continue;
           }
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO sessions (id, name, status, phone, "pushName", config, "proxyUrl", "proxyType", "connectedAt", "lastActiveAt", "createdAt", "updatedAt") 
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
               [
@@ -1141,7 +1355,7 @@ export class InfraController {
       if (data.tables.webhooks?.length) {
         for (const webhook of data.tables.webhooks) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO webhooks (id, "sessionId", url, events, secret, headers, filters, active, "retryCount", "lastTriggeredAt", "createdAt", "updatedAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
               [
@@ -1175,14 +1389,15 @@ export class InfraController {
       if (data.tables.messages?.length) {
         for (const msg of data.tables.messages) {
           try {
-            await queryRunner.query(
-              `INSERT INTO messages (id, "sessionId", "waMessageId", "chatId", "from", "to", body, type, direction, "timestamp", metadata, status, "createdAt")
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+            await insert(
+              `INSERT INTO messages (id, "sessionId", "waMessageId", "chatId", "chatName", "from", "to", body, type, direction, "timestamp", metadata, status, "createdAt")
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
               [
                 msg.id,
                 msg.sessionId,
                 msg.waMessageId ?? null,
                 msg.chatId,
+                msg.chatName ?? null,
                 msg.from,
                 msg.to,
                 msg.body ?? null,
@@ -1210,7 +1425,7 @@ export class InfraController {
       if (data.tables.messageBatches?.length) {
         for (const batch of data.tables.messageBatches) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO message_batches (id, batch_id, session_id, status, messages, options, progress, results, current_index, created_at, updated_at, started_at, completed_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
               [
@@ -1253,7 +1468,7 @@ export class InfraController {
       if (data.tables.templates?.length) {
         for (const tpl of data.tables.templates) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO templates (id, "sessionId", name, body, header, footer, "createdAt", "updatedAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
               [
@@ -1279,7 +1494,7 @@ export class InfraController {
       if (data.tables.baileysStoredMessages?.length) {
         for (const bsm of data.tables.baileysStoredMessages) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO baileys_stored_messages (id, "sessionId", "waMessageId", "serializedMessage", "createdAt")
                VALUES ($1, $2, $3, $4, $5)`,
               [bsm.id, bsm.sessionId, bsm.waMessageId, bsm.serializedMessage, bsm.createdAt],
@@ -1296,10 +1511,12 @@ export class InfraController {
       if (data.tables.lidMappings?.length) {
         for (const lm of data.tables.lidMappings) {
           try {
-            await queryRunner.query(
-              `INSERT INTO lid_mappings (lid, phone, "sessionId", "updatedAt") VALUES ($1, $2, $3, $4)`,
-              [lm.lid, lm.phone ?? null, lm.sessionId ?? null, lm.updatedAt],
-            );
+            await insert(`INSERT INTO lid_mappings (lid, phone, "sessionId", "updatedAt") VALUES ($1, $2, $3, $4)`, [
+              lm.lid,
+              lm.phone ?? null,
+              lm.sessionId ?? null,
+              lm.updatedAt,
+            ]);
             lidMappingsCount++;
           } catch (err) {
             warnings.push(`Failed to import lid mapping ${lm.lid}: ${err}`);
@@ -1312,7 +1529,7 @@ export class InfraController {
       if (data.tables.pluginInstances?.length) {
         for (const pi of data.tables.pluginInstances) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO plugin_instances (id, "pluginId", "instanceId", "sessionScope", secret, "verifyToken", config, enabled, "createdAt", "updatedAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
               [
@@ -1340,7 +1557,7 @@ export class InfraController {
       if (data.tables.conversationMappings?.length) {
         for (const cm of data.tables.conversationMappings) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO conversation_mappings (id, "sessionId", "chatId", "pluginId", "instanceId", "providerConversationId", "handoverState", metadata, "updatedAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
               [
@@ -1371,7 +1588,7 @@ export class InfraController {
       if (data.tables.ingressEvents?.length) {
         for (const ie of data.tables.ingressEvents) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO ingress_events (id, "instanceId", "pluginId", "providerDeliveryId", route, payload, "sessionId", "createdAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
               [
@@ -1397,7 +1614,7 @@ export class InfraController {
       if (data.tables.webhookDeliveryFailures?.length) {
         for (const wf of data.tables.webhookDeliveryFailures) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO webhook_delivery_failures (id, "webhookId", "sessionId", event, url, "idempotencyKey", "deliveryId", attempts, "lastStatusCode", "lastError", "createdAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
               [
@@ -1426,7 +1643,7 @@ export class InfraController {
       if (data.tables.integrationDeliveryFailures?.length) {
         for (const df of data.tables.integrationDeliveryFailures) {
           try {
-            await queryRunner.query(
+            await insert(
               `INSERT INTO integration_delivery_failures (id, direction, "pluginId", "instanceId", "sessionId", "deliveryId", attempts, "lastError", payload, redriven, "createdAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
               [
@@ -1487,6 +1704,13 @@ export class InfraController {
       }
 
       await queryRunner.commitTransaction();
+
+      // Audit the destructive replace-all restore, only on the committed-success path (the rollback /
+      // refused-empty branches above return without emitting, since no data actually changed). Any
+      // warnings would have taken the rollback branch, so warnings.length is always 0 here — record
+      // only the per-table counts.
+      await this.auditService?.logInfo(AuditAction.INFRA_DATA_IMPORTED, { metadata: { counts } });
+
       return { imported: true, counts, warnings };
     } catch (error) {
       await queryRunner.rollbackTransaction();
@@ -1553,16 +1777,22 @@ export class InfraController {
       fs.promises.unlink(exportPath).catch(() => undefined);
     }, ttlMs).unref();
 
+    // cwd-relative rather than an absolute host path: doesn't leak the filesystem layout, and the
+    // import round-trip still works because importStorage's existsSync/createReadStream resolve a
+    // relative filePath against the same cwd this was made relative to.
+    const download = path.relative(process.cwd(), exportPath);
+
+    // Audit the bulk media-export (all stored files leave the box as one archive).
+    await this.auditService?.logInfo(AuditAction.INFRA_STORAGE_EXPORTED, { metadata: { download } });
+
     return {
       message: 'Storage export completed',
-      // cwd-relative rather than an absolute host path: doesn't leak the filesystem layout, and the
-      // import round-trip still works because importStorage's existsSync/createReadStream resolve a
-      // relative filePath against the same cwd this was made relative to.
-      download: path.relative(process.cwd(), exportPath),
+      download,
     };
   }
 
   @Post('storage/import')
+  @HttpCode(HttpStatus.OK)
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Import storage files from tar.gz' })
   @ApiBody({ description: 'Path to tar.gz file to import' })
@@ -1573,23 +1803,32 @@ export class InfraController {
     const { filePath } = body;
 
     // `filePath` is fully caller-controlled. Restrict it to the app's data
-    // directory so it cannot point at arbitrary files on the host.
+    // directory so it cannot point at arbitrary files on the host. Resolve once against the
+    // same cwd-relative base used by exportStorage, then use that exact path for both the guard
+    // and the file sink.
     const dataDir = path.join(process.cwd(), 'data');
-    if (!filePath || !isPathWithin(dataDir, filePath)) {
+    const resolved = path.resolve(process.cwd(), filePath || '');
+    if (!filePath || !isPathWithin(dataDir, resolved)) {
       throw new BadRequestException('filePath must reference a file inside the data directory');
     }
 
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(resolved)) {
       throw new BadRequestException(`File not found: ${filePath}`);
     }
 
-    const readStream = fs.createReadStream(filePath);
+    const readStream = fs.createReadStream(resolved);
     const count = await this.storageService.importFromStream(readStream);
+    const storageType = this.storageService.getCurrentStorageType();
+
+    // Audit the bulk media-import (files written into the active storage backend).
+    await this.auditService?.logInfo(AuditAction.INFRA_STORAGE_IMPORTED, {
+      metadata: { count, storageType },
+    });
 
     return {
       imported: true,
       count,
-      storageType: this.storageService.getCurrentStorageType(),
+      storageType,
     };
   }
 }

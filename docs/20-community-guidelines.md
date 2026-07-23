@@ -103,6 +103,7 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/):
 ```
 
 **Types:**
+
 - `feat`: A new feature
 - `fix`: A bug fix
 - `docs`: Documentation only changes
@@ -136,18 +137,22 @@ refactor(database): migrate to TypeORM repository pattern
 
 ```markdown
 ## Description
+
 Brief description of changes
 
 ## Type of Change
+
 - [ ] Bug fix (non-breaking change which fixes an issue)
 - [ ] New feature (non-breaking change which adds functionality)
 - [ ] Breaking change (fix or feature that causes existing functionality to change)
 - [ ] Documentation update
 
 ## Testing
+
 Describe how you tested your changes
 
 ## Checklist
+
 - [ ] My code follows the project's style guidelines
 - [ ] I have performed a self-review of my code
 - [ ] I have commented my code, particularly in hard-to-understand areas
@@ -187,27 +192,51 @@ interface SendMessageOptions {
  * @param text - Message text content
  * @returns Promise resolving to the sent message
  */
-async function sendTextMessage(
-  sessionId: string,
-  phone: string,
-  text: string
-): Promise<Message> {
+async function sendTextMessage(sessionId: string, phone: string, text: string): Promise<Message> {
   // ...
 }
 ```
 
 **Naming Conventions:**
 
-| Type | Convention | Example |
-|------|------------|---------|
-| Classes | PascalCase | `SessionManager` |
+| Type       | Convention                          | Example                 |
+| ---------- | ----------------------------------- | ----------------------- |
+| Classes    | PascalCase                          | `SessionManager`        |
 | Interfaces | PascalCase with I prefix (optional) | `Session` or `ISession` |
-| Functions | camelCase | `sendMessage` |
-| Variables | camelCase | `sessionCount` |
-| Constants | UPPER_SNAKE_CASE | `MAX_SESSIONS` |
-| Files | kebab-case | `session-manager.ts` |
+| Functions  | camelCase                           | `sendMessage`           |
+| Variables  | camelCase                           | `sessionCount`          |
+| Constants  | UPPER_SNAKE_CASE                    | `MAX_SESSIONS`          |
+| Files      | kebab-case                          | `session-manager.ts`    |
 
 ## 20.3 Issue Guidelines
+
+### Issue vs. Discussions
+
+Before opening an Issue, decide whether it belongs here or in **GitHub Discussions**.
+Most misrouted reports are configuration, provider, or environment questions rather than
+defects in OpenWA — routing them correctly upfront saves time for everyone (faster answers
+for you, cleaner triage for maintainers). When in doubt, open a Discussion first; it can
+always be promoted to an Issue once a real defect is confirmed.
+
+| Open an **Issue**                                                        | Open a **Discussion**                                                       |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| Reproducible defect in OpenWA code with clear steps, expected vs. actual | Setup / configuration help ("my proxy doesn't work, how do I configure X?") |
+| Crash, panic, wrong API response, regression after upgrade               | Provider-specific quirks (webshare, IPRoyal, brightdata, Twilio, etc.)      |
+| Documented behavior contradicted by actual behavior                      | "Is X possible?" / "What's the best way to Y?"                              |
+| Security issue (use `SECURITY.md`, not a public issue)                   | Hosting-platform / network / firewall questions                             |
+
+**Common gray-zone examples (these go to Discussions, not Issues):**
+
+- "My proxy works on first start but fails after pod restart" → almost always a
+  provider-side IP allowlist, not an OpenWA bug. See `docs/12-troubleshooting-faq.md`.
+- "WhatsApp blocked my number" → provider/WhatsApp policy, not a code defect.
+- "How do I deploy behind nginx/Traefik?" → configuration, use Discussions.
+- "Why is my QR not showing?" → start with the troubleshooting FAQ; open an Issue only
+  if the documented fixes don't resolve it.
+
+If an Issue lands in the gray zone, it will be labeled `needs-info`, `not-a-bug`, or
+`move-to-discussions`. Environmental or provider-side reports are closed and continued in
+Discussions.
 
 ### Bug Reports
 
@@ -215,9 +244,11 @@ Use the bug report template:
 
 ```markdown
 ## Bug Description
+
 Clear and concise description of the bug
 
 ## Environment
+
 - OpenWA Version:
 - Node.js Version:
 - OS:
@@ -225,21 +256,26 @@ Clear and concise description of the bug
 - Database: SQLite / PostgreSQL
 
 ## Steps to Reproduce
+
 1. Go to '...'
 2. Click on '....'
 3. Scroll down to '....'
 4. See error
 
 ## Expected Behavior
+
 What you expected to happen
 
 ## Actual Behavior
+
 What actually happened
 
 ## Screenshots/Logs
+
 If applicable, add screenshots or logs
 
 ## Additional Context
+
 Any other relevant information
 ```
 
@@ -249,47 +285,60 @@ Use the feature request template:
 
 ```markdown
 ## Feature Description
+
 Clear description of the feature you'd like
 
 ## Use Case
+
 Why do you need this feature? What problem does it solve?
 
 ## Proposed Solution
+
 If you have a solution in mind, describe it here
 
 ## Alternatives Considered
+
 Other solutions you've considered
 
 ## Additional Context
+
 Any other relevant information, mockups, or examples
 ```
 
 ### Issue Labels
 
-| Label | Description |
-|-------|-------------|
-| `bug` | Something isn't working |
-| `enhancement` | New feature or request |
-| `documentation` | Improvements to docs |
-| `good first issue` | Good for newcomers |
-| `help wanted` | Extra attention needed |
-| `question` | Further information requested |
-| `wontfix` | This will not be worked on |
-| `duplicate` | This issue already exists |
-| `priority:high` | High priority issue |
-| `priority:low` | Low priority issue |
+| Label                 | Description                                                                     |
+| --------------------- | ------------------------------------------------------------------------------- |
+| `bug`                 | Something isn't working                                                         |
+| `enhancement`         | New feature or request                                                          |
+| `documentation`       | Improvements to docs                                                            |
+| `good first issue`    | Good for newcomers                                                              |
+| `help wanted`         | Extra attention needed                                                          |
+| `question`            | Further information requested                                                   |
+| `needs-info`          | Awaiting reporter input to proceed                                              |
+| `not-a-bug`           | External/environmental cause (provider, network, hosting); not an OpenWA defect |
+| `move-to-discussions` | Belongs in GitHub Discussions, not Issues — see §20.3 Issue vs. Discussions     |
+| `invalid`             | This doesn't seem right                                                         |
+| `wontfix`             | This will not be worked on                                                      |
+| `duplicate`           | This issue already exists                                                       |
+| `security`            | Security-related                                                                |
+| `design`              | Architecture / design discussion                                                |
+| `engine:baileys`      | Baileys engine specific                                                         |
+| `upstream-blocked`    | Blocked on upstream library/WhatsApp behavior; no OpenWA-side fix               |
 
 ## 20.4 Community Channels
 
 ### GitHub Discussions
 
 Primary community forum for:
+
 - Questions and answers
 - Feature discussions
 - Show and tell
 - General discussions
 
 Categories:
+
 - **Announcements**: Official announcements from maintainers
 - **Q&A**: Questions about using OpenWA
 - **Ideas**: Feature suggestions and brainstorming
@@ -299,11 +348,13 @@ Categories:
 ### Discord Server (Optional)
 
 Real-time chat for:
+
 - Quick questions
 - Community support
 - Development discussions
 
 Channels:
+
 - `#general` - General discussion
 - `#support` - Help with OpenWA
 - `#development` - Development discussions
@@ -351,42 +402,50 @@ RFC Template:
 # RFC: [Title]
 
 ## Summary
+
 One paragraph explanation
 
 ## Motivation
+
 Why are we doing this?
 
 ## Detailed Design
+
 Technical details of the implementation
 
 ## Drawbacks
+
 Why should we NOT do this?
 
 ## Alternatives
+
 What other designs have been considered?
 
 ## Unresolved Questions
+
 What related issues are out of scope?
 ```
 
 ### Maintainer Roles
 
-| Role | Responsibilities |
-|------|------------------|
-| **Owner** | Final decision authority, project direction |
-| **Maintainer** | Code review, merge PRs, triage issues |
-| **Committer** | Merge own PRs after approval |
-| **Contributor** | Submit PRs, report issues |
+| Role            | Responsibilities                            |
+| --------------- | ------------------------------------------- |
+| **Owner**       | Final decision authority, project direction |
+| **Maintainer**  | Code review, merge PRs, triage issues       |
+| **Committer**   | Merge own PRs after approval                |
+| **Contributor** | Submit PRs, report issues                   |
 
 ### Becoming a Maintainer
 
 Maintainer status is earned through:
+
 - Consistent quality contributions
 - Helpful community participation
 - Understanding of project goals
 - Positive collaboration
 
 Process:
+
 1. Nominated by existing maintainer
 2. Discussion among maintainers
 3. Unanimous approval required
@@ -396,6 +455,7 @@ Process:
 ### Contributors
 
 All contributors are recognized in:
+
 - `CONTRIBUTORS.md` file
 - Release notes
 - README acknowledgments
@@ -403,6 +463,7 @@ All contributors are recognized in:
 ### Contribution Types
 
 We value all contributions:
+
 - Code contributions
 - Documentation improvements
 - Bug reports
@@ -431,10 +492,12 @@ This project follows the [all-contributors](https://github.com/all-contributors/
 **DO NOT** report security vulnerabilities through public GitHub issues.
 
 Instead:
+
 1. Email: security@openwa.dev
 2. Use GitHub Security Advisories (private)
 
 Include:
+
 - Type of vulnerability
 - Full paths of affected files
 - Step-by-step instructions to reproduce
@@ -444,11 +507,11 @@ Include:
 ### Response Timeline
 
 | Severity | Initial Response | Resolution Target |
-|----------|------------------|-------------------|
-| Critical | 24 hours | 7 days |
-| High | 48 hours | 14 days |
-| Medium | 7 days | 30 days |
-| Low | 14 days | 90 days |
+| -------- | ---------------- | ----------------- |
+| Critical | 24 hours         | 7 days            |
+| High     | 48 hours         | 14 days           |
+| Medium   | 7 days           | 30 days           |
+| Low      | 14 days          | 90 days           |
 
 ### Disclosure Policy
 
@@ -456,6 +519,7 @@ Include:
 - We will confirm the vulnerability and work on a fix
 - We will notify you when the fix is released
 - We will credit you in the security advisory (unless you prefer anonymity)
+
 ---
 
 <div align="center">

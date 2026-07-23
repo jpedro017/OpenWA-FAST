@@ -165,12 +165,18 @@ The contract is engine-neutral: pass neutral `@c.us` WIDs and the active engine 
 
 ### Send response: `201` means accepted, not delivered
 
-Every send route returns **HTTP 201** with `{ "messageId", "timestamp" }` as soon as the gateway hands the message to the WhatsApp client. This confirms the send was *accepted* — it does **not** confirm the recipient received it. Two consequences worth knowing:
+Single-recipient send routes under `/messages` return **HTTP 201** with `{ "messageId", "timestamp" }` as soon as the gateway hands the message to the WhatsApp client. This confirms the send was *accepted* — it does **not** confirm the recipient received it. Two routes differ: `POST send-bulk` returns **202** with a batch envelope (`{ batchId, status, totalMessages, … }`), and the `status/send-*` routes return **201** with `{ statusId, timestamp, expiresAt }` — a `statusId`, not a `messageId`, and an ISO timestamp rather than epoch seconds.
 
-1. **WhatsApp does not reject an unregistered recipient synchronously.** A message to a number that is not on WhatsApp still returns `201` with a valid `messageId`, but never delivers (it sits at a single grey tick and may surface an error in the chat). This is the most common cause of a "successful send that never arrived" for a number you have not messaged before.
+Two consequences worth knowing:
+
+1. **WhatsApp does not reject an unregistered recipient synchronously.** A message to a number that is not on WhatsApp still returns `201` with a valid `messageId`. Whether it later delivers, stalls, or is reported as an error reaches you asynchronously, if at all.
 2. **There is no synchronous delivery confirmation on either engine** (whatsapp-web.js or Baileys), so the `201` cannot be made to mean "delivered."
 
-**Before sending to a new number**, confirm it is a registered WhatsApp account with `GET /api/sessions/:sessionId/contacts/check/:number` (returns `{ exists, whatsappId }`; see the Contacts reference). For real delivery state, track the stored message's `status`, which advances asynchronously through `sent → delivered → read` (or `failed`) as WhatsApp sends acks — see the message shape under the Messages reference. A message that stays at `sent` indefinitely for a recipient you have never reached is almost certainly a number that is not on WhatsApp.
+**Before sending to a new number**, you can confirm it is a registered WhatsApp account with `GET /api/sessions/:sessionId/contacts/check/:number` (returns `{ exists, whatsappId }`; see the Contacts reference).
+
+**For real delivery state**, track the stored message's `status`, which advances asynchronously as WhatsApp sends acks: `sent → delivered → read`, or `failed` when WhatsApp reports an error for the message — which also dispatches a `message.failed` webhook. See the message shape under the Messages reference.
+
+A message resting at `sent` is **not** diagnostic on its own. It means no ack has advanced it yet, and a registered recipient whose device has not come online since the send stays at `sent` indefinitely too — that is the designed behavior, not a fault. Use `contacts/check` to tell an unregistered number apart from a registered one that simply has not received yet.
 
 ## 6.4 REST API Reference
 
@@ -330,6 +336,7 @@ Get active chats for a session, most-recent first (paginated).
     "id": "6281234567890@c.us",
     "name": "Alice",
     "isGroup": false,
+    "kind": "individual",
     "unreadCount": 2,
     "timestamp": 1719306115,
     "lastMessage": "See you tomorrow"
@@ -337,7 +344,7 @@ Get active chats for a session, most-recent first (paginated).
 ]
 ```
 
-Sorted by `timestamp` DESC (most recent first) then paginated. `timestamp` is an epoch number (seconds).
+Sorted by `timestamp` DESC (most recent first) then paginated. `timestamp` is an epoch number (seconds). `kind` is the user-facing chat discriminator — one of `individual|group|channel|status|broadcast|unknown`; `isGroup` is retained for back-compat (true only for `kind: "group"`).
 
 **Errors:** `400` session not started · `401` · `403` · `404` session not found
 
@@ -441,7 +448,7 @@ Start a session and initialize the WhatsApp connection.
 
 No request body.
 
-**Response** `201`
+**Response** `200`
 
 ```json
 {
@@ -458,7 +465,7 @@ No request body.
 }
 ```
 
-Returned via `transformSession`. Status typically transitions to `initializing` / `qr_ready`. Note: Swagger declares `200`, but with no `@HttpCode` override the runtime status is **`201`** (NestJS POST default).
+Returned via `transformSession`. Status typically transitions to `initializing` / `qr_ready`.
 
 **Errors:** `400` session already started / already starting · `401` · `403` · `404` not found
 
@@ -476,7 +483,7 @@ Stop a session and disconnect WhatsApp.
 
 No request body.
 
-**Response** `201`
+**Response** `200`
 
 ```json
 {
@@ -493,7 +500,7 @@ No request body.
 }
 ```
 
-Returned via `transformSession`; status typically becomes `disconnected`. Swagger declares `200`; runtime status is **`201`**.
+Returned via `transformSession`; status typically becomes `disconnected`.
 
 **Errors:** `401` · `403` · `404` not found
 
@@ -511,7 +518,7 @@ Force-kill a stuck session (SIGKILL the wedged engine, then tear it down).
 
 No request body.
 
-**Response** `201`
+**Response** `200`
 
 ```json
 {
@@ -528,7 +535,7 @@ No request body.
 }
 ```
 
-Returned via `transformSession`. Swagger declares `200`; runtime status is **`201`**.
+Returned via `transformSession`.
 
 **Errors:** `401` · `403` · `404` not found
 
@@ -586,13 +593,13 @@ Mark a chat as read/seen.
 { "chatId": "1234567890@c.us" }
 ```
 
-**Response** `201`
+**Response** `200`
 
 ```json
 { "success": true }
 ```
 
-Swagger declares `200`; runtime status is **`201`**.
+Returns HTTP `200`, matching the OpenAPI contract.
 
 **Errors:** `400` validation, or session not started · `401` · `403` · `404` session not found
 
@@ -618,13 +625,13 @@ Mark a chat as unread.
 { "chatId": "1234567890@c.us" }
 ```
 
-**Response** `201`
+**Response** `200`
 
 ```json
 { "success": true }
 ```
 
-Swagger declares `200`; runtime status is **`201`**.
+Returns HTTP `200`, matching the OpenAPI contract.
 
 **Errors:** `400` validation, or session not started · `401` · `403` · `404` session not found
 
@@ -650,13 +657,13 @@ Delete a chat from the chat list (e.g. a group you have left).
 { "chatId": "1234567890-123@g.us" }
 ```
 
-**Response** `201`
+**Response** `200`
 
 ```json
 { "success": true }
 ```
 
-Swagger declares `200`; runtime status is **`201`**.
+Returns HTTP `200`, matching the OpenAPI contract.
 
 **Errors:** `400` validation, or session not started · `401` · `403` · `404` session not found
 
@@ -683,13 +690,13 @@ Send a typing/recording presence indicator to a chat (or clear it with `paused`)
 { "chatId": "1234567890@c.us", "state": "typing" }
 ```
 
-**Response** `201`
+**Response** `200`
 
 ```json
 { "success": true }
 ```
 
-Always returns `{ "success": true }` (the service returns void; the controller hardcodes `true`). Swagger declares `200`; runtime status is **`201`**.
+Always returns `{ "success": true }` (the service returns void; the controller hardcodes `true`).
 
 **Errors:** `400` validation, or session not started · `401` · `403` · `404` session not found
 
@@ -711,7 +718,7 @@ Delete a session.
 
 ### 6.4.2 Messages
 
-All routes are mounted under `/api/sessions/:sessionId/messages`. Reads (`GET` history, batch status, reactions) accept any valid API key (including VIEWER). All write/send routes require **API key (OPERATOR)** or higher. Send routes return `MessageResponseDto { messageId, timestamp }` (`timestamp` is an epoch **number** in seconds; there is no `status` field). The global ValidationPipe runs `whitelist` + `forbidNonWhitelisted`, so any body field not listed below is rejected with `400`.
+All routes are mounted under `/api/sessions/:sessionId/messages`. Reads (`GET` history, batch status, reactions) accept any valid API key (including VIEWER). All write/send routes require **API key (OPERATOR)** or higher. Single-recipient send routes return `MessageResponseDto { messageId, timestamp }` (`timestamp` is an epoch **number** in seconds; there is no `status` field); `POST send-bulk` instead returns `202` with `BulkMessageResponseDto`. The global ValidationPipe runs `whitelist` + `forbidNonWhitelisted`, so any body field not listed below is rejected with `400`.
 
 #### GET /api/sessions/:sessionId/messages
 
@@ -759,7 +766,7 @@ Get persisted message history for a session from the local DB (paginated, filter
 }
 ```
 
-Each `Message`: `{ id (uuid), sessionId, waMessageId (string|null), chatId, from, to, body (string|null), type, direction ('incoming'|'outgoing'), timestamp (number|null), metadata (object|null), status ('pending'|'sent'|'delivered'|'read'|'failed'), createdAt (ISO date) }`. Ordered by `createdAt` DESC. The response is the raw service object (no envelope).
+Each `Message`: `{ id (uuid), sessionId, waMessageId (string|null), chatId, from, to, body (string|null), type, direction ('incoming'|'outgoing'), timestamp (number|null), metadata (object|null), status ('pending'|'sent'|'delivered'|'read'|'failed'), createdAt (ISO date) }`. Ordered by `createdAt` DESC. The response is the raw service object (no envelope). Unlike the live `IncomingMessage` shape below, this persisted `Message` does **not** carry `kind` — re-derive the chat kind from `chatId` (see `ChatKind` / `chatKind()`) if needed.
 
 **Errors:** `401` missing/invalid API key
 
@@ -800,13 +807,14 @@ Returns a bare array of engine-neutral `IncomingMessage` objects:
     "timestamp": 1719312000,
     "fromMe": false,
     "isGroup": false,
+    "kind": "individual",
     "author": "628123456789@c.us",
     "senderPhone": "628123456789"
   }
 ]
 ```
 
-Each item may also include `isStatusBroadcast`, `mentionedIds`, `isLidSender`, `contact`, `media { mimetype, filename?, data?, omitted?, sizeBytes? }`, `quotedMessage { id, body }`, `call { video, missed }` (for `call` messages), and `location { latitude, longitude, description?, address?, url? }`. `type` is one of `text|image|video|audio|voice|document|sticker|location|contact|call|revoked|masked|unknown`. A `masked` message is one WhatsApp deliberately withholds from linked/companion devices — e.g. a high-security business OTP — so its `body` is empty by design (the content is only available on the primary phone) rather than a parsing failure; this occurs on the Baileys engine.
+Each item may also include `isStatusBroadcast`, `mentionedIds`, `isLidSender`, `contact`, `media { mimetype, filename?, data?, omitted?, sizeBytes? }`, `quotedMessage { id, body }`, `call { video, missed }` (for `call` messages), and `location { latitude, longitude, description?, address?, url? }`. `type` is one of `text|image|video|audio|voice|document|sticker|location|contact|call|revoked|masked|unknown`. A `masked` message is one WhatsApp deliberately withholds from linked/companion devices — e.g. a high-security business OTP — so its `body` is empty by design (the content is only available on the primary phone) rather than a parsing failure; this occurs on the Baileys engine. `kind` is the user-facing chat discriminator of `chatId` — one of `individual|group|channel|status|broadcast|unknown`; it supersedes `isStatusBroadcast` (equivalent to `kind === 'status'`), which is retained for back-compat.
 
 **Errors:** `400` session not active · `401` missing/invalid API key · `500` engine error
 
@@ -1329,6 +1337,40 @@ After the engine delete, the stored message body is cleared and its `type` set t
 ```
 
 **Errors:** `400` session not active / message not found / unknown body field · `401` missing/invalid API key · `403` key role below OPERATOR · `500` engine error
+
+#### POST /api/sessions/:sessionId/messages/edit
+
+Edit the text of a message sent by this account; also updates the stored record's body.
+
+**Auth:** API key (OPERATOR)
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| sessionId | string | Session ID |
+
+**Request body** — `EditMessageDto`
+
+| Field | Type | Required | Constraints | Description |
+| --- | --- | --- | --- | --- |
+| chatId | string | Yes | non-empty | Chat containing the message |
+| messageId | string | Yes | non-empty | Message to edit (the send response's `messageId`) |
+| body | string | Yes | non-empty, ≤ 4096 chars | New text content |
+
+```json
+{ "chatId": "628123456789@c.us", "messageId": "true_628123456789@c.us_3EB0ABCD", "body": "Corrected text" }
+```
+
+**Response** `200`
+
+The edited message keeps its original id.
+
+```json
+{ "messageId": "true_628123456789@c.us_3EB0ABCD", "timestamp": 1760000000 }
+```
+
+**Errors:** `400` session not active / unknown body field · `401` missing/invalid API key · `403` key role below OPERATOR · `404` message not found · `500` engine error (e.g. editing another account's message, which WhatsApp forbids)
 
 #### POST /api/sessions/:sessionId/messages/send-bulk
 
@@ -2016,6 +2058,92 @@ Revoke the current invite code and generate a new one.
 
 **Errors:** `400` session is not started · `401` missing/invalid `X-API-Key` · `403` key lacks OPERATOR role
 
+#### POST /api/sessions/:sessionId/groups/join
+
+Join a group via an invite code (the part after `https://chat.whatsapp.com/`).
+
+**Auth:** API key (OPERATOR)
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| sessionId | string | Session ID |
+
+**Request body** — `JoinGroupDto`
+
+| Field | Type | Required | Constraints | Description |
+| --- | --- | --- | --- | --- |
+| inviteCode | string | Yes | non-empty | Group invite code |
+
+```json
+{ "inviteCode": "XyZ987654321" }
+```
+
+**Response** `200`
+
+```json
+{ "success": true, "groupId": "120363000000000000@g.us" }
+```
+
+**Errors:** `400` session is not started / invalid invite code · `401` missing/invalid `X-API-Key` · `403` key lacks OPERATOR role
+
+#### GET /api/sessions/:sessionId/groups/:groupId/settings
+
+Read the group's admin-only settings and disappearing-message timer.
+
+**Auth:** API key
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| sessionId | string | Session ID |
+| groupId | string | Group ID |
+
+**Response** `200`
+
+`announce` = only admins can send messages; `locked` = only admins can edit group info. `ephemeralSeconds` is present only when the engine reports a disappearing-message timer.
+
+```json
+{ "announce": false, "locked": false, "ephemeralSeconds": 604800 }
+```
+
+**Errors:** `400` session is not started · `401` missing/invalid `X-API-Key` · `404` group not found
+
+#### PUT /api/sessions/:sessionId/groups/:groupId/settings
+
+Update group settings. Each present field maps to one engine call; absent fields stay untouched. The caller must be a group admin for the change to take effect.
+
+**Auth:** API key (OPERATOR)
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| sessionId | string | Session ID |
+| groupId | string | Group ID |
+
+**Request body** — `GroupSettingsDto` (at least one field required)
+
+| Field | Type | Required | Constraints | Description |
+| --- | --- | --- | --- | --- |
+| announce | boolean | No | boolean | Only admins can send messages |
+| locked | boolean | No | boolean | Only admins can edit group info |
+| ephemeralSeconds | integer | No | ≥ 0 | Disappearing-message timer in seconds (`0` disables). **Baileys only** — whatsapp-web.js returns `501` |
+
+```json
+{ "announce": true, "ephemeralSeconds": 86400 }
+```
+
+**Response** `200`
+
+```json
+{ "success": true, "message": "Group settings updated" }
+```
+
+**Errors:** `400` session is not started / empty patch / unknown body field · `401` missing/invalid `X-API-Key` · `403` key lacks OPERATOR role · `501` `ephemeralSeconds` on the whatsapp-web.js engine (library limitation)
+
 ### 6.4.5 Message Templates
 
 Reusable message templates scoped to a session, with `{{variable}}` placeholders rendered at send time. All routes are nested under `/api/sessions/:sessionId/templates` and require an **OPERATOR** key. The `sessionId` is stored on the template but is **not** validated against an existing session in these handlers.
@@ -2229,7 +2357,7 @@ Get business catalog info for the session's WhatsApp Business account.
 }
 ```
 
-Returns `null` when the account has no catalog (catalog is a WhatsApp Business-only feature; non-business accounts may yield `null`). The response is the raw `engine.getCatalog()` return — no envelope.
+**Not implemented on any engine.** whatsapp-web.js returns `null` unconditionally (it has no native Catalog API and the adapter stubs without calling the client); Baileys raises `501`. The shape below documents the contract, not a response you can obtain today. The response is the raw `engine.getCatalog()` return — no envelope.
 
 **Errors:** `401` missing/invalid API key · `404` `Session <sessionId> not found or not connected` · `500` engine error
 
@@ -2340,13 +2468,18 @@ Send a product message (catalog product card) to a chat. Note: this route lives 
 }
 ```
 
-**Response** `201`
+**Response** `501` — always (not implemented)
 
 ```json
-{ "id": "true_6281234567890@c.us_3EB0...", "timestamp": 1719331200 }
+{
+  "statusCode": 501,
+  "message": "Operation not supported by the active engine: sendProduct",
+  "error": "Not Implemented"
+}
 ```
 
-`timestamp` is an epoch number (seconds).
+No engine implements this. whatsapp-web.js and Baileys both raise `EngineNotSupportedError`, so the
+route cannot return a success body on any deployment; it is documented here because it is mounted.
 
 **Errors:** `400` missing `chatId`/`productId`, wrong types, or any field not on the DTO · `401` missing/invalid API key · `403` API-key role below OPERATOR · `404` `Session <sessionId> not found or not connected` · `500` engine error
 
@@ -2376,13 +2509,18 @@ Send the business catalog link to a chat. Note: this route lives under the `/mes
 }
 ```
 
-**Response** `201`
+**Response** `501` — always (not implemented)
 
 ```json
-{ "id": "true_6281234567890@c.us_3EB0...", "timestamp": 1719331200 }
+{
+  "statusCode": 501,
+  "message": "Operation not supported by the active engine: sendCatalog",
+  "error": "Not Implemented"
+}
 ```
 
-`timestamp` is an epoch number (seconds).
+No engine implements this. whatsapp-web.js and Baileys both raise `EngineNotSupportedError`, so the
+route cannot return a success body on any deployment; it is documented here because it is mounted.
 
 **Errors:** `400` missing/invalid `chatId` or any non-DTO field · `401` missing/invalid API key · `403` API-key role below OPERATOR · `404` `Session <sessionId> not found or not connected` · `500` engine error
 
@@ -2648,13 +2786,13 @@ Add a label to a chat.
 { "labelId": "5" }
 ```
 
-**Response** `201`
+**Response** `200`
 
 ```json
 { "success": true }
 ```
 
-The handler always returns the literal `{ "success": true }`. NestJS POST default status is `201` (the Swagger doc says `200`; the runtime code is `201`).
+The handler always returns the literal `{ "success": true }`.
 
 **Errors:** `400` validation failure (missing/empty/non-string `labelId`, or any unknown body field — strict whitelist), or session is not started · `401` missing/invalid API key · `403` key lacks `OPERATOR` role
 
@@ -2756,7 +2894,7 @@ Same `{ statuses }` wrapper and `Status` shape as the list-all route.
 
 #### POST /api/sessions/:sessionId/status/send-text
 
-Post a text status (story) to the session's status feed. **Baileys engine only** — a whatsapp-web.js session returns `501` (see Errors).
+Post a text status (story) to the session's status feed. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts to the account's status-privacy audience.
 
 **Auth:** API key (OPERATOR)
 
@@ -2771,7 +2909,7 @@ Post a text status (story) to the session's status feed. **Baileys engine only**
 | Field | Type | Required | Constraints | Description |
 | --- | --- | --- | --- | --- |
 | text | string | yes | — | Status text body |
-| recipients | string[] | yes | 1–256 items, each matching `^\d+@(c\.us\|lid)$` | JIDs of the contacts permitted to view the status (passed as `statusJidList` to the engine). Empty array → `400` |
+| recipients | string[] | yes | 1–256 items, each matching `^\d+@(c\.us\|lid)$` | JIDs of the contacts permitted to view the status. **Honored on Baileys only** (passed as `statusJidList`); whatsapp-web.js ignores the allow-list and broadcasts to the account's status-privacy audience. Empty array → `400` |
 | backgroundColor | string | no | 6-digit hex color matching `^#[0-9A-Fa-f]{6}$` | e.g. `#25D366`; bad value → `backgroundColor must be a hex color (e.g., #25D366)` |
 | font | integer | no | integer `0`–`5` | Font index |
 
@@ -2795,11 +2933,11 @@ Returns the engine `StatusResult` directly (no wrapper). POST default status is 
 
 **Sender-side caveat:** the posting account's own phone may display a "waiting for this status update" notice in its status feed; this is cosmetic — recipients view the status normally.
 
-**Errors:** `400` validation failure (unknown body field, missing/empty `recipients`, a JID not matching `@c.us`/`@lid`, or more than 256 recipients, bad `backgroundColor`/`font`), or session is not started · `401` missing/invalid API key · `403` key lacks `OPERATOR` role · `404` session not found / not connected · `501` the session is on the whatsapp-web.js engine (status posting is Baileys-only; WA Web removed `WAWebStatusGatingUtils.canCheckStatusRankingPosterGating` around 2026-04-30, so the wwebjs path is upstream-blocked — see #455)
+**Errors:** `400` validation failure (unknown body field, missing/empty `recipients`, a JID not matching `@c.us`/`@lid`, or more than 256 recipients, bad `backgroundColor`/`font`), or session is not started · `401` missing/invalid API key · `403` key lacks `OPERATOR` role · `404` session not found / not connected
 
 #### POST /api/sessions/:sessionId/status/send-image
 
-Post an image status (story) from a URL or base64 payload. **Baileys engine only** — a whatsapp-web.js session returns `501` (see Errors).
+Post an image status (story) from a URL or base64 payload. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts to the account's status-privacy audience.
 
 **Auth:** API key (OPERATOR)
 
@@ -2840,11 +2978,11 @@ Returns the engine `StatusResult` directly. POST default status is `201`.
 
 **Recipient JIDs:** `@c.us` (regular phone) recipients are reliable. `@lid` (privacy-id) recipients are best-effort and unverified — prefer `@c.us` where the phone number is known. **Sender-side caveat:** the posting account's own phone may show a "waiting for this status update" notice; recipients view it normally.
 
-**Errors:** `400` validation failure (unknown body field, missing/empty `recipients`, a JID not matching `@c.us`/`@lid`, or more than 256 recipients), or session is not started · `401` missing/invalid API key · `403` key lacks `OPERATOR` role · `404` session not found / not connected · `501` the session is on the whatsapp-web.js engine (status posting is Baileys-only; see `send-text` and #455)
+**Errors:** `400` validation failure (unknown body field, missing/empty `recipients`, a JID not matching `@c.us`/`@lid`, or more than 256 recipients), or session is not started · `401` missing/invalid API key · `403` key lacks `OPERATOR` role · `404` session not found / not connected
 
 #### POST /api/sessions/:sessionId/status/send-video
 
-Post a video status (story) from a URL or base64 payload. **Baileys engine only** — a whatsapp-web.js session returns `501` (see Errors).
+Post a video status (story) from a URL or base64 payload. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts to the account's status-privacy audience.
 
 **Auth:** API key (OPERATOR)
 
@@ -2885,7 +3023,7 @@ Returns the engine `StatusResult` directly. POST default status is `201`.
 
 **Recipient JIDs:** `@c.us` (regular phone) recipients are reliable. `@lid` (privacy-id) recipients are best-effort and unverified — prefer `@c.us` where the phone number is known. **Sender-side caveat:** the posting account's own phone may show a "waiting for this status update" notice; recipients view it normally.
 
-**Errors:** `400` validation failure (unknown body field, missing/empty `recipients`, a JID not matching `@c.us`/`@lid`, or more than 256 recipients), or session is not started · `401` missing/invalid API key · `403` key lacks `OPERATOR` role · `404` session not found / not connected · `501` the session is on the whatsapp-web.js engine (status posting is Baileys-only; see `send-text` and #455)
+**Errors:** `400` validation failure (unknown body field, missing/empty `recipients`, a JID not matching `@c.us`/`@lid`, or more than 256 recipients), or session is not started · `401` missing/invalid API key · `403` key lacks `OPERATOR` role · `404` session not found / not connected
 
 #### DELETE /api/sessions/:sessionId/status/:statusId
 
@@ -2916,7 +3054,7 @@ Webhooks are configured per session and managed under `/api/sessions/:sessionId/
 
 Two fields — `secret` and `headers` — are **write-only**: they are accepted on create/update but are **never** returned in any response (the response DTO has no `@Expose` for them, so `fromEntity` drops them). The `secret` is used to compute the `X-OpenWA-Signature: sha256=<hex>` HMAC-SHA256 header on deliveries.
 
-The `events` array accepts these members plus the `*` wildcard: `message.received`, `message.sent`, `message.ack`, `message.failed`, `message.revoked`, `message.reaction`, `session.status`, `session.qr`, `session.authenticated`, `session.disconnected`, `group.join`, `group.leave`, `group.update`. The `group.*` events are **reserved** — accepted and validated but never dispatched (no engine emit source).
+The `events` array accepts these members plus the `*` wildcard: `message.received`, `message.sent`, `message.ack`, `message.failed`, `message.revoked`, `message.reaction`, `message.edited`, `session.status`, `session.qr`, `session.authenticated`, `session.disconnected`, `session.reconnect_loop`, `group.join`, `group.leave`, `group.update`, `call.received`. All of them are actively dispatched by the engines.
 
 #### GET /api/sessions/:sessionId/webhooks
 
@@ -3346,7 +3484,7 @@ Returns the updated key (no plaintext).
 }
 ```
 
-**Errors:** `400` validation (incl. `forbidNonWhitelisted` for unknown fields such as `isActive`) · `401` missing/invalid key · `403` key role below ADMIN · `404` not found
+**Errors:** `400` validation (incl. `forbidNonWhitelisted` for unknown fields such as `isActive`) · `401` missing/invalid key · `403` key role below ADMIN · `404` not found · `409` change would remove the last usable admin key
 
 #### POST /api/auth/api-keys/:id/revoke
 
@@ -3362,7 +3500,7 @@ Revoke (deactivate) an API key without deleting it. No request body required.
 
 **Response** `200` — `ApiKeyResponseDto`
 
-Sets `isActive` to `false` and returns the key. Default POST status `200` (no `@HttpCode` override). After revoke, the key fails validation with `401 "API key is revoked"`.
+Sets `isActive` to `false` and returns the key with explicit HTTP `200`. After revoke, the key fails validation with `401 "API key is revoked"`.
 
 ```json
 {
@@ -3376,7 +3514,7 @@ Sets `isActive` to `false` and returns the key. Default POST status `200` (no `@
 }
 ```
 
-**Errors:** `401` missing/invalid key · `403` key role below ADMIN · `404` not found
+**Errors:** `401` missing/invalid key · `403` key role below ADMIN · `404` not found · `409` target is the last usable admin key
 
 #### DELETE /api/auth/api-keys/:id
 
@@ -3394,7 +3532,7 @@ Permanently delete an API key (hard delete). Also drops any un-flushed usage acc
 
 `@HttpCode(204)` — no response body.
 
-**Errors:** `401` missing/invalid key · `403` key role below ADMIN · `404` `"API key with id '<id>' not found"`
+**Errors:** `401` missing/invalid key · `403` key role below ADMIN · `404` `"API key with id '<id>' not found"` · `409` target is the last usable admin key
 
 #### POST /api/auth/validate
 
@@ -3506,10 +3644,10 @@ openwa_sessions_active 2
 # TYPE openwa_sessions gauge
 openwa_sessions{status="ready"} 2
 openwa_sessions{status="disconnected"} 1
-# TYPE openwa_messages_total counter
+# TYPE openwa_messages_total gauge
 openwa_messages_total{direction="outgoing"} 1280
 openwa_messages_total{direction="incoming"} 940
-# TYPE openwa_messages_failed_total counter
+# TYPE openwa_messages_failed_total gauge
 openwa_messages_failed_total 4
 ```
 
@@ -3623,8 +3761,7 @@ Get application settings (environment-derived; `general`/`api`/`notifications` g
 {
   "general": {
     "apiBaseUrl": "http://localhost:2785",
-    "sessionTimeout": 0,
-    "autoReconnect": false,
+    "autoReconnect": true,
     "debugMode": false
   },
   "api": {
@@ -3640,7 +3777,7 @@ Get application settings (environment-derived; `general`/`api`/`notifications` g
 }
 ```
 
-Notes: raw return of an in-memory `Settings` object built once in the controller constructor from `ConfigService` (snapshotted at construction, not re-read per request). `general.sessionTimeout` is `floor(webhook.timeout / 60000)` minutes; `api.rateLimitWindow` is in ms; `enableDocs`/`notifications.*` are partly hardcoded (`enableDocs: true`, `emailEnabled: false`, `notificationEmail: ''`, `webhookAlerts: true`).
+Notes: raw return of an in-memory `Settings` object built once in the controller constructor from `ConfigService` (snapshotted at construction, not re-read per request). `api.rateLimitWindow` is in ms. `enableDocs` reflects the `ENABLE_SWAGGER` gate (enabled by default outside production; disabled by default in production unless explicitly enabled). Only `notifications.*` is currently hardcoded (`emailEnabled: false`, `notificationEmail: ''`, `webhookAlerts: true`).
 
 **Errors:** `401` — missing/invalid `X-API-Key` · `403` — API key lacks the ADMIN role.
 
@@ -3802,12 +3939,12 @@ Merge-save infrastructure config to `data/.env.generated` (a `0600` secret file)
 
 **Auth:** API key (ADMIN)
 
-**Request body** — `SaveConfigDto` (plain interface, **not** class-validated; only `engine.type` and CR/LF safety are enforced)
+**Request body** — `SaveConfigDto` (recursively class-validated; unknown or mistyped fields are rejected)
 
 | Field | Type | Required | Constraints | Description |
 | --- | --- | --- | --- | --- |
 | `database` | object | No | — | DB section (see nested) |
-| `database.type` | `'sqlite' \| 'postgres'` | No | — | `sqlite` drops stale postgres keys; `postgres` writes connection keys |
+| `database.type` | `'sqlite' \| 'postgres'` | If `database` is present | enum | `sqlite` drops stale postgres keys; `postgres` writes connection keys |
 | `database.builtIn` | boolean | No | — | When `true`+postgres, forces the bundled `postgres` container creds + pushes `postgres` Docker profile |
 | `database.host` / `.port` / `.username` / `.database` | string | No | `port` is a string | External postgres connection (defaults `localhost`/`5432`/`postgres`/`openwa`) |
 | `database.password` | string | No | secret | Empty/omitted keeps the existing stored secret |
@@ -3816,10 +3953,9 @@ Merge-save infrastructure config to `data/.env.generated` (a `0600` secret file)
 | `database.sslRejectUnauthorized` | boolean | No | — | Only written when `sslEnabled` is true; default true |
 | `redis.enabled` / `.builtIn` | boolean | No | — | `builtIn`+enabled forces `redis` container + profile |
 | `redis.host` / `.port` | string | No | `port` is a string | Defaults `localhost`/`6379` |
-| `redis.username` | string | No | — | Redis ACL username |
 | `redis.password` | string | No | secret | Empty keeps existing |
 | `queue.enabled` | boolean | No | — | Writes `QUEUE_ENABLED` |
-| `storage.type` | `'local' \| 's3'` | No | — | `local` drops stale S3 keys; `s3` drops `STORAGE_LOCAL_PATH` |
+| `storage.type` | `'local' \| 's3'` | If `storage` is present | enum | `local` drops stale S3 keys; `s3` drops `STORAGE_LOCAL_PATH` |
 | `storage.builtIn` | boolean | No | — | `true`+s3 uses bundled MinIO defaults + pushes `minio` profile |
 | `storage.localPath` | string | No | — | Default `./data/media` |
 | `storage.s3Bucket` / `.s3Region` / `.s3Endpoint` | string | No | — | External S3 |
@@ -3845,9 +3981,10 @@ Merge-save infrastructure config to `data/.env.generated` (a `0600` secret file)
 { "message": "Configuration saved. Server restart required.", "saved": true, "envPath": "data/.env.generated", "profiles": ["postgres", "redis"] }
 ```
 
-This route **always returns HTTP 200**, even on failure: write/IO errors are caught and returned as `{ "saved": false, "envPath": "", "profiles": [], "message": "Failed to save configuration: …" }`. The only true `400` cases are an unknown `engine.type` or any value containing `\r`/`\n`. `profiles` lists newly-required Docker profiles.
+Write/IO errors are caught and returned as HTTP `200` with `{ "saved": false, "envPath": "", "profiles": [], "message": "Failed to save configuration: …" }`. DTO validation, an unknown engine type, and CR/LF injection are real HTTP `400` responses. `profiles` lists newly-required Docker profiles.
 
-**Errors:** `400` unknown `engine.type` / CR-LF in a value · `401` · `403`
+**Errors:** `400` unknown/mistyped body field, missing nested `database.type`/`storage.type`, unknown
+`engine.type`, or CR-LF in a value · `401` · `403`
 
 ---
 
@@ -3857,7 +3994,7 @@ Request a graceful server restart, optionally orchestrating Docker profiles (add
 
 **Auth:** API key (ADMIN)
 
-**Request body** — optional inline type (plain interface, not class-validated)
+**Request body** — optional `RestartDto` (class-validated; unknown fields and non-string array members reject)
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
@@ -3999,7 +4136,7 @@ Import storage files from a `tar.gz` located inside the `data/` directory.
 
 **Auth:** API key (ADMIN)
 
-**Request body** — inline `{ filePath: string }` (plain interface, not class-validated; path-safety enforced manually)
+**Request body** — `ImportStorageDto` (class-validated; path-safety is additionally enforced manually)
 
 | Field | Type | Required | Constraints | Description |
 | --- | --- | --- | --- | --- |
@@ -4105,7 +4242,8 @@ Get a single plugin by id.
 
 #### GET /api/plugins/:id/config-ui
 
-Serve a plugin's sandboxed config-UI entry HTML (for an iframe `srcdoc`).
+Serve a plugin's sandboxed config-UI entry HTML (for an opaque-origin iframe `srcdoc`; the dashboard
+applies its document-specific CSP nonce to inline scripts and keeps any declared schema form available as fallback).
 
 **Auth:** API key (ADMIN)
 
@@ -4496,6 +4634,83 @@ contract surface for a future plugin provider whose `search()` throws `ServiceUn
 > overridden via the query — there is no `sessionIds` query parameter, and `SearchService` overwrites
 > any session scope at the provider boundary.
 
+### 6.4.13 Profile (own account)
+
+Manage the linked account's own profile. All routes are nested under `/api/sessions/:sessionId/profile` and require an **OPERATOR** key.
+
+#### PUT /api/sessions/:sessionId/profile/name
+
+Set the account display name (max 25 chars).
+
+**Auth:** API key (OPERATOR)
+
+```json
+{ "name": "ACME Support" }
+```
+
+**Response** `200` — `{ "success": true, "message": "Profile name updated" }`
+
+**Errors:** `400` session is not started / invalid name · `401` · `403` · `500` engine refused the change
+
+#### PUT /api/sessions/:sessionId/profile/status
+
+Set the account about/status text (max 139 chars; empty string clears it).
+
+**Auth:** API key (OPERATOR)
+
+```json
+{ "status": "We reply within one business day" }
+```
+
+**Response** `200` — `{ "success": true, "message": "Profile status updated" }`
+
+**Errors:** `400` session is not started / status too long · `401` · `403`
+
+#### PUT /api/sessions/:sessionId/profile/picture
+
+Set the account profile picture from a URL or base64 image (same media DTO conventions as message sends, §6.3).
+
+**Auth:** API key (OPERATOR)
+
+```json
+{ "url": "https://example.com/avatar.png" }
+```
+
+or
+
+```json
+{ "base64": "iVBORw0KGgo...", "mimetype": "image/png" }
+```
+
+**Response** `200` — `{ "success": true, "message": "Profile picture updated" }`
+
+**Errors:** `400` neither `url` nor `base64` provided / base64 without `mimetype` · `401` · `403` · `500` engine refused the change
+
+### 6.4.14 Calls
+
+Incoming-call management. A `call.received` webhook/socket event (§6.6) announces an incoming ringing call and carries the `callId` used below.
+
+#### POST /api/sessions/:sessionId/calls/:callId/reject
+
+Reject a currently ringing incoming call. Only a live call can be rejected — the id is valid while the call rings (a short server-side cache); afterwards it expires.
+
+**Auth:** API key (OPERATOR)
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| sessionId | string | Session ID |
+| callId | string | Call ID from the `call.received` event |
+
+**Request body** — none.
+
+**Response** `200` — `{ "success": true }`
+
+**Errors:** `400` session is not started · `401` missing/invalid `X-API-Key` · `403` key lacks OPERATOR role · `404` call not found or no longer ringing
+
+> **Auto-reject per session.** Set `"config": { "autoRejectCalls": true }` when creating a session to have the server reject every incoming call automatically — the `call.received` event is still dispatched first, so automations keep full visibility.
+
 ## 6.5 Real-time API (WebSocket)
 
 Live events are delivered over a **Socket.IO** connection (not a raw WebSocket). The server mounts a single Socket.IO namespace, **`/events`**, on the same port as the REST API. There are no REST routes in this module.
@@ -4582,15 +4797,20 @@ message.sent
 message.ack
 message.revoked
 message.reaction
+message.edited
 session.status
 session.qr
 session.authenticated
 session.disconnected
+group.join
+group.leave
+group.update
+call.received
 ```
 
 A subscribe request whose `events` array contains no recognized name (after filtering) is rejected with `INVALID_EVENTS`. Unknown names mixed with valid ones are silently dropped; the `subscribed` reply echoes only the accepted events.
 
-> **`group.*` events are NOT subscribable on the socket.** They have no engine emit source and are never delivered over Socket.IO (they remain reserved only on the webhook side).
+> `message.failed` and `session.reconnect_loop` are webhook-only — they are not subscribable on the socket.
 
 ### Wildcards and scoping
 
@@ -4648,20 +4868,28 @@ These are the events OpenWA actually emits. A webhook is registered with an `eve
 
 | Event | When it fires | `data` payload sketch |
 | --- | --- | --- |
-| `message.received` | An inbound message arrives | The full message object: `id`, `from`, `to`, `body`, `type`, `timestamp` (epoch **seconds**), `isGroup`, `hasMedia`, `contact{…}` (plus optional `senderPhone` for `@lid` senders) |
+| `message.received` | An inbound message arrives | The full message object: `id`, `from`, `to`, `body`, `type`, `timestamp` (epoch **seconds**), `isGroup`, `kind` (user-facing chat discriminator of `chatId` — `individual\|group\|channel\|status\|broadcast\|unknown`), `hasMedia`, `contact{…}` (plus optional `senderPhone` for `@lid` senders) |
 | `message.sent` | An outbound message is created/sent from this session | Same message object shape as `message.received` |
 | `message.ack` | A delivery/read receipt updates an outbound message | `{ id, messageId, status, ack }` — `status` is the canonical state (`pending`/`sent`/`delivered`/`read`/`failed`); `ack` is the deprecated legacy integer derived from it |
 | `message.failed` | A receipt resolves to `failed` (dispatched in addition to `message.ack`) | `{ id, messageId, status: "failed", ack: -1 }` |
 | `message.revoked` | A message is deleted/recalled | `{ id, revokedId?, chatId, from, to, type: "revoked", body: "", timestamp }` — **reconcile on `revokedId`** (the original deleted message's id), falling back to `id`. On whatsapp-web.js `id` is the *revocation notification* (a distinct message that won't match a stored id) and `revokedId` may be absent when the original isn't cached locally; on Baileys the two coincide |
 | `message.reaction` | A reaction is added, changed, or removed | `{ messageId, chatId, reaction, senderId, reactions }` — `reactions` is the post-apply `{ senderId: emoji }` snapshot; `reaction` is empty when removed |
+| `message.edited` | A message body or media caption is edited | `{ messageId, chatId, body, senderId, from, to, fromMe, isGroup, type, hasMedia, author?, mentionedIds?, timestamp }` — `messageId` is the original message id, `body` is the latest text/caption, and `timestamp` is the edit occurrence time in epoch **seconds** (not the original creation time) |
 | `session.qr` | A new pairing QR is generated | `{ sessionId, qr }` (raw QR string) |
 | `session.authenticated` | The session pairs and becomes ready | `{ sessionId, phone, pushName }` |
 | `session.disconnected` | The session disconnects | `{ sessionId, reason }` |
+| `session.reconnect_loop` | Every 5th consecutive reconnect attempt is scheduled (attempt 5, 10, 15, …) — the session is failing to come back up | `{ sessionId, attempts, nextDelayMs }` |
 | `session.status` | The session status transitions | `{ sessionId, status }` where `status` is one of `created` / `initializing` / `qr_ready` / `authenticating` / `ready` / `disconnected` / `failed` |
+| `group.join` | Participant(s) are added to or join a group this session is in | `{ groupId, actorId?, participantIds, timestamp }` — `actorId` is the admin/inviter when known |
+| `group.leave` | Participant(s) leave or are removed from a group | `{ groupId, actorId?, participantIds, timestamp }` |
+| `group.update` | Group metadata changes (subject, description, announce/locked settings) | `{ groupId, actorId?, participantIds, changes?, timestamp }` — `changes` carries only the fields that changed: `subject?`, `description?`, `announce?`, `locked?` |
+| `call.received` | An incoming voice/video call starts ringing | `{ callId, from, isVideo, isGroup, timestamp }` — `callId` is the id to pass to `POST /sessions/:sessionId/calls/:callId/reject` |
 
 > **`STORE_EPHEMERAL_MESSAGES=false` affects `message.received`.** When `STORE_EPHEMERAL_MESSAGES` is set to `false`, incoming disappearing messages (those with `ephemeralDuration > 0`) are **not** persisted nor dispatched — no DB insert, no webhook delivery, and no websocket event. Downstream consumers and the dashboard both stop seeing them. Default is `true` (backward compatible — store and dispatch everything).
 
-> **Reserved but not emitted.** `group.join`, `group.leave`, and `group.update` are accepted in a webhook's `events` list (and have reserved idempotency-key formats), but **no code path currently emits them** — registering for them is harmless but they will never be delivered. Likewise there is **no** `contact.update` or `presence.update` event.
+> There is **no** `contact.update` or `presence.update` event, and no `call.accepted` / `call.terminated` lifecycle event yet — only `call.received` is emitted.
+
+> **Group-event timing caveat (Baileys).** Membership/metadata changes that occurred while a Baileys session was offline are replayed by WhatsApp on reconnect and are dispatched like live events — but the engine does not forward their original occurrence time, so they carry the **receipt time** as `timestamp`. Treat `group.*` payloads as change notifications rather than a precise clock; stale offline *calls* are never emitted this way (they are filtered by the `offline` flag).
 
 ### Delivery semantics — at-least-once
 
@@ -4711,13 +4939,17 @@ Every delivery includes:
 - `message.ack`: `ack_{sessionId}_{messageId}_{status}`
 - `message.failed`: `failed_{sessionId}_{messageId}_{status}`
 - `message.revoked`: `rev_{sessionId}_{messageId}`
+- `message.edited`: `edit_{sessionId}_{messageId}_{occurredAt}`
 - `message.reaction`: `react_{sessionId}_{messageId}_{senderId}_{occurredAt}`
 - `session.qr`: `qr_{sessionId}_{hash(qr)}`
 - `session.status`: `sess_{sessionId}_{status}_{occurredAt}`
 - `session.authenticated`: `auth_{sessionId}_{hash(data)}_{occurredAt}`
 - `session.disconnected`: `disc_{sessionId}_{hash(reason)}_{occurredAt}`
+- `group.join` / `group.leave`: `grp_{groupId}_{hash(participantIds)}_{join|leave}_{occurredAt}`
+- `group.update`: `grp_{groupId}_update_{hash(changes)}_{occurredAt}`
+- `call.received`: `call_{sessionId}_{callId}` (a call id is unique per call, so no `occurredAt` salt)
 
-Recurring lifecycle events (and `message.reaction`) carry the same content across occurrences — the same phone on every reconnect, a constant disconnect reason, a re-applied emoji — so they are salted with an `occurredAt` timestamp captured **once per dispatch and reused across that dispatch's retries**. This gives distinct occurrences distinct keys while keeping retries of one occurrence stable. Message keys are scoped by `sessionId` because WhatsApp message ids are unique per account, not globally.
+Recurring lifecycle events (and `message.reaction` / `message.edited`) carry the same content across occurrences — the same phone on every reconnect, a constant disconnect reason, a re-applied emoji, or editing the same message multiple times — so they are salted with an `occurredAt` timestamp captured **once per dispatch and reused across that dispatch's retries**. This gives distinct occurrences distinct keys while keeping retries of one occurrence stable. Message keys are scoped by `sessionId` because WhatsApp message ids are unique per account, not globally.
 
 ### Retries with exponential backoff
 

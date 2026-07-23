@@ -3,6 +3,10 @@ import { ConfigService } from '@nestjs/config';
 import { MetricsService, METRICS_RENDER_TTL_MS } from './metrics.service';
 import { StatsService, OverviewStats } from '../stats/stats.service';
 import { getWebhookDeliveryFailuresTotal } from '../../common/metrics/webhook-delivery-metrics';
+import {
+  getSessionReconnectAttemptsTotal,
+  getSessionReconnectLoopAlertsTotal,
+} from '../../common/metrics/session-reconnect-metrics';
 
 describe('MetricsService', () => {
   const overview: OverviewStats = {
@@ -57,10 +61,16 @@ describe('MetricsService', () => {
       expect(out).toContain('openwa_messages_total{direction="incoming"} 50');
       expect(out).toContain('openwa_messages_failed_total 3');
       // Every metric must declare HELP/TYPE before its sample.
-      expect(out).toContain('# TYPE openwa_messages_total counter');
+      expect(out).toContain('# TYPE openwa_messages_total gauge');
+      expect(out).toContain('# TYPE openwa_messages_failed_total gauge');
       // Webhook terminal-failure counter is emitted with correct counter typing + current total.
       expect(out).toContain('# TYPE openwa_webhook_delivery_failures_total counter');
       expect(out).toContain(`openwa_webhook_delivery_failures_total ${getWebhookDeliveryFailuresTotal()}`);
+      // Reconnect observability counters are emitted with correct counter typing + current totals.
+      expect(out).toContain('# TYPE openwa_session_reconnect_attempts_total counter');
+      expect(out).toContain(`openwa_session_reconnect_attempts_total ${getSessionReconnectAttemptsTotal()}`);
+      expect(out).toContain('# TYPE openwa_session_reconnect_loop_alerts_total counter');
+      expect(out).toContain(`openwa_session_reconnect_loop_alerts_total ${getSessionReconnectLoopAlertsTotal()}`);
       expect(out.endsWith('\n')).toBe(true);
     });
 

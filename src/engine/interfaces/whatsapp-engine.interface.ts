@@ -14,6 +14,8 @@
 // (Ids the engine ACCEPTS - e.g. `sendTextMessage(chatId)` - may be neutral; the adapter de-normalizes
 // to its own dialect. Full inbound + outbound conformance is being rolled out per-engine.)
 
+import type { ChatKind } from '../identity/wa-id';
+
 export enum EngineStatus {
   DISCONNECTED = 'disconnected',
   INITIALIZING = 'initializing',
@@ -73,6 +75,8 @@ export interface IncomingMessage {
   timestamp: number;
   fromMe: boolean;
   isGroup: boolean;
+  /** User-facing chat kind of the conversation this message belongs to (derived from `chatId`). */
+  kind: ChatKind;
   /**
    * True for a status/story broadcast (not a real conversation). Set by the adapter so engine-neutral
    * code can skip these without matching an engine-specific pseudo-JID (e.g. `status@broadcast`).
@@ -106,7 +110,7 @@ export interface IncomingMessage {
     mimetype: string;
     filename?: string;
     data?: string; // base64; absent when the payload was omitted (see `omitted`)
-    /** True when the media exceeded the inbound size cap and the blob was dropped (envelope kept). */
+    /** True when the media blob was dropped due to a size cap, timeout, or concurrency saturation. */
     omitted?: boolean;
     /** Decoded byte size of the media; always set when `omitted` is true. */
     sizeBytes?: number;
@@ -191,6 +195,12 @@ export interface GroupInfo {
   participants: GroupParticipant[];
   isReadOnly?: boolean;
   isAnnounce?: boolean;
+  /** Only admins can send messages (the WhatsApp "announce" group setting). */
+  announce?: boolean;
+  /** Only admins can edit group info — subject, description, picture (the WhatsApp "locked"/restrict setting). */
+  locked?: boolean;
+  /** Disappearing-messages timer in seconds; 0 or undefined = off. */
+  ephemeralSeconds?: number;
   /** JID of the parent community this group is linked to, or null if standalone. */
   linkedParentJID?: string | null;
 }
@@ -334,6 +344,8 @@ export interface ChatSummary {
   id: string;
   name: string;
   isGroup: boolean;
+  /** User-facing chat kind. `isGroup` is retained for back-compat; `kind` is the full discriminator. */
+  kind: ChatKind;
   unreadCount: number;
   timestamp: number;
   lastMessage?: string;
@@ -381,11 +393,73 @@ export interface RevokedMessage {
   timestamp: number;
 }
 
+export interface EditedMessage {
+  messageId: string;
+  chatId: string;
+  body: string;
+  senderId: string;
+  from: string;
+  to: string;
+  fromMe: boolean;
+  isGroup: boolean;
+  type: MessageType;
+  hasMedia: boolean;
+  /** For group messages, the participant that authored the edited message. */
+  author?: string;
+  /** WIDs mentioned by the edited message's latest content. */
+  mentionedIds?: string[];
+  /** Unix seconds when the edit occurred (not the original message creation time). */
+  timestamp: number;
+}
+
 export interface ReactionEvent {
   messageId: string;
   chatId: string;
   reaction: string;
   senderId: string;
+}
+
+/**
+ * A group membership or metadata change, mapped at the adapter boundary to this neutral
+ * shape so consumers never see engine-specific payloads:
+ *  - whatsapp-web.js: `group_join` / `group_leave` / `group_update` (GroupNotification).
+ *  - Baileys: `group-participants.update` (add/remove only — promote/demote are not
+ *    surfaced) and `groups.update` (subject/desc/announce/restrict).
+ * All ids are in the neutral dialect (`@g.us` / `@c.us`; a lid stays `<id>@lid` when the
+ * lid->phone mapping is unknown).
+ */
+export interface GroupEvent {
+  kind: 'join' | 'leave' | 'update';
+  /** Neutral group id (`@g.us`). */
+  groupId: string;
+  /** Who performed the action, neutral user id when the engine reports one. */
+  actorId?: string;
+  /** Affected users (join/leave), neutral ids. Empty for metadata updates. */
+  participantIds: string[];
+  /** Metadata delta for kind 'update'; absent or partially populated for join/leave. */
+  changes?: { subject?: string; description?: string; announce?: boolean; locked?: boolean };
+  /** Unix seconds when the change occurred (engine timestamp when available, else receipt time). */
+  timestamp: number;
+}
+
+/**
+ * An incoming (ringing) call, mapped at the adapter boundary to this neutral shape:
+ *  - whatsapp-web.js: the client `call` event (a `Call` object the adapter caches so a later
+ *    `rejectCall` can act on it — the object is only usable while the call is live).
+ *  - Baileys: the `call` event's `offer` status entries (other statuses are lifecycle updates and
+ *    are not surfaced).
+ * All ids are in the neutral dialect (`@c.us`; a lid caller stays `<id>@lid` when the lid->phone
+ * mapping is unknown, resolved via the inline phone twin when the engine provides one).
+ */
+export interface IncomingCallEvent {
+  /** Engine call id; the handle `rejectCall` accepts while the call is still ringing. */
+  callId: string;
+  /** Neutral caller id. */
+  from: string;
+  isVideo: boolean;
+  isGroup: boolean;
+  /** Unix seconds when the call was created (engine timestamp). */
+  timestamp: number;
 }
 
 export interface EngineEventCallbacks {
@@ -404,6 +478,19 @@ export interface EngineEventCallbacks {
   onMessageAck?: (messageId: string, status: DeliveryStatus) => void;
   onMessageRevoked?: (message: RevokedMessage) => void;
   onMessageReaction?: (event: ReactionEvent) => void;
+  onMessageEdited?: (message: EditedMessage) => void;
+  /**
+   * Fired on group membership changes (join/leave) and group metadata updates
+   * (subject/description/announce/locked). The `kind` selects the consumer event name
+   * (`group.join` / `group.leave` / `group.update`).
+   */
+  onGroupEvent?: (event: GroupEvent) => void;
+  /**
+   * Fired when an incoming call starts ringing (consumers emit `call.received`). The call can be
+   * rejected via `rejectCall(callId)` only while it is still ringing — the adapter keeps the
+   * engine's live call handle cached for that window.
+   */
+  onCall?: (event: IncomingCallEvent) => void;
   /**
    * Bulk historical messages from an engine's initial sync (e.g. Baileys `messaging-history.set`).
    * They predate the live session, so consumers persist them for the chat view but must not dispatch.
@@ -434,6 +521,15 @@ export interface IWhatsAppEngine {
 
   // Status
   getStatus(): EngineStatus;
+  /**
+   * Active liveness probe: performs a real round-trip against the engine's connection and
+   * resolves true only when the session is genuinely alive. Implementations must treat probe
+   * failure/timeout as "dead" — a wedged connection can keep reporting READY (cached status),
+   * so getStatus() alone is not proof of life. Optional: engines whose transport already
+   * self-detects death (e.g. Baileys keepalive emits a close event within ~35s) may return a
+   * cheap local check. Polled periodically by the session watchdog.
+   */
+  probeLiveness?(): Promise<boolean>;
   getQRCode(): string | null;
   /** Request an 8-char pairing code to link via phone number instead of scanning the QR. */
   requestPairingCode(phoneNumber: string): Promise<string>;
@@ -493,15 +589,50 @@ export interface IWhatsAppEngine {
   setGroupDescription(groupId: string, description: string): Promise<void>;
   getGroupInviteCode(groupId: string): Promise<string>;
   revokeGroupInviteCode(groupId: string): Promise<string>;
+  /**
+   * Join a group via an invite code (the token from a `https://chat.whatsapp.com/<code>` link).
+   * Resolves with the joined group's neutral id (`<id>@g.us`).
+   */
+  joinGroupViaInviteCode(inviteCode: string): Promise<string>;
+  /** Set the "only admins can send messages" group setting (WhatsApp announce). */
+  setGroupMessagesAdminsOnly(groupId: string, adminsOnly: boolean): Promise<void>;
+  /** Set the "only admins can edit group info" group setting (WhatsApp locked/restrict). */
+  setGroupInfoAdminsOnly(groupId: string, adminsOnly: boolean): Promise<void>;
+  /**
+   * Set the group's disappearing-messages timer in seconds; 0 disables it.
+   * Known values: 86400 (24h), 604800 (7d), 7776000 (90d).
+   */
+  setGroupEphemeral(groupId: string, durationSec: number): Promise<void>;
 
   // Message Operations
   deleteMessage(chatId: string, messageId: string, forEveryone?: boolean): Promise<void>;
+  /**
+   * Edit the body of a text message. Only the account's OWN messages can be edited; engines reject
+   * non-text or foreign messages at their own layer — the engine's error is surfaced as-is.
+   */
+  editMessage(chatId: string, messageId: string, body: string): Promise<MessageResult>;
   getChatHistory(chatId: string, limit?: number, includeMedia?: boolean): Promise<IncomingMessage[]>;
+
+  // Calls
+  /**
+   * Reject an incoming call. Only a currently-ringing call can be rejected: the adapter keeps the
+   * engine's live call handle (keyed by the `callId` from {@link IncomingCallEvent}) for the
+   * ringing window, and an unknown or expired callId fails with a not-found error (HTTP 404).
+   */
+  rejectCall(callId: string): Promise<void>;
 
   // Contact Extended Operations
   getProfilePicture(contactId: string): Promise<string | null>;
   blockContact(contactId: string): Promise<void>;
   unblockContact(contactId: string): Promise<void>;
+
+  // Profile (own account)
+  /** Set the account's display name. */
+  setProfileName(name: string): Promise<void>;
+  /** Set the account's "about" / status text. */
+  setProfileStatus(status: string): Promise<void>;
+  /** Set the account's profile picture (a URL payload is fetched server-side). */
+  setProfilePicture(media: MediaInput): Promise<void>;
 
   // Labels (Phase 3) - WhatsApp Business only
   getLabels(): Promise<Label[]>;

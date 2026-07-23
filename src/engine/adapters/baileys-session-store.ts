@@ -1,6 +1,6 @@
 import type { Chat, Contact as BaileysContact, WAMessage, WAMessageKey } from '@whiskeysockets/baileys';
 import { ChatSummary, Contact } from '../interfaces/whatsapp-engine.interface';
-import { parseWaId, toNeutralJid as canonicalizeWaId, userPart } from '../identity/wa-id';
+import { chatKind, parseWaId, toNeutralJid as canonicalizeWaId, userPart } from '../identity/wa-id';
 import type { LidMappingStore } from '../identity/lid-mapping-store.service';
 
 interface LastMessage {
@@ -127,6 +127,18 @@ export class BaileysSessionStore {
     }
     const text = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? '';
     this.lastMessages.set(chatId, { key: msg.key, timestamp, text });
+  }
+
+  /**
+   * Refresh the chat preview when (and only when) the edited message is still the latest message in
+   * that chat. Editing an older message must not replace the preview or reorder the conversation.
+   */
+  recordMessageEdit(chatId: string, messageId: string, text: string): void {
+    if (!messageId) return;
+    const rawChatId = this.lastMessages.has(chatId) ? chatId : this.toEngineJid(chatId);
+    const existing = this.lastMessages.get(rawChatId);
+    if (!existing || existing.key.id !== messageId) return;
+    this.lastMessages.set(rawChatId, { ...existing, text });
   }
 
   /**
@@ -296,6 +308,7 @@ export class BaileysSessionStore {
       id: this.toNeutralJid(id),
       name: c.name ?? this.resolveContactName(id),
       isGroup: id.endsWith('@g.us'),
+      kind: chatKind(this.toNeutralJid(id)),
       unreadCount: c.unreadCount ?? 0,
       timestamp: last?.timestamp ?? this.toUnixSeconds(c.conversationTimestamp),
       lastMessage: last?.text,

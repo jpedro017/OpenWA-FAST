@@ -5,8 +5,11 @@ import {
   IsArray,
   ArrayMinSize,
   ArrayMaxSize,
+  IsDefined,
+  IsNotEmpty,
   Matches,
   MaxLength,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -16,16 +19,18 @@ class StatusMediaInput {
     description: 'Public http(s) URL of the media (server-fetched, SSRF-guarded).',
     example: 'https://example.com/banner.jpg',
   })
-  @IsOptional()
+  @ValidateIf((media: StatusMediaInput) => media.base64 === undefined || media.url !== undefined)
   @IsString()
+  @IsNotEmpty()
   url?: string;
 
   @ApiPropertyOptional({
     description: 'Base64-encoded media. Requires mimetype.',
-    example: 'data:image/jpeg;base64,...',
+    example: '/9j/4AAQSkZJRg...',
   })
-  @IsOptional()
+  @ValidateIf((media: StatusMediaInput) => media.url === undefined || media.base64 !== undefined)
   @IsString()
+  @IsNotEmpty()
   base64?: string;
 
   @ApiPropertyOptional({ description: 'MIME type. Required when sending base64.', example: 'image/jpeg' })
@@ -36,6 +41,7 @@ class StatusMediaInput {
 
 export class SendImageStatusDto {
   @ApiProperty({ description: 'Image source (URL or base64).', type: StatusMediaInput })
+  @IsDefined()
   @ValidateNested()
   @Type(() => StatusMediaInput)
   image: StatusMediaInput;
@@ -47,7 +53,9 @@ export class SendImageStatusDto {
   caption?: string;
 
   @ApiProperty({
-    description: 'Recipient JIDs (1–256), @c.us or @lid.',
+    description:
+      'Recipient JIDs (1–256), @c.us or @lid. Honored on the Baileys engine only: whatsapp-web.js ignores ' +
+      "this allow-list and broadcasts to the account's status-privacy audience.",
     type: String,
     isArray: true,
     example: ['628123456789@c.us'],
@@ -64,6 +72,7 @@ export class SendImageStatusDto {
 
 export class SendVideoStatusDto {
   @ApiProperty({ description: 'Video source (URL or base64).', type: StatusMediaInput })
+  @IsDefined()
   @ValidateNested()
   @Type(() => StatusMediaInput)
   video: StatusMediaInput;
@@ -75,7 +84,9 @@ export class SendVideoStatusDto {
   caption?: string;
 
   @ApiProperty({
-    description: 'Recipient JIDs (1–256), @c.us or @lid.',
+    description:
+      'Recipient JIDs (1–256), @c.us or @lid. Honored on the Baileys engine only: whatsapp-web.js ignores ' +
+      "this allow-list and broadcasts to the account's status-privacy audience.",
     type: String,
     isArray: true,
     example: ['628123456789@c.us'],

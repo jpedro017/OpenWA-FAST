@@ -156,6 +156,39 @@ docker compose pull            # Get latest image
 docker compose up -d
 ```
 
+### Issue: Dashboard Renders a Blank White Screen
+
+**Symptoms:**
+- The API is healthy (`curl http://<host>:2785/api/health` returns `200`) but the dashboard is blank
+- The startup log says `🖥️ Dashboard: serving bundled UI at …` — the UI *is* being served
+- The browser console shows script-loading errors; DevTools → Network shows the `/assets/*.js`
+  requests going to `https://` even though you opened the page over `http://`
+- You reach the instance directly over plain HTTP (a host:port allocation, a private network, a
+  panel like Pterodactyl) rather than through a TLS-terminating reverse proxy
+
+**Cause:** In production OpenWA sends the CSP `upgrade-insecure-requests` directive, which tells the
+browser to upgrade every sub-resource fetch to HTTPS. That is correct behind a TLS proxy. Over plain
+HTTP the browser upgrades the dashboard's own script requests to `https://`, the non-TLS server
+cannot answer them, no JavaScript runs, and React never mounts — a blank page. The failure happens
+in the browser, so the server log stays clean.
+
+**Solution:**
+
+```bash
+# Opt out, then fully restart the container (not just reload)
+CSP_UPGRADE_INSECURE_REQUESTS=false
+
+# Confirm it actually reached the process
+docker compose exec openwa printenv NODE_ENV CSP_UPGRADE_INSECURE_REQUESTS
+```
+
+A production boot that serves the dashboard with the opt-out unset prints a warning naming this
+setting. If you are behind a TLS proxy, ignore that warning — the directive is doing its job.
+
+> The alternative is to front OpenWA with a TLS-terminating reverse proxy (the shipped
+> `docker-compose.yml` topology), which serves the dashboard over HTTPS and makes the upgrade a
+> no-op.
+
 ### Issue: Session Won't Connect
 
 **Symptoms:**
@@ -936,33 +969,13 @@ Remember OpenWA is **single-port**: the Dashboard, REST API, and Socket.IO all s
 
 **Q: How to backup sessions automatically?**
 ```bash
-#!/bin/bash
-# backup-cron.sh - Add to crontab: 0 */6 * * * /path/to/backup-cron.sh
-
-BACKUP_DIR="/backups/openwa"
-DATE=$(date +%Y%m%d-%H%M%S)
-
-# Create backup directory
-mkdir -p "$BACKUP_DIR/$DATE"
-
-# Backup database
-if [ "$DATABASE_ADAPTER" = "postgresql" ]; then
-    pg_dump $DATABASE_URL > "$BACKUP_DIR/$DATE/database.sql"
-else
-    cp ./data/openwa.db "$BACKUP_DIR/$DATE/"
-fi
-
-# Backup auth sessions
-# whatsapp-web.js engine:
-cp -r ./data/.wwebjs_auth "$BACKUP_DIR/$DATE/"
-# Baileys engine (ENGINE_TYPE=baileys): back up BAILEYS_AUTH_DIR (default: ./data/baileys)
-# cp -r ./data/baileys "$BACKUP_DIR/$DATE/"
-
-# Keep only last 7 days
-find "$BACKUP_DIR" -type d -mtime +7 -exec rm -rf {} \;
-
-echo "Backup completed: $BACKUP_DIR/$DATE"
+# Add to crontab, for example: 0 */6 * * * cd /path/to/openwa && ./scripts/backup.sh
+BACKUP_DIR=/backups/openwa ./scripts/backup.sh
 ```
+
+The shipped script also covers `main.sqlite`, the selected data store, whatsapp-web.js state,
+`BAILEYS_AUTH_DIR` (default `./data/baileys`), media, plugin packages/state, and generated secrets. Apply
+retention/encryption to completed archives externally; see the [backup and restore runbooks](./11-operational-runbooks.md#runbook-database-backup).
 
 ### Webhook Questions
 
@@ -976,17 +989,22 @@ available_events:
   - message.failed       # Receipt resolved to failed
   - message.revoked      # Message deleted
   - message.reaction     # Reaction added, changed, or removed
+  - message.edited       # Message body or media caption edited
 
   # Session
   - session.status       # Session status change
   - session.qr           # New QR code generated
   - session.authenticated  # Session authenticated
   - session.disconnected   # Session disconnected
+  - session.reconnect_loop # Every 5th consecutive reconnect attempt (payload: sessionId, attempts, nextDelayMs)
 
-  # Groups (reserved but NOT currently emitted — accepted in events list, never delivered)
-  - group.join           # reserved, not emitted
-  - group.leave          # reserved, not emitted
-  - group.update         # reserved, not emitted
+  # Groups
+  - group.join           # Participant(s) added/joined
+  - group.leave          # Participant(s) left/removed
+  - group.update         # Group subject/description/announce/locked changed
+
+  # Calls
+  - call.received        # Incoming call ringing (payload: callId, from, isVideo, isGroup, timestamp)
 ```
 
 **Q: Webhook payload format?**

@@ -27,6 +27,7 @@ import { HookManager } from '../../core/hooks';
 import { QUEUE_NAMES } from '../queue/queue-names';
 import { Session } from '../session/entities/session.entity';
 import { getWebhookDeliveryFailuresTotal } from '../../common/metrics/webhook-delivery-metrics';
+import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
 
 function createMockWebhook(overrides: Partial<Webhook> = {}): Webhook {
   return {
@@ -429,6 +430,34 @@ describe('WebhookService', () => {
       expect(mockFetch).toHaveBeenCalledTimes(5);
     });
 
+    it('records a durable failure when the bounded dispatch queue is full', async () => {
+      const wA = createMockWebhook({ id: 'wh-a', url: 'https://a.example/hook', events: ['message.received'] });
+      const wB = createMockWebhook({ id: 'wh-b', url: 'https://b.example/hook', events: ['message.received'] });
+      (repository.find as jest.Mock).mockResolvedValue([wA, wB]);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+      (hookManager.execute as jest.Mock).mockImplementation((_event: string, data: unknown) =>
+        Promise.resolve({ continue: true, data }),
+      );
+      (service as unknown as { dispatchLimiter: ConcurrencyLimiter }).dispatchLimiter = new ConcurrencyLimiter(1, 0);
+
+      let release: (value: unknown) => void = () => undefined;
+      mockFetch.mockImplementation(() => new Promise(resolve => (release = resolve)));
+
+      const pending = service.dispatch('sess-1', 'message.received', { from: 'x@c.us' });
+      for (let i = 0; i < 20 && mockFetch.mock.calls.length === 0; i++) await new Promise(r => setImmediate(r));
+      release({ ok: true, status: 200 });
+      await pending;
+
+      expect(failureRepository.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          webhookId: 'wh-b',
+          attempts: 0,
+          lastError: 'ConcurrencyLimiter queue full',
+        }),
+      );
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
     it('salts each sibling webhook with a distinct idempotency key so one receiver cannot dedupe out another', async () => {
       const wA = createMockWebhook({ id: 'wh-a', url: 'https://a.example/hook', events: ['message.received'] });
       const wB = createMockWebhook({ id: 'wh-b', url: 'https://b.example/hook', events: ['message.received'] });
@@ -468,6 +497,20 @@ describe('WebhookService', () => {
       const callArgs = mockFetch.mock.calls[0] as [unknown, { body: string }];
       const body = JSON.parse(callArgs[1].body) as WebhookPayload;
       expect(body).not.toBeUndefined();
+      expect(body.event).toBe('message.received');
+      expect(body.data).toEqual({ from: '628123456789@c.us' });
+    });
+
+    it('falls back to the original payload when a before-hook returns null data', async () => {
+      const webhook = createMockWebhook({ events: ['message.received'] });
+      (repository.find as jest.Mock).mockResolvedValue([webhook]);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+      (hookManager.execute as jest.Mock).mockResolvedValue({ continue: true, data: null });
+
+      await service.dispatch('sess-1', 'message.received', { from: '628123456789@c.us' });
+
+      const callArgs = mockFetch.mock.calls[0] as [unknown, { body: string }];
+      const body = JSON.parse(callArgs[1].body) as WebhookPayload;
       expect(body.event).toBe('message.received');
       expect(body.data).toEqual({ from: '628123456789@c.us' });
     });
@@ -719,6 +762,25 @@ describe('WebhookService', () => {
       const hasMedia = conds({ field: 'hasMedia', operator: 'is', value: true });
       expect(await deliveries(hasMedia, 'message.received', { media: { mimetype: 'image/png' } })).toBe(1);
       expect(await deliveries(hasMedia, 'message.received', { body: 'just text' })).toBe(0);
+    });
+
+    it('filters message.edited through a wildcard subscription using its normalized message fields', async () => {
+      const f = conds(
+        { field: 'sender', operator: 'is', value: ['part@c.us'] },
+        { field: 'body', operator: 'contains', value: 'invoice' },
+        { field: 'type', operator: 'is', value: ['image'] },
+        { field: 'hasMedia', operator: 'is', value: true },
+      );
+      const data = {
+        from: '120@g.us',
+        author: 'part@c.us',
+        body: 'Updated invoice',
+        type: 'image',
+        hasMedia: true,
+      };
+
+      expect(await deliveries(f, 'message.edited', data)).toBe(1);
+      expect(await deliveries(f, 'message.edited', { ...data, body: 'lunch?', hasMedia: false })).toBe(0);
     });
 
     it('mentions: fires when the message mentions one of the listed JIDs', async () => {
@@ -1056,8 +1118,10 @@ describe('WebhookService', () => {
       const out = await service.listDeliveryFailures({ sessionId: 's1', limit: 10 });
 
       expect(out).toHaveLength(1);
+      // sessionId resolves through resolveSessionScope, so the WHERE is an IN over the effective scope
+      // ([s1] here for an unrestricted key narrowing to one session) — behaviourally the same rows.
       expect(failureRepository.find).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { sessionId: 's1' }, order: { createdAt: 'DESC' } }),
+        expect.objectContaining({ where: { sessionId: In(['s1']) }, order: { createdAt: 'DESC' } }),
       );
     });
   });

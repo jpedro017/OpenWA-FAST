@@ -10,6 +10,7 @@ import {
   ArrayMaxSize,
   IsBoolean,
 } from 'class-validator';
+import { ToStrictBoolean } from '../../../common/utils/strict-boolean';
 
 const MENTIONS_DESCRIPTION =
   'WIDs to @mention (e.g. ["62811@c.us"]). The text/caption must also contain the @<number> token.';
@@ -111,6 +112,7 @@ export class SendAudioMessageDto extends SendMediaMessageDto {
       'bytes for reliable playback; when the mimetype is omitted it defaults to that for voice notes. ' +
       'Expects a JSON boolean. Default false = plain audio file. Only valid on send-audio.',
   })
+  @ToStrictBoolean()
   @IsOptional()
   @IsBoolean()
   ptt?: boolean;
@@ -122,9 +124,12 @@ export class MessageResponseDto {
       'The message id, assigned when the gateway accepts the message for sending. A 201 here means the ' +
       'message was handed to the WhatsApp client — it does NOT confirm delivery. WhatsApp does not reject ' +
       'an unregistered recipient synchronously, so a message to a number that is not on WhatsApp still ' +
-      'returns 201 with a valid messageId but never delivers. To confirm a number is on WhatsApp before ' +
+      'returns 201 with a valid messageId; whether it later delivers, stalls, or is reported as an error ' +
+      'reaches you asynchronously, if at all. To confirm a number is on WhatsApp before ' +
       'sending, use GET /api/sessions/{sessionId}/contacts/check/{number}; track real delivery via the ' +
-      'message `status` field (sent → delivered → read).',
+      'message `status` field (sent → delivered → read, or failed if WhatsApp reports an error for it). ' +
+      'A message resting at `sent` is not diagnostic on its own: a registered recipient whose device has ' +
+      'not come online since the send stays at `sent` too.',
     example: 'true_628123456789@c.us_3EB0123456789',
   })
   messageId: string;

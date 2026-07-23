@@ -9,7 +9,7 @@ import {
   ConnectedSocket,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { AuthService } from '../auth/auth.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
@@ -68,12 +68,13 @@ export function isSessionSubscriptionAllowed(allowedSessions: string[] | null | 
 }
 
 /** Why an API key's live WebSocket sockets are being torn down — drives the client-facing message. */
-export type ApiKeyEvictionReason = 'revoked' | 'deleted' | 'authorization_changed';
+export type ApiKeyEvictionReason = 'revoked' | 'deleted' | 'authorization_changed' | 'expired';
 
 const EVICTION_MESSAGES: Record<ApiKeyEvictionReason, string> = {
   revoked: 'API key has been revoked',
   deleted: 'API key has been deleted',
   authorization_changed: 'API key authorization changed; please reconnect',
+  expired: 'API key has expired',
 };
 
 @WebSocketGateway({
@@ -82,7 +83,7 @@ const EVICTION_MESSAGES: Record<ApiKeyEvictionReason, string> = {
   },
   namespace: '/events',
 })
-export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer()
   server: Server;
 
@@ -94,6 +95,7 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    * an already-subscribed socket keeps receiving events until it happens to disconnect).
    */
   private readonly socketsByKeyId = new Map<string, Set<Socket>>();
+  private expirySweepTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly authService: AuthService,
@@ -102,6 +104,31 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
 
   afterInit() {
     this.logger.log('WebSocket Gateway initialized');
+    this.expirySweepTimer = setInterval(() => {
+      try {
+        this.sweepExpiredApiKeys();
+      } catch (error) {
+        this.logger.error('Failed to sweep expired WebSocket API keys', error instanceof Error ? error.stack : error);
+      }
+    }, 60_000);
+    this.expirySweepTimer.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    if (this.expirySweepTimer) clearInterval(this.expirySweepTimer);
+    this.expirySweepTimer = undefined;
+  }
+
+  private sweepExpiredApiKeys(now = Date.now()): void {
+    for (const [keyId, sockets] of Array.from(this.socketsByKeyId.entries())) {
+      const expired = Array.from(sockets).some(client => {
+        const expiresAt = (client.data as { apiKey?: Pick<ApiKey, 'expiresAt'> } | undefined)?.apiKey?.expiresAt;
+        if (!expiresAt) return false;
+        const expiry = expiresAt instanceof Date ? expiresAt.getTime() : new Date(expiresAt).getTime();
+        return Number.isFinite(expiry) && expiry <= now;
+      });
+      if (expired) this.evictApiKey(keyId, 'expired');
+    }
   }
 
   /**
@@ -431,5 +458,44 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    */
   emitMessageReaction(sessionId: string, data: Record<string, unknown>) {
     this.emitToRooms(sessionId, 'message.reaction', data);
+  }
+
+  /**
+   * Emit message edited notification
+   */
+  emitMessageEdited(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'message.edited', data);
+  }
+
+  /**
+   * Emit a group membership join (a user was added or joined via invite). Payload mirrors the
+   * `group.join` webhook: `{ groupId, participantIds, timestamp, actorId? }`.
+   */
+  emitGroupJoin(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'group.join', data);
+  }
+
+  /**
+   * Emit a group membership leave (a user left or was removed). Payload mirrors the
+   * `group.leave` webhook: `{ groupId, participantIds, timestamp, actorId? }`.
+   */
+  emitGroupLeave(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'group.leave', data);
+  }
+
+  /**
+   * Emit a group metadata update (subject/description/announce/locked). Payload mirrors the
+   * `group.update` webhook: `{ groupId, participantIds, changes, timestamp, actorId? }`.
+   */
+  emitGroupUpdate(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'group.update', data);
+  }
+
+  /**
+   * Emit an incoming-call notification (a call is ringing). Payload mirrors the `call.received`
+   * webhook: `{ callId, from, isVideo, isGroup, timestamp }`.
+   */
+  emitCallReceived(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'call.received', data);
   }
 }

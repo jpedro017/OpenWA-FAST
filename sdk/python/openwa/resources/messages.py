@@ -14,6 +14,7 @@ from ..types import (
     BulkMessageResponse,
     ChatHistoryMessage,
     DeleteMessageRequest,
+    EditMessageRequest,
     ForwardMessageRequest,
     ListMessagesQuery,
     MessageHistoryQuery,
@@ -25,6 +26,7 @@ from ..types import (
     SendBulkRequest,
     SendContactRequest,
     SendLocationRequest,
+    SendAudioRequest,
     SendMediaRequest,
     SendTemplateRequest,
     SendTextRequest,
@@ -51,7 +53,7 @@ class MessagesResource:
     def send_video(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
         return self._send_media(session_id, "send-video", body)
 
-    def send_audio(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
+    def send_audio(self, session_id: str, body: SendAudioRequest) -> MessageResponse:
         return self._send_media(session_id, "send-audio", body)
 
     def send_document(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
@@ -83,6 +85,10 @@ class MessagesResource:
 
     def delete(self, session_id: str, body: DeleteMessageRequest) -> SuccessResult:
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/delete", body=body)
+
+    def edit_message(self, session_id: str, body: EditMessageRequest) -> MessageResponse:
+        """Edit the text of a message sent by this account. 404 when the message is not found."""
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/edit", body=body)
 
     def history(
         self, session_id: str, chat_id: str, query: MessageHistoryQuery | None = None

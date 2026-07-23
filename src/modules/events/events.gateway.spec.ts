@@ -137,7 +137,7 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
     expect(sock.join).toHaveBeenCalled();
   });
 
-  it('rejects a subscription to a reserved, never-emitted event (group.*) with INVALID_EVENTS', async () => {
+  it('accepts a subscription to group.join (a live, engine-emitted event)', async () => {
     authService.validateApiKey.mockResolvedValue({ name: 'k', allowedSessions: null });
     const sock = makeSocket({ apiKey: 'good' });
     await gateway.handleConnection(asSocket(sock));
@@ -145,6 +145,21 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
     const res = (await gateway.handleMessage(
       asSocket(sock),
       subscribeMsg('sess-1', ['group.join']),
+    )) as WSSubscribedResponse;
+
+    expect(res.type).toBe('subscribed');
+    expect(res.events).toEqual(['group.join']);
+    expect(sock.join).toHaveBeenCalledWith(buildRoomName('sess-1', 'group.join'));
+  });
+
+  it('rejects a subscription to an unknown, never-emitted event with INVALID_EVENTS', async () => {
+    authService.validateApiKey.mockResolvedValue({ name: 'k', allowedSessions: null });
+    const sock = makeSocket({ apiKey: 'good' });
+    await gateway.handleConnection(asSocket(sock));
+
+    const res = (await gateway.handleMessage(
+      asSocket(sock),
+      subscribeMsg('sess-1', ['session.connected']),
     )) as WSErrorResponse;
 
     expect(res.type).toBe('error');
@@ -152,14 +167,14 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
     expect(sock.join).not.toHaveBeenCalled();
   });
 
-  it('keeps the valid events when a subscription mixes a valid and a reserved event', async () => {
+  it('keeps the valid events when a subscription mixes a valid and an unknown event', async () => {
     authService.validateApiKey.mockResolvedValue({ name: 'k', allowedSessions: null });
     const sock = makeSocket({ apiKey: 'good' });
     await gateway.handleConnection(asSocket(sock));
 
     const res = (await gateway.handleMessage(
       asSocket(sock),
-      subscribeMsg('sess-1', ['message.received', 'group.join']),
+      subscribeMsg('sess-1', ['message.received', 'session.connected']),
     )) as WSSubscribedResponse;
 
     expect(res.type).toBe('subscribed');
@@ -303,6 +318,49 @@ describe('EventsGateway connection auth + subscribe re-validation', () => {
 
       expect(() => gateway.evictApiKey('k1')).not.toThrow();
     });
+
+    it('evicts a passive socket once its cached API key expires', async () => {
+      authService.validateApiKey.mockResolvedValue({
+        id: 'k1',
+        name: 'k',
+        allowedSessions: null,
+        expiresAt: new Date('2026-01-01T00:00:00Z'),
+      });
+      const sock = makeSocket({ apiKey: 'good' });
+      await gateway.handleConnection(asSocket(sock));
+
+      (gateway as unknown as { sweepExpiredApiKeys: (now: number) => void }).sweepExpiredApiKeys(
+        Date.parse('2026-01-01T00:00:01Z'),
+      );
+
+      expect(sock.disconnect).toHaveBeenCalledWith(true);
+      expect(sock.emit).toHaveBeenCalledWith(
+        'message',
+        expect.objectContaining({ code: 'UNAUTHORIZED', message: 'API key has expired' }),
+      );
+    });
+
+    it('keeps sockets with no expiry or a future expiry', async () => {
+      const noExpiry = makeSocket({ apiKey: 'a' });
+      const future = { ...makeSocket({ apiKey: 'b' }), id: 'sock-2' };
+      authService.validateApiKey
+        .mockResolvedValueOnce({ id: 'k1', name: 'a', allowedSessions: null, expiresAt: null })
+        .mockResolvedValueOnce({
+          id: 'k2',
+          name: 'b',
+          allowedSessions: null,
+          expiresAt: new Date('2026-01-02T00:00:00Z'),
+        });
+      await gateway.handleConnection(asSocket(noExpiry));
+      await gateway.handleConnection(asSocket(future));
+
+      (gateway as unknown as { sweepExpiredApiKeys: (now: number) => void }).sweepExpiredApiKeys(
+        Date.parse('2026-01-01T00:00:00Z'),
+      );
+
+      expect(noExpiry.disconnect).not.toHaveBeenCalled();
+      expect(future.disconnect).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -382,7 +440,12 @@ describe('event catalog ⇔ emitter invariants (drift guard)', () => {
     expect(new Set(SUBSCRIBABLE_EVENTS)).toEqual(deriveEmittedEvents());
   });
 
-  it('reserved webhook group.* events are NOT advertised as socket-subscribable', () => {
+  it('reserved webhook events (currently none) never overlap the socket-subscribable catalog', () => {
+    // WEBHOOK_RESERVED_EVENTS is intentionally empty — the former group.* occupants are now live,
+    // engine-emitted (and socket-subscribable) events covered by the equality guard above. The
+    // export stays so a future declared-but-undispatched event can be whitelisted there; whenever
+    // the list is non-empty, no reserved event may also be advertised as subscribable.
+    expect(WEBHOOK_RESERVED_EVENTS).toHaveLength(0);
     for (const reserved of WEBHOOK_RESERVED_EVENTS) {
       expect(SUBSCRIBABLE_EVENTS).not.toContain(reserved);
     }

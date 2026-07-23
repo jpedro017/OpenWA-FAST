@@ -87,7 +87,7 @@ export class StatsService {
 
   /** The data-connection dialect ('sqlite' | 'postgres'), used to pick portable date SQL. */
   private get dataDbType(): string {
-    return this.messageRepo.manager.connection.options.type;
+    return this.messageRepo.manager.dataSource.options.type;
   }
 
   async getOverview(): Promise<OverviewStats> {
@@ -159,12 +159,15 @@ export class StatsService {
     // Time series - using raw query for SQLite compatibility
     const timeSeries = await this.getTimeSeries(since, interval);
 
-    // By type
+    // By type. Rows with no body AND no metadata are content-less system/event rows (e.g. @lid
+    // privacy-user events the engine maps to `unknown`) — counting them would put a misleading
+    // "unknown" slice in the by-type chart, so they're excluded from the aggregation.
     const byTypeRaw = await this.messageRepo
       .createQueryBuilder('m')
       .select('m.type', 'type')
       .addSelect('COUNT(*)', 'count')
       .where('m.createdAt >= :since', { since })
+      .andWhere("(m.body IS NOT NULL AND m.body != '') OR m.metadata IS NOT NULL")
       .groupBy('m.type')
       .getRawMany<{ type: string; count: string }>();
 

@@ -163,11 +163,27 @@ a host version. The config schema is the top-level `configSchema` (note: not nes
 | `sessions` | — | Session ids this plugin may act on, or `['*']`. Absent = `['*']`. Static — editing config can't widen it |
 | `sessionScoped` | — | Default `true`. A scoped plugin only sees events for the sessions it's activated for; `false` = always runs |
 | `net.allow` | — | Outbound-HTTP host allowlist for `ctx.net.fetch` (`host`, `host:port`, or `'*'`). Absent = deny all |
-| `configSchema` | — | Declarative config schema the dashboard renders into a form |
-| `configUi` | — | Optional self-contained HTML config editor served into a sandboxed iframe (preferred over `configSchema` when present) |
+| `configSchema` | — | Declarative config schema the dashboard renders as a form when there is no `configUi`. Still required with one: it defines the fields, their types and which are `secret` |
+| `configUi` | — | Optional self-contained HTML config editor served into a sandboxed iframe. When present it **replaces** the generated form and owns saving — the dashboard renders neither the form nor its Save button |
 | `hooks` | — | Hook events this plugin listens to (informational) |
 | `provides` / `requires` | — | Features this plugin provides / depends on |
 | `i18n` | — | Localized dashboard text per locale (dashboard-only) |
+
+**The `configUi` bridge.** The editor is injected as `srcdoc` into a `sandbox="allow-scripts"` iframe, so
+it has an opaque origin and no access to the dashboard. It talks to the host by `postMessage`:
+
+| Direction | Message | Notes |
+| --- | --- | --- |
+| iframe → host | `{ type: 'config:get' }` | Sent on load; the host answers with the current values |
+| host → iframe | `{ type: 'config:value', config, schema, theme }` | `config` is already secret-redacted. `theme` is `'light'` or `'dark'`, resolved by the host |
+| iframe → host | `{ type: 'config:save', config }` | The host makes the authenticated write |
+| host → iframe | `{ type: 'config:saved' }` / `{ type: 'config:error', message }` | Outcome of that write |
+
+`theme` matters because an opaque-origin iframe cannot read the dashboard's theme for itself; without it
+an editor can only guess, and a light-only editor becomes a glaring white panel inside a dark modal. It is
+sent once, with the handshake — the theme control sits behind the modal overlay, so the theme cannot
+change while an editor is open. Treat it as optional: an editor that ignores it still works, and one that
+uses it should fall back to `prefers-color-scheme` so it stays readable on an older host.
 
 A `configSchema` field may set `secret: true` (e.g. an API key): the value is masked on read and
 preserved on an unchanged write.
@@ -344,7 +360,25 @@ sequenceDiagram
 
 A handler returns `{ continue: false }` to stop the chain. To transform the event it returns
 `{ continue: true, data: <new value> }`; the next handler (and the host) sees that `data`. (There is
-no `modified` field — the result type uses `data`.)
+no `modified` field — the result type uses `data`.) A handler that both transforms and stops the chain
+still has its `data` applied.
+
+**What `continue: false` does and does not do.** On a **notification** event — `message:received`,
+`message:sent` — it stops the remaining handlers and nothing else. The message has already arrived at,
+or left, WhatsApp, so the gateway still persists it and still dispatches `message.received` /
+`message.sent` to webhooks and the websocket. This is the flag an auto-reply plugin uses to claim a
+message ("I answered this, don't let another bot answer it too"); it is not a way to hide a message from
+the operator's own history.
+
+On a **pre-action** event it is a veto, because the action has not been taken yet: `false` on
+`message:sending` blocks the send (the caller gets a `400`), and on `webhook:before` it cancels that one
+delivery.
+
+> Until 0.10.5, `continue: false` on the two notification events also skipped persistence, the webhook
+> and the websocket emit. An auto-reply plugin returning it for its ordinary purpose therefore erased
+> the triggering message from the dashboard's chat history and from every integration downstream. If you
+> wrote a plugin that relied on that to hide messages, it no longer does — filter on the consumer side
+> instead.
 
 ### Hook events
 
@@ -417,8 +451,21 @@ sub-directory with a `manifest.json` it reads the manifest, validates the requir
 entry — **without running any plugin code**. Persisted config and per-session activation/config are
 read back so an operator's choices survive a restart. There is **no** version-compatibility check.
 
-> Loading a plugin from disk never auto-enables it. A previously-enabled plugin returns as `INSTALLED`
-> after a restart and must be re-enabled — enabling is always an explicit ADMIN action.
+> Loading a plugin from disk never runs it: a load always yields `INSTALLED`. Enabling is a separate
+> step that runs the lifecycle, and happens either on an explicit ADMIN action or — for a plugin the
+> operator had already enabled — at bootstrap (see **Restore on boot** below).
+
+**Restore on boot.** `status` describes where the runtime is, so it cannot carry the operator's
+decision across a restart; the decision is persisted separately as `enabledByOperator`. On
+`onApplicationBootstrap` — after the rest of the app is wired — the loader re-enables every non-built-in
+plugin carrying that flag, so an upgrade, host reboot or container restart no longer silently switches
+off every extension ([#856](https://github.com/rmyndharis/OpenWA/issues/856)). Restoring is best-effort
+and sequential: a plugin that fails is logged (`plugin_restore_failed`), left in `ERROR`, and never
+holds up startup. Built-ins are skipped — `EngineFactory` enables the engine named by `engine.type`.
+
+> The flag is written **only** by the operator-facing enable/disable, never by the loader.
+> `onModuleDestroy` disables every running plugin during a graceful shutdown, so a loader-side write
+> would erase the decision on the way out.
 
 **Enable.** `enablePlugin(id)` runs the lifecycle by trust tier (a synchronous lock prevents a racing
 double-enable, and engines must match the configured active engine):
@@ -531,8 +578,9 @@ URL / catalog), not an npm/github source descriptor.
 
 > `GET /plugins/:id/config-ui` returns untrusted HTML served with `Content-Security-Policy: sandbox`
 > and `X-Content-Type-Options: nosniff`. The dashboard fetches it **with** the API key and injects the
-> body as an iframe `srcdoc` (opaque origin); the editor exchanges config over a `postMessage` bridge,
-> so the API key never reaches the iframe.
+> body as an iframe `srcdoc` (opaque origin), applying the current document's CSP nonce to inline scripts;
+> the editor exchanges config over a `postMessage` bridge, so the API key never reaches the iframe. If
+> the bridge does not initialize, the dashboard shows an error and keeps a declared `configSchema` form usable.
 
 ## 19.9 Plugin Security
 

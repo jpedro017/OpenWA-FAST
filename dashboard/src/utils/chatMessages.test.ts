@@ -83,14 +83,18 @@ test('mergeChatMessages: returns ascending by timestamp (oldest first, newest la
   const older = mapEngineHistoryMessage(hist({ id: 'a', timestamp: 1000 }));
   const newer = mapEngineHistoryMessage(hist({ id: 'b', timestamp: 2000 }));
   const merged = mergeChatMessages([], [newer, older]);
-  assert.deepEqual(merged.map(m => m.id), ['a', 'b']);
+  assert.deepEqual(
+    merged.map(m => m.id),
+    ['a', 'b'],
+  );
 });
 
 import {
   mergeOrAppend,
-  replaceMessageById,
   updateMessageById,
   removeMessageById,
+  findRevokedIndex,
+  applyMessageEdit,
   type ChatMessageView,
 } from './chatMessages.ts';
 
@@ -141,6 +145,45 @@ test('mergeOrAppend keeps existing metadata when the incoming copy carries none'
   assert.deepEqual(after[0].metadata, { media: { mimetype: 'image/png' } });
 });
 
+test('mergeOrAppend: an omitted-media echo does NOT clobber the copy holding the payload', () => {
+  // The optimistic send bubble holds the only base64 copy; the engine's own-send echo carries just
+  // `{media: {omitted: true}}` (no data). Replacing wholesale would blank the sent image.
+  const optimistic = msg({
+    id: 'm-1',
+    type: 'image',
+    metadata: { media: { mimetype: 'image/png', filename: 'a.png', data: 'BASE64' } },
+  });
+  const echo = msg({
+    id: 'm-1',
+    type: 'image',
+    metadata: { media: { mimetype: 'image/png', omitted: true, sizeBytes: 1234 } },
+  });
+  const after = mergeOrAppend([optimistic], echo);
+  assert.equal(after.length, 1);
+  assert.equal(after[0].metadata?.media?.data, 'BASE64');
+  assert.equal(after[0].metadata?.media?.omitted, undefined);
+});
+
+test('mergeOrAppend: incoming media WITH a payload replaces the existing marker', () => {
+  const before = [msg({ id: 'm-1', type: 'image', metadata: { media: { mimetype: 'image/png', omitted: true } } })];
+  const live = msg({
+    id: 'm-1',
+    type: 'image',
+    metadata: { media: { mimetype: 'image/png', data: 'FRESH' } },
+  });
+  const after = mergeOrAppend(before, live);
+  assert.equal(after[0].metadata?.media?.data, 'FRESH');
+});
+
+test('mergeOrAppend: an echo with undefined leaves keeps the existing quote/call fields', () => {
+  // The WS mapper builds metadata as `{media, quotedMessage, call}` with undefined leaves — those
+  // must not erase fields the existing copy has (a wholesale spread would overwrite with undefined).
+  const before = [msg({ id: 'm-1', metadata: { quotedMessage: { id: 'q-1', body: 'quoted' } } })];
+  const echo = msg({ id: 'm-1', metadata: { media: undefined } });
+  const after = mergeOrAppend(before, echo);
+  assert.deepEqual(after[0].metadata, { quotedMessage: { id: 'q-1', body: 'quoted' } });
+});
+
 test('mergeOrAppend dedupes a live WS message against its DB copy (id != id but same waMessageId)', () => {
   // DB-persisted copy: id = UUID, waMessageId = WA serialized id.
   const dbCopy = msg({ id: 'uuid-1', waMessageId: 'true_g@g.us_WA1', body: 'persisted' });
@@ -158,25 +201,11 @@ test('mergeOrAppend does not mutate the input array', () => {
   assert.equal(before.length, 1);
 });
 
-test('replaceMessageById swaps the entry with matching id', () => {
-  const before = [msg({ id: 'temp-1', status: 'sending' }), msg({ id: 'm-2' })];
-  const after = replaceMessageById(before, 'temp-1', msg({ id: 'real-1', status: 'sent' }));
-  assert.equal(after.length, 2);
-  assert.equal(after[0].id, 'real-1');
-  assert.equal(after[0].status, 'sent');
-});
-
-test('replaceMessageById is a no-op when oldId is not present', () => {
-  const before = [msg({ id: 'm-1' })];
-  const after = replaceMessageById(before, 'missing', msg({ id: 'real' }));
-  assert.deepEqual(after, before);
-});
-
 test('updateMessageById applies a partial patch by id', () => {
-  const before = [msg({ id: 'm-1', status: 'sending' })];
+  const before = [msg({ id: 'm-1', status: 'pending' })];
   const after = updateMessageById(before, 'm-1', { status: 'failed' });
   assert.equal(after[0].status, 'failed');
-  assert.equal(after[0].body, 'hello');  // other fields unchanged
+  assert.equal(after[0].body, 'hello'); // other fields unchanged
 });
 
 test('updateMessageById is a no-op when id is not present', () => {
@@ -196,4 +225,60 @@ test('removeMessageById is a no-op when id is not present', () => {
   const before = [msg({ id: 'm-1' })];
   const after = removeMessageById(before, 'missing');
   assert.deepEqual(after, before);
+});
+
+// message.revoked carries TWO candidate ids: `id` and `revokedId` (the original deleted message,
+// when the engine could resolve it). Match on either — see findRevokedIndex for why not `?? `.
+
+test('findRevokedIndex matches the original via revokedId when it differs from id (wwebjs)', () => {
+  const list = [msg({ id: 'row-1', waMessageId: 'ORIGINAL' })];
+  assert.equal(findRevokedIndex(list, { id: 'REVOKE_NOTIF', revokedId: 'ORIGINAL' }), 0);
+});
+
+test('findRevokedIndex still matches when id === revokedId (Baileys — guards the working path)', () => {
+  const list = [msg({ id: 'row-1', waMessageId: 'ORIGINAL' })];
+  assert.equal(findRevokedIndex(list, { id: 'ORIGINAL', revokedId: 'ORIGINAL' }), 0);
+});
+
+test('findRevokedIndex matches on id when revokedId is absent (original not in the engine store)', () => {
+  const list = [msg({ id: 'row-1', waMessageId: 'ORIGINAL' })];
+  assert.equal(findRevokedIndex(list, { id: 'ORIGINAL' }), 0);
+});
+
+test('findRevokedIndex matches the DB row id, not just waMessageId', () => {
+  const list = [msg({ id: 'row-1', waMessageId: 'ORIGINAL' })];
+  assert.equal(findRevokedIndex(list, { id: 'row-1' }), 0);
+});
+
+test('findRevokedIndex returns -1 when neither id matches', () => {
+  const list = [msg({ id: 'row-1', waMessageId: 'ORIGINAL' })];
+  assert.equal(findRevokedIndex(list, { id: 'REVOKE_NOTIF', revokedId: 'OTHER' }), -1);
+});
+
+test('findRevokedIndex ignores an undefined revokedId rather than matching a row with no waMessageId', () => {
+  // A row whose waMessageId is undefined must not be matched by an absent revokedId (undefined ===
+  // undefined would otherwise revoke an arbitrary bubble).
+  const list = [msg({ id: 'row-1', waMessageId: undefined })];
+  assert.equal(findRevokedIndex(list, { id: 'REVOKE_NOTIF' }), -1);
+});
+
+test('applyMessageEdit updates a persisted row by waMessageId without mutating the input', () => {
+  const before = [msg({ id: 'row-uuid', waMessageId: 'WA_EDIT_1', body: 'old' })];
+  const after = applyMessageEdit(before, { messageId: 'WA_EDIT_1', body: 'new' });
+
+  assert.notEqual(after, before);
+  assert.equal(after[0].body, 'new');
+  assert.equal(before[0].body, 'old');
+});
+
+test('applyMessageEdit updates a live row by id', () => {
+  const before = [msg({ id: 'WA_EDIT_1', waMessageId: undefined, body: 'old' })];
+  const after = applyMessageEdit(before, { messageId: 'WA_EDIT_1', body: '' });
+  assert.equal(after[0].body, '');
+});
+
+test('applyMessageEdit is a referential no-op for an empty or unknown target id', () => {
+  const before = [msg({ id: 'm-1', body: 'old' })];
+  assert.equal(applyMessageEdit(before, { messageId: '', body: 'new' }), before);
+  assert.equal(applyMessageEdit(before, { messageId: 'missing', body: 'new' }), before);
 });

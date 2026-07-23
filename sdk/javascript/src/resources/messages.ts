@@ -13,6 +13,7 @@ import type {
   BulkMessageResponse,
   ChatHistoryMessage,
   DeleteMessageRequest,
+  EditMessageRequest,
   ForwardMessageRequest,
   ListMessagesQuery,
   MessageHistoryQuery,
@@ -24,6 +25,7 @@ import type {
   SendBulkRequest,
   SendContactRequest,
   SendLocationRequest,
+  SendAudioRequest,
   SendMediaRequest,
   SendTemplateRequest,
   SendTextRequest,
@@ -62,7 +64,7 @@ export class MessagesResource {
   }
 
   /** Send an audio file (url or base64). */
-  sendAudio(sessionId: string, body: SendMediaRequest): Promise<MessageResponse> {
+  sendAudio(sessionId: string, body: SendAudioRequest): Promise<MessageResponse> {
     return this.client.sendMedia(sessionId, 'send-audio', body);
   }
 
@@ -135,6 +137,15 @@ export class MessagesResource {
     return this.client.request<SuccessResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/messages/delete`,
+      body,
+    });
+  }
+
+  /** Edit the text of an own message (404 if the message is not found). */
+  editMessage(sessionId: string, body: EditMessageRequest): Promise<MessageResponse> {
+    return this.client.request<MessageResponse>({
+      method: 'POST',
+      path: `/api/sessions/${encodeSegment(sessionId)}/messages/edit`,
       body,
     });
   }

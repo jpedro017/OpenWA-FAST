@@ -11,6 +11,7 @@ import {
   ArrayMaxSize,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ToStrictNumber } from '../../../common/utils/strict-boolean';
 
 export class SendTextStatusDto {
   @ApiProperty({ description: 'Status text body.', example: 'Out for delivery 📦', maxLength: 4096 })
@@ -25,6 +26,7 @@ export class SendTextStatusDto {
   backgroundColor?: string;
 
   @ApiPropertyOptional({ description: 'Font family index (0–5).', example: 0, minimum: 0, maximum: 5 })
+  @ToStrictNumber()
   @IsOptional()
   @IsInt()
   @Min(0)
@@ -32,7 +34,10 @@ export class SendTextStatusDto {
   font?: number;
 
   @ApiProperty({
-    description: 'Recipient JIDs (1–256). WhatsApp Status is not posted to a group — use @c.us or @lid individuals.',
+    description:
+      'Recipient JIDs (1–256). WhatsApp Status is not posted to a group — use @c.us or @lid individuals. ' +
+      'Honored on the Baileys engine only: whatsapp-web.js ignores this allow-list and broadcasts to the ' +
+      "account's status-privacy audience.",
     type: String,
     isArray: true,
     example: ['628123456789@c.us'],

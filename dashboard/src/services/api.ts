@@ -25,7 +25,16 @@ if (API_ORIGIN) warnIfInsecureHttpUrl(API_ORIGIN, 'VITE_API_URL');
 export interface Session {
   id: string;
   name: string;
-  status: 'created' | 'idle' | 'initializing' | 'connecting' | 'qr_ready' | 'ready' | 'disconnected' | 'failed';
+  status:
+    | 'created'
+    | 'idle'
+    | 'initializing'
+    | 'connecting'
+    | 'authenticating'
+    | 'qr_ready'
+    | 'ready'
+    | 'disconnected'
+    | 'failed';
   phone?: string;
   pushName?: string;
   lastActive?: string;
@@ -123,11 +132,15 @@ export interface MessageResponse {
   timestamp: number;
 }
 
+// Mirrors the backend engine ChatKind (dashboard cannot import wa-id.ts).
+export type ChatKind = 'individual' | 'group' | 'channel' | 'status' | 'broadcast' | 'unknown';
+
 // Chat summary returned by GET /sessions/:id/chats (mirrors the backend ChatSummary).
 export interface Chat {
   id: string;
   name: string;
   isGroup: boolean;
+  kind: ChatKind;
   unreadCount: number;
   timestamp: number;
   lastMessage?: string;
@@ -163,6 +176,8 @@ export interface ChatMessage {
   id: string;
   waMessageId?: string;
   chatId: string;
+  /** Chat kind of the source conversation (present on live engine/WS payloads). */
+  kind?: ChatKind;
   from: string;
   to: string;
   body: string;
@@ -193,12 +208,127 @@ export interface EngineHistoryMessage {
   media?: { mimetype: string; filename?: string; data?: string };
 }
 
+// Mirrors the backend engine Channel / ChannelMessage (GET /sessions/:id/channels[/:id/messages]).
+export interface Channel {
+  id: string;
+  name: string;
+  subscriberCount?: number;
+  inviteCode?: string;
+  verified?: boolean;
+}
+
+export interface ChannelMessage {
+  id: string;
+  body: string;
+  timestamp: number;
+  hasMedia: boolean;
+  mediaUrl?: string;
+}
+
 export interface SendMediaPayload {
   base64?: string;
   url?: string;
   mimetype?: string;
   filename?: string;
   caption?: string;
+}
+
+// Payloads below mirror the backend DTOs in src/modules/message/dto (raw bodies, no envelope).
+export interface SendLocationPayload {
+  chatId: string;
+  latitude: number;
+  longitude: number;
+  description?: string;
+  address?: string;
+}
+
+export interface SendContactPayload {
+  chatId: string;
+  contactName: string;
+  contactNumber: string;
+}
+
+export interface SendPollPayload {
+  chatId: string;
+  name: string;
+  options: string[];
+  allowMultipleAnswers?: boolean;
+}
+
+export interface ForwardMessagePayload {
+  fromChatId: string;
+  toChatId: string;
+  messageId: string;
+}
+
+// Media block of a single bulk message (BulkMediaDto — no caption; caption sits next to it).
+export interface BulkMediaPayload {
+  url?: string;
+  base64?: string;
+  mimetype?: string;
+  filename?: string;
+  ptt?: boolean;
+}
+
+export interface BulkMessageItem {
+  chatId: string;
+  type: 'text' | 'image' | 'video' | 'audio' | 'document';
+  content: {
+    text?: string;
+    image?: BulkMediaPayload;
+    video?: BulkMediaPayload;
+    audio?: BulkMediaPayload;
+    document?: BulkMediaPayload;
+    caption?: string;
+  };
+  variables?: Record<string, string>;
+}
+
+export interface SendBulkPayload {
+  batchId?: string;
+  messages: BulkMessageItem[];
+  options?: {
+    delayBetweenMessages?: number;
+    randomizeDelay?: boolean;
+    stopOnError?: boolean;
+  };
+}
+
+/** 202 response of POST send-bulk — the batch is processing asynchronously; poll getBatchStatus. */
+export interface BulkBatchResponse {
+  batchId: string;
+  status: string;
+  totalMessages: number;
+  estimatedCompletionTime?: string;
+  statusUrl: string;
+}
+
+export type BatchStatus = 'pending' | 'processing' | 'completed' | 'cancelled' | 'failed';
+
+export interface BatchProgress {
+  total: number;
+  sent: number;
+  failed: number;
+  pending: number;
+  cancelled: number;
+}
+
+export interface BatchMessageResult {
+  chatId: string;
+  status: 'pending' | 'sent' | 'failed' | 'cancelled';
+  messageId?: string;
+  error?: { code: string; message: string };
+  sentAt?: string;
+}
+
+/** GET batch/:batchId shape; the cancel endpoint returns the same minus results/timestamps. */
+export interface BatchStatusResponse {
+  batchId: string;
+  status: BatchStatus;
+  progress: BatchProgress;
+  results?: BatchMessageResult[];
+  startedAt?: string;
+  completedAt?: string;
 }
 
 export interface HealthStatus {
@@ -306,7 +436,7 @@ export interface SaveConfigPayload {
 }
 
 export interface Settings {
-  general: { apiBaseUrl: string; sessionTimeout: number; autoReconnect: boolean; debugMode: boolean };
+  general: { apiBaseUrl: string; autoReconnect: boolean; debugMode: boolean };
   api: { rateLimit: number; rateLimitWindow: number; enableDocs: boolean };
   notifications: { emailEnabled: boolean; notificationEmail: string; webhookAlerts: boolean };
 }
@@ -476,6 +606,9 @@ export const sessionApi = {
         includeMedia ? '&includeMedia=true' : ''
       }`,
     ),
+  getSubscribedChannels: (id: string) => request<Channel[]>(`/sessions/${id}/channels`),
+  getChannelMessages: (id: string, channelId: string, limit = 50) =>
+    request<ChannelMessage[]>(`/sessions/${id}/channels/${encodeURIComponent(channelId)}/messages?limit=${limit}`),
 };
 
 // =============================================================================
@@ -536,9 +669,35 @@ export interface CheckNumberResponse {
   whatsappId: string | null;
 }
 
+export interface ProfilePictureResponse {
+  /** Signed CDN URL for the contact/group picture, or null when hidden / unavailable. */
+  url: string | null;
+}
+
 export const contactApi = {
   checkNumber: (sessionId: string, number: string) =>
     request<CheckNumberResponse>(`/sessions/${sessionId}/contacts/check/${encodeURIComponent(number)}`),
+  // Returns the contact/group profile picture URL. Both engines return null when the user hid their
+  // picture or has none. The URL is a signed WhatsApp CDN link that expires in a few hours, so the
+  // dashboard caches it for an hour (see useProfilePicture) and re-fetches on expiry.
+  profilePicture: (sessionId: string, contactId: string) =>
+    request<ProfilePictureResponse>(`/sessions/${sessionId}/contacts/${encodeURIComponent(contactId)}/profile-picture`),
+  // Best-effort resolution of a contact id (e.g. an @lid privacy id) to its phone number (MSISDN
+  // digits), or null when the engine can't map it. Cached a day by useResolvedPhone.
+  resolvePhone: (sessionId: string, contactId: string) =>
+    request<{ contactId: string; phone: string | null }>(
+      `/sessions/${sessionId}/contacts/${encodeURIComponent(contactId)}/phone`,
+    ),
+  // Batch-resolve profile picture URLs for a whole sidebar in ONE request — the per-chat burst of
+  // parallel single fetches exhausts the per-IP throttle (429s). Engine lookups run 3 at a time
+  // server-side; ids beyond the backend's 50-id cap are dropped client-side too.
+  profilePictures: (sessionId: string, contactIds: string[]) =>
+    request<{ pictures: Record<string, string | null> }>(
+      `/sessions/${sessionId}/contacts/profile-pictures?ids=${contactIds
+        .slice(0, 50)
+        .map(encodeURIComponent)
+        .join(',')}`,
+    ),
 };
 
 // =============================================================================
@@ -624,6 +783,44 @@ export const messageApi = {
       method: 'POST',
       body: JSON.stringify({ chatId, ...payload }),
     }),
+  sendLocation: (sessionId: string, data: SendLocationPayload) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-location`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  sendContact: (sessionId: string, data: SendContactPayload) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-contact`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  // Stickers take the same media body as the other send-* endpoints (base64 XOR url + mimetype).
+  sendSticker: (sessionId: string, chatId: string, payload: SendMediaPayload) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-sticker`, {
+      method: 'POST',
+      body: JSON.stringify({ chatId, ...payload }),
+    }),
+  sendPoll: (sessionId: string, data: SendPollPayload) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-poll`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  forward: (sessionId: string, data: ForwardMessagePayload) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/forward`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  // Async batch: returns 202 immediately; poll getBatchStatus until a terminal status.
+  sendBulk: (sessionId: string, data: SendBulkPayload) =>
+    request<BulkBatchResponse>(`/sessions/${sessionId}/messages/send-bulk`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  getBatchStatus: (sessionId: string, batchId: string) =>
+    request<BatchStatusResponse>(`/sessions/${sessionId}/messages/batch/${encodeURIComponent(batchId)}`),
+  cancelBatch: (sessionId: string, batchId: string) =>
+    request<BatchStatusResponse>(`/sessions/${sessionId}/messages/batch/${encodeURIComponent(batchId)}/cancel`, {
+      method: 'POST',
+    }),
   reply: (sessionId: string, data: { chatId: string; quotedMessageId: string; text: string }) =>
     request<MessageResponse>(`/sessions/${sessionId}/messages/reply`, {
       method: 'POST',
@@ -700,27 +897,20 @@ export const infraApi = {
   // Data migration: export all Data-DB tables (call while still on the OLD database, before switching),
   // then import after the switch + restart. Used by the DB-switch migration guard so data isn't lost.
   exportData: () =>
-    request<{ exportedAt: string; dataDbType: string; tables: Record<string, unknown[]>; counts: Record<string, number> }>(
-      '/infra/export-data',
-    ),
+    request<{
+      exportedAt: string;
+      dataDbType: string;
+      tables: Record<string, unknown[]>;
+      counts: Record<string, number>;
+    }>('/infra/export-data'),
   importData: (tables: Record<string, unknown[]>) =>
-    request<{ imported: boolean; counts?: Record<string, number>; message?: string; warnings?: string[] }>('/infra/import-data', {
-      method: 'POST',
-      body: JSON.stringify({ tables }),
-    }),
-};
-
-// =============================================================================
-// Settings API
-// =============================================================================
-
-export const settingsApi = {
-  get: () => request<Settings>('/settings'),
-  update: (settings: Partial<Settings>) =>
-    request<Settings>('/settings', {
-      method: 'PUT',
-      body: JSON.stringify(settings),
-    }),
+    request<{ imported: boolean; counts?: Record<string, number>; message?: string; warnings?: string[] }>(
+      '/infra/import-data',
+      {
+        method: 'POST',
+        body: JSON.stringify({ tables }),
+      },
+    ),
 };
 
 // =============================================================================
@@ -749,7 +939,10 @@ export interface PluginConfigSchema {
   properties: Record<string, PluginConfigField>;
 }
 
-export interface PluginI18nText { title?: string; description?: string }
+export interface PluginI18nText {
+  title?: string;
+  description?: string;
+}
 export interface PluginI18nLocale {
   name?: string;
   description?: string;
@@ -892,6 +1085,8 @@ export interface CreateInstanceInput {
   instanceId: string;
   sessionScope?: string;
   verifyToken?: string;
+  /** Provider-fixed webhook secret (e.g. Chatwoot's). Omit to auto-generate one (shown once). */
+  secret?: string;
   config?: Record<string, unknown>;
 }
 

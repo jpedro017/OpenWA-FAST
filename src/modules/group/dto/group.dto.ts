@@ -1,5 +1,16 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsArray, ArrayNotEmpty, IsString, IsNotEmpty, MaxLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsArray,
+  ArrayNotEmpty,
+  IsString,
+  IsNotEmpty,
+  MaxLength,
+  IsBoolean,
+  IsInt,
+  Min,
+  ValidateIf,
+} from 'class-validator';
+import { ToStrictBoolean, ToStrictNumber } from '../../../common/utils/strict-boolean';
 
 export class CreateGroupDto {
   @ApiProperty({ description: 'Group subject/name', maxLength: 100 })
@@ -36,4 +47,46 @@ export class GroupDescriptionDto {
   @IsString()
   @MaxLength(1024)
   description: string;
+}
+
+export class JoinGroupDto {
+  @ApiProperty({
+    description: 'Group invite code (the token from a https://chat.whatsapp.com/<code> link)',
+    maxLength: 128,
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  inviteCode: string;
+}
+
+/**
+ * All fields optional, but at least one must be present — enforced in GroupService.updateGroupSettings
+ * (a class-validator "at least one of" idiom does not exist; an empty body is a client error, 400).
+ * ValidateIf (not @IsOptional) so an explicit `null` fails validation (400) instead of being applied
+ * as a value; only `undefined` (absent) skips the field.
+ */
+export class GroupSettingsDto {
+  @ApiPropertyOptional({ description: 'Only admins can send messages (announce group)' })
+  @ToStrictBoolean()
+  @ValidateIf((o: GroupSettingsDto) => o.announce !== undefined)
+  @IsBoolean()
+  announce?: boolean;
+
+  @ApiPropertyOptional({ description: 'Only admins can edit group info (locked group)' })
+  @ToStrictBoolean()
+  @ValidateIf((o: GroupSettingsDto) => o.locked !== undefined)
+  @IsBoolean()
+  locked?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Disappearing-messages timer in seconds; 0 disables. Known values: 86400 (24h), 604800 (7d), 7776000 (90d)',
+    minimum: 0,
+  })
+  @ToStrictNumber()
+  @ValidateIf((o: GroupSettingsDto) => o.ephemeralSeconds !== undefined)
+  @IsInt()
+  @Min(0)
+  ephemeralSeconds?: number;
 }

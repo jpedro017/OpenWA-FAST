@@ -12,6 +12,7 @@
             "schema": {
               "enum": [
                 "api_key_created",
+                "api_key_updated",
                 "api_key_used",
                 "api_key_revoked",
                 "api_key_deleted",
@@ -33,7 +34,13 @@
                 "integration_instance_created",
                 "integration_instance_updated",
                 "integration_instance_secret_regenerated",
-                "integration_instance_deleted"
+                "integration_instance_deleted",
+                "infra_config_saved",
+                "infra_restart_requested",
+                "infra_data_exported",
+                "infra_data_imported",
+                "infra_storage_exported",
+                "infra_storage_imported"
               ],
               "type": "string"
             }
@@ -212,6 +219,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The change would remove the last usable admin key."
           }
         },
         "summary": "Update API key (admin only)",
@@ -234,6 +244,9 @@
         "responses": {
           "204": {
             "description": "API key deleted"
+          },
+          "409": {
+            "description": "The key is the last usable admin key."
           }
         },
         "summary": "Delete API key (admin only)",
@@ -265,6 +278,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The key is the last usable admin key."
           }
         },
         "summary": "Revoke API key (admin only)",
@@ -715,7 +731,17 @@
         ],
         "responses": {
           "200": {
-            "description": "List of active chats (most recent first)"
+            "description": "List of active chats (most recent first)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChatSummaryDto"
+                  }
+                }
+              }
+            }
           },
           "400": {
             "description": "Session not ready"
@@ -2006,6 +2032,57 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/messages/edit": {
+      "post": {
+        "operationId": "MessageController_edit",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditMessageDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message edited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Session not active, invalid request, or the send was blocked by a plugin"
+          },
+          "403": {
+            "description": "The message was not sent by this account, or the engine refused the edit"
+          },
+          "404": {
+            "description": "Message not found"
+          }
+        },
+        "summary": "Edit the text of a message sent by this account",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/messages/send-bulk": {
       "post": {
         "operationId": "MessageController_sendBulk",
@@ -2481,7 +2558,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "string"
+                "$ref": "#/components/schemas/SaveConfigDto"
               }
             }
           }
@@ -2501,6 +2578,16 @@
       "post": {
         "operationId": "InfraController_requestRestart",
         "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestartDto"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Server will restart with new profiles"
@@ -2688,6 +2775,41 @@
           }
         },
         "summary": "Get all contacts for a session",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/contacts/profile-pictures": {
+      "get": {
+        "description": "One request for a whole chat sidebar — avoids the burst of parallel single fetches that would exhaust the per-IP throttle. Engine lookups run 3 at a time; per-id failures return null.",
+        "operationId": "ContactController_getProfilePictures",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ids",
+            "required": true,
+            "in": "query",
+            "description": "Comma-separated contact ids (max 50 used)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Batch-resolve profile picture URLs for up to 50 contacts",
         "tags": [
           "contacts"
         ]
@@ -2931,6 +3053,135 @@
           }
         },
         "summary": "Get detailed group info",
+        "tags": [
+          "groups"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/groups/join": {
+      "post": {
+        "operationId": "GroupController_join",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinGroupDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Joined the group"
+          },
+          "400": {
+            "description": "Invalid or expired invite code, or session is not started"
+          }
+        },
+        "summary": "Join a group via invite code",
+        "tags": [
+          "groups"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/groups/{groupId}/settings": {
+      "get": {
+        "operationId": "GroupController_getSettings",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "required": true,
+            "in": "path",
+            "description": "Group ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group settings"
+          },
+          "404": {
+            "description": "Group not found"
+          }
+        },
+        "summary": "Get group settings (announce / locked / ephemeral timer)",
+        "tags": [
+          "groups"
+        ]
+      },
+      "put": {
+        "operationId": "GroupController_updateSettings",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "required": true,
+            "in": "path",
+            "description": "Group ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupSettingsDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Group settings updated"
+          },
+          "400": {
+            "description": "No setting provided, or a value is not a boolean"
+          },
+          "403": {
+            "description": "The engine refused the change (the account is not a group admin)"
+          },
+          "404": {
+            "description": "Group not found"
+          },
+          "501": {
+            "description": "The active engine does not support a requested setting"
+          }
+        },
+        "summary": "Update group settings (announce / locked / ephemeral timer)",
         "tags": [
           "groups"
         ]
@@ -3332,6 +3583,169 @@
         "summary": "Revoke group invite code and generate new one",
         "tags": [
           "groups"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profile/name": {
+      "put": {
+        "operationId": "ProfileController_setName",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetProfileNameDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Profile name updated"
+          },
+          "400": {
+            "description": "Session is not started"
+          },
+          "403": {
+            "description": "The engine refused the name change"
+          }
+        },
+        "summary": "Set the account display name",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profile/status": {
+      "put": {
+        "operationId": "ProfileController_setStatus",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetProfileStatusDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Profile status updated"
+          },
+          "400": {
+            "description": "Session is not started"
+          }
+        },
+        "summary": "Set the account about/status text",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profile/picture": {
+      "put": {
+        "operationId": "ProfileController_setPicture",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetProfilePictureDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Profile picture updated"
+          },
+          "400": {
+            "description": "Neither url nor base64 provided, base64 without mimetype, or session is not started"
+          },
+          "403": {
+            "description": "The engine refused the picture change"
+          },
+          "413": {
+            "description": "Decoded base64 image exceeds the configured media cap"
+          }
+        },
+        "summary": "Set the account profile picture (URL or base64 image)",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/calls/{callId}/reject": {
+      "post": {
+        "operationId": "CallController_reject",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "callId",
+            "required": true,
+            "in": "path",
+            "description": "Call ID from the call.received event",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Call rejected"
+          },
+          "400": {
+            "description": "Session is not started"
+          },
+          "404": {
+            "description": "Call not found or no longer ringing"
+          }
+        },
+        "summary": "Reject a ringing incoming call",
+        "tags": [
+          "calls"
         ]
       }
     },
@@ -3857,10 +4271,13 @@
         },
         "responses": {
           "201": {
-            "description": "Text status posted to the specified recipients."
+            "description": "Text status posted. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts to the account's status-privacy audience."
+          },
+          "400": {
+            "description": "Invalid request, or the post was blocked by a plugin."
           }
         },
-        "summary": "Post a text status (Baileys only)",
+        "summary": "Post a text status",
         "tags": [
           "status"
         ]
@@ -3891,10 +4308,16 @@
         },
         "responses": {
           "201": {
-            "description": "Image status posted to the specified recipients."
+            "description": "Image status posted. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts to the account's status-privacy audience."
+          },
+          "400": {
+            "description": "Neither url nor base64 provided, or the post was blocked by a plugin."
+          },
+          "413": {
+            "description": "Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES."
           }
         },
-        "summary": "Post an image status (Baileys only)",
+        "summary": "Post an image status",
         "tags": [
           "status"
         ]
@@ -3925,10 +4348,16 @@
         },
         "responses": {
           "201": {
-            "description": "Video status posted to the specified recipients."
+            "description": "Video status posted. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts to the account's status-privacy audience."
+          },
+          "400": {
+            "description": "Neither url nor base64 provided, or the post was blocked by a plugin."
+          },
+          "413": {
+            "description": "Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES."
           }
         },
-        "summary": "Post a video status (Baileys only)",
+        "summary": "Post a video status",
         "tags": [
           "status"
         ]
@@ -3981,10 +4410,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Business catalog metadata for the session."
+            "description": "Always null on whatsapp-web.js: catalog reads are not implemented on either engine."
+          },
+          "501": {
+            "description": "Not supported by the active engine: Baileys does not implement catalog reads."
           }
         },
-        "summary": "Get business catalog info",
+        "summary": "Get business catalog info (not implemented by any engine)",
         "tags": [
           "catalog"
         ]
@@ -4027,10 +4459,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Paginated list of catalog products."
+            "description": "Always an empty page on whatsapp-web.js: catalog reads are not implemented on either engine."
+          },
+          "501": {
+            "description": "Not supported by the active engine: Baileys does not implement catalog reads."
           }
         },
-        "summary": "List catalog products",
+        "summary": "List catalog products (not implemented by any engine)",
         "tags": [
           "catalog"
         ]
@@ -4059,10 +4494,13 @@
         ],
         "responses": {
           "200": {
-            "description": "The requested catalog product."
+            "description": "Always null on whatsapp-web.js: catalog reads are not implemented on either engine."
+          },
+          "501": {
+            "description": "Not supported by the active engine: Baileys does not implement catalog reads."
           }
         },
-        "summary": "Get a specific product",
+        "summary": "Get a specific product (not implemented by any engine)",
         "tags": [
           "catalog"
         ]
@@ -4092,11 +4530,11 @@
           }
         },
         "responses": {
-          "201": {
-            "description": "Product message sent."
+          "501": {
+            "description": "Not supported by the active engine: no engine can send product messages."
           }
         },
-        "summary": "Send a product message",
+        "summary": "Send a product message (not supported by any engine)",
         "tags": [
           "catalog"
         ]
@@ -4126,11 +4564,11 @@
           }
         },
         "responses": {
-          "201": {
-            "description": "Catalog link sent."
+          "501": {
+            "description": "Not supported by the active engine: no engine can send catalog links."
           }
         },
-        "summary": "Send catalog link",
+        "summary": "Send catalog link (not supported by any engine)",
         "tags": [
           "catalog"
         ]
@@ -4953,7 +5391,7 @@
         ],
         "responses": {
           "201": {
-            "description": "Dead-lettered ingress deliveries for the instance re-dispatched. Returns the count redriven."
+            "description": "One bounded batch of dead-lettered ingress deliveries re-dispatched, with remaining depth."
           }
         },
         "tags": [
@@ -5303,7 +5741,7 @@
   "info": {
     "title": "OpenWA API",
     "description": "Open Source WhatsApp API Gateway - Free, Self-Hosted HTTP API",
-    "version": "0.8.17",
+    "version": "0.10.8",
     "contact": {
       "name": "OpenWA",
       "url": "https://github.com/rmyndharis/OpenWA",
@@ -5621,7 +6059,7 @@
           },
           "config": {
             "type": "object",
-            "description": "Session configuration options",
+            "description": "Session configuration options. Set autoRejectCalls (boolean, default false) to automatically reject incoming calls — the call.received event is still emitted.",
             "example": {
               "autoReconnect": true
             }
@@ -5776,6 +6214,58 @@
           "status"
         ]
       },
+      "ChatSummaryDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "628111@c.us"
+          },
+          "name": {
+            "type": "string",
+            "example": "Alice"
+          },
+          "isGroup": {
+            "type": "boolean",
+            "description": "Retained for back-compat; true for @g.us chats.",
+            "example": false
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "individual",
+              "group",
+              "channel",
+              "status",
+              "broadcast",
+              "unknown"
+            ],
+            "description": "User-facing chat kind.",
+            "example": "individual"
+          },
+          "unreadCount": {
+            "type": "number",
+            "example": 1
+          },
+          "timestamp": {
+            "type": "number",
+            "description": "Unix seconds of the last activity.",
+            "example": 1700000010
+          },
+          "lastMessage": {
+            "type": "string",
+            "example": "hi"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "isGroup",
+          "kind",
+          "unreadCount",
+          "timestamp"
+        ]
+      },
       "MarkChatReadDto": {
         "type": "object",
         "properties": {
@@ -5851,13 +6341,16 @@
                 "message.failed",
                 "message.revoked",
                 "message.reaction",
+                "message.edited",
                 "session.status",
                 "session.qr",
                 "session.authenticated",
                 "session.disconnected",
+                "session.reconnect_loop",
                 "group.join",
                 "group.leave",
                 "group.update",
+                "call.received",
                 "*"
               ]
             }
@@ -5993,13 +6486,16 @@
                 "message.failed",
                 "message.revoked",
                 "message.reaction",
+                "message.edited",
                 "session.status",
                 "session.qr",
                 "session.authenticated",
                 "session.disconnected",
+                "session.reconnect_loop",
                 "group.join",
                 "group.leave",
                 "group.update",
+                "call.received",
                 "*"
               ]
             }
@@ -6077,7 +6573,7 @@
         "properties": {
           "messageId": {
             "type": "string",
-            "description": "The message id, assigned when the gateway accepts the message for sending. A 201 here means the message was handed to the WhatsApp client — it does NOT confirm delivery. WhatsApp does not reject an unregistered recipient synchronously, so a message to a number that is not on WhatsApp still returns 201 with a valid messageId but never delivers. To confirm a number is on WhatsApp before sending, use GET /api/sessions/{sessionId}/contacts/check/{number}; track real delivery via the message `status` field (sent → delivered → read).",
+            "description": "The message id, assigned when the gateway accepts the message for sending. A 201 here means the message was handed to the WhatsApp client — it does NOT confirm delivery. WhatsApp does not reject an unregistered recipient synchronously, so a message to a number that is not on WhatsApp still returns 201 with a valid messageId; whether it later delivers, stalls, or is reported as an error reaches you asynchronously, if at all. To confirm a number is on WhatsApp before sending, use GET /api/sessions/{sessionId}/contacts/check/{number}; track real delivery via the message `status` field (sent → delivered → read, or failed if WhatsApp reports an error for it). A message resting at `sent` is not diagnostic on its own: a registered recipient whose device has not come online since the send stays at `sent` too.",
             "example": "true_628123456789@c.us_3EB0123456789"
           },
           "timestamp": {
@@ -6388,6 +6884,27 @@
           "messageId"
         ]
       },
+      "EditMessageDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string",
+            "description": "New text body for the message",
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "chatId",
+          "messageId",
+          "body"
+        ]
+      },
       "BulkMediaDto": {
         "type": "object",
         "properties": {
@@ -6670,6 +7187,200 @@
           }
         }
       },
+      "DatabaseConfigDto": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "sqlite",
+              "postgres"
+            ]
+          },
+          "builtIn": {
+            "type": "boolean"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "database": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "poolSize": {
+            "type": "number"
+          },
+          "sslEnabled": {
+            "type": "boolean"
+          },
+          "sslRejectUnauthorized": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "RedisConfigDto": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "builtIn": {
+            "type": "boolean"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "QueueConfigDto": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StorageConfigDto": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "local",
+              "s3"
+            ]
+          },
+          "builtIn": {
+            "type": "boolean"
+          },
+          "localPath": {
+            "type": "string"
+          },
+          "s3Bucket": {
+            "type": "string"
+          },
+          "s3Region": {
+            "type": "string"
+          },
+          "s3AccessKey": {
+            "type": "string"
+          },
+          "s3SecretKey": {
+            "type": "string"
+          },
+          "s3Endpoint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "EngineConfigDto": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "headless": {
+            "type": "boolean"
+          },
+          "sessionDataPath": {
+            "type": "string"
+          },
+          "browserArgs": {
+            "type": "string"
+          }
+        }
+      },
+      "SaveConfigDto": {
+        "type": "object",
+        "properties": {
+          "database": {
+            "$ref": "#/components/schemas/DatabaseConfigDto"
+          },
+          "redis": {
+            "$ref": "#/components/schemas/RedisConfigDto"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/QueueConfigDto"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/StorageConfigDto"
+          },
+          "engine": {
+            "$ref": "#/components/schemas/EngineConfigDto"
+          }
+        }
+      },
+      "RestartDto": {
+        "type": "object",
+        "properties": {
+          "profiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "profilesToRemove": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "JoinGroupDto": {
+        "type": "object",
+        "properties": {
+          "inviteCode": {
+            "type": "string",
+            "description": "Group invite code (the token from a https://chat.whatsapp.com/<code> link)",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "inviteCode"
+        ]
+      },
+      "GroupSettingsDto": {
+        "type": "object",
+        "properties": {
+          "announce": {
+            "type": "boolean",
+            "description": "Only admins can send messages (announce group)"
+          },
+          "locked": {
+            "type": "boolean",
+            "description": "Only admins can edit group info (locked group)"
+          },
+          "ephemeralSeconds": {
+            "type": "number",
+            "description": "Disappearing-messages timer in seconds; 0 disables. Known values: 86400 (24h), 604800 (7d), 7776000 (90d)",
+            "minimum": 0
+          }
+        }
+      },
       "CreateGroupDto": {
         "type": "object",
         "properties": {
@@ -6732,6 +7443,51 @@
           "description"
         ]
       },
+      "SetProfileNameDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "New display name (WhatsApp limit: 25 characters)",
+            "maxLength": 25
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "SetProfileStatusDto": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "New about/status text (may be empty to clear it; WhatsApp limit: 139 characters)",
+            "maxLength": 139
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "SetProfilePictureDto": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Image URL (http/https)",
+            "example": "https://example.com/avatar.jpg"
+          },
+          "base64": {
+            "type": "string",
+            "description": "Base64 encoded image data"
+          },
+          "mimetype": {
+            "type": "string",
+            "description": "Image MIME type (required when using base64)",
+            "example": "image/jpeg"
+          }
+        }
+      },
       "SendTextStatusDto": {
         "type": "object",
         "properties": {
@@ -6754,7 +7510,7 @@
             "maximum": 5
           },
           "recipients": {
-            "description": "Recipient JIDs (1–256). WhatsApp Status is not posted to a group — use @c.us or @lid individuals.",
+            "description": "Recipient JIDs (1–256). WhatsApp Status is not posted to a group — use @c.us or @lid individuals. Honored on the Baileys engine only: whatsapp-web.js ignores this allow-list and broadcasts to the account's status-privacy audience.",
             "example": [
               "628123456789@c.us"
             ],
@@ -6782,7 +7538,7 @@
           "base64": {
             "type": "string",
             "description": "Base64-encoded media. Requires mimetype.",
-            "example": "data:image/jpeg;base64,..."
+            "example": "/9j/4AAQSkZJRg..."
           },
           "mimetype": {
             "type": "string",
@@ -6809,7 +7565,7 @@
             "maxLength": 1024
           },
           "recipients": {
-            "description": "Recipient JIDs (1–256), @c.us or @lid.",
+            "description": "Recipient JIDs (1–256), @c.us or @lid. Honored on the Baileys engine only: whatsapp-web.js ignores this allow-list and broadcasts to the account's status-privacy audience.",
             "example": [
               "628123456789@c.us"
             ],
@@ -6844,7 +7600,7 @@
             "maxLength": 1024
           },
           "recipients": {
-            "description": "Recipient JIDs (1–256), @c.us or @lid.",
+            "description": "Recipient JIDs (1–256), @c.us or @lid. Honored on the Baileys engine only: whatsapp-web.js ignores this allow-list and broadcasts to the account's status-privacy audience.",
             "example": [
               "628123456789@c.us"
             ],

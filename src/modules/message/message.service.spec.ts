@@ -29,6 +29,7 @@ function createMockEngine() {
     reactToMessage: jest.fn().mockResolvedValue(undefined),
     getMessageReactions: jest.fn().mockResolvedValue([]),
     deleteMessage: jest.fn().mockResolvedValue(undefined),
+    editMessage: jest.fn().mockResolvedValue(mockEngineResult),
     getChatHistory: jest.fn().mockResolvedValue([]),
     sendChatState: jest.fn().mockResolvedValue(undefined),
   };
@@ -59,6 +60,7 @@ describe('MessageService', () => {
       save: jest.fn().mockImplementation(msg => Promise.resolve(msg)),
       findOne: jest.fn().mockResolvedValue(null),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(),
     };
 
@@ -67,6 +69,7 @@ describe('MessageService', () => {
     sessionService = {
       getEngine: jest.fn().mockReturnValue(mockEngine),
       findOne: jest.fn().mockResolvedValue({ id: 'sess-1', phone: '628123456789' }),
+      recordOutboundMessageEdit: jest.fn().mockResolvedValue(undefined),
     };
 
     hookManager = {
@@ -876,6 +879,30 @@ describe('MessageService', () => {
         expect.objectContaining({ data: 'https://example.com/img.jpg' }),
       );
     });
+
+    it('strips a data-URI prefix before passing base64 bytes to the engine', async () => {
+      await service.sendImage('sess-1', {
+        chatId: '628123456789@c.us',
+        base64: 'data:image/png;base64,QUJD',
+        mimetype: 'image/png',
+      });
+
+      expect(mockEngine.sendImageMessage).toHaveBeenCalledWith(
+        '628123456789@c.us',
+        expect.objectContaining({ data: 'QUJD' }),
+      );
+    });
+
+    it('rejects a data URI with no encoded payload', async () => {
+      await expect(
+        service.sendImage('sess-1', {
+          chatId: '628123456789@c.us',
+          base64: 'data:image/png;base64,',
+          mimetype: 'image/png',
+        }),
+      ).rejects.toThrow('Either url or base64 must be provided');
+      expect(mockEngine.sendImageMessage).not.toHaveBeenCalled();
+    });
   });
 
   // ── reactToMessage / deleteMessage ────────────────────────────────
@@ -967,6 +994,147 @@ describe('MessageService', () => {
       });
 
       expect(mockEngine.deleteMessage).toHaveBeenCalledWith('test@c.us', 'wa-msg-1', false);
+    });
+  });
+
+  describe('editMessage', () => {
+    it('edits via the engine, delegates the stored-row update, and returns the engine result', async () => {
+      const res = await service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' });
+
+      expect(mockEngine.editMessage).toHaveBeenCalledWith('test@c.us', 'wa-msg-1', 'edited');
+      // Persistence is delegated to the session's per-message mutation queue (serialized with the
+      // inbound edit path) — the service no longer writes the row directly.
+      expect(sessionService.recordOutboundMessageEdit).toHaveBeenCalledWith('sess-1', 'wa-msg-1', 'edited');
+      expect(repository.update).not.toHaveBeenCalled();
+      expect(res).toEqual({ messageId: 'wa-msg-1', timestamp: 1706868000 });
+    });
+
+    it('still succeeds when the delegated stored-row update is a no-op (the engine edit already happened)', async () => {
+      // recordOutboundMessageEdit is best-effort by contract (never rejects); a missing row or a
+      // failed write is logged inside the session service, not surfaced here.
+      const res = await service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' });
+
+      expect(res).toEqual({ messageId: 'wa-msg-1', timestamp: 1706868000 });
+    });
+
+    it('propagates the engine not-found error as-is (MessageNotFoundError → 404)', async () => {
+      mockEngine.editMessage.mockRejectedValueOnce(new NotFoundException('Message wa-msg-1 not found'));
+      await expect(
+        service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(sessionService.recordOutboundMessageEdit).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when the session is not started', async () => {
+      (sessionService.getEngine as jest.Mock).mockReturnValue(undefined);
+      await expect(
+        service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockEngine.editMessage).not.toHaveBeenCalled();
+    });
+
+    // An edit replaces the text the recipient sees, so it belongs to the same moderation
+    // chokepoint as every other sender rather than going out unseen by plugins.
+    it('runs the message:sending gate tagged as an edit', async () => {
+      await service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' });
+
+      expect(hookManager.execute).toHaveBeenCalledWith(
+        'message:sending',
+        expect.objectContaining({ type: 'edit' }),
+        expect.any(Object),
+      );
+    });
+
+    it('lets a plugin block an edit before the engine is called', async () => {
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({ continue: false, data: {} });
+
+      await expect(
+        service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' }),
+      ).rejects.toThrow('Message sending blocked by plugin');
+
+      expect(mockEngine.editMessage).not.toHaveBeenCalled();
+      expect(sessionService.recordOutboundMessageEdit).not.toHaveBeenCalled();
+    });
+
+    it('threads a plugin-rewritten edit body through to the engine and the stored row', async () => {
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: { input: { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'redacted' } },
+      });
+
+      await service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'secret' });
+
+      expect(mockEngine.editMessage).toHaveBeenCalledWith('test@c.us', 'wa-msg-1', 'redacted');
+      expect(sessionService.recordOutboundMessageEdit).toHaveBeenCalledWith('sess-1', 'wa-msg-1', 'redacted');
+    });
+  });
+
+  /**
+   * The empty id is the engine's "sent, but I couldn't read the id back" signal (#757). It has to reach
+   * the DB as NULL: UQ_messages_sessionId_waMessageId is NOT partial, so '' collides with the next
+   * id-less send in the same session, while NULLs stay exempt. In the bulk path that violation is
+   * swallowed into a warning, so the row would vanish with nothing surfacing.
+   */
+  describe('saveOutgoingMessage id normalization (#757)', () => {
+    it('stores an empty engine id as NULL rather than an empty string', async () => {
+      await service.saveOutgoingMessage('sess-1', { waMessageId: '', chatId: '621@c.us', type: 'text' });
+
+      expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({ waMessageId: undefined }));
+    });
+
+    it('leaves a real id untouched', async () => {
+      await service.saveOutgoingMessage('sess-1', {
+        waMessageId: 'true_621@c.us_ABC',
+        chatId: '621@c.us',
+        type: 'text',
+      });
+
+      expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({ waMessageId: 'true_621@c.us_ABC' }));
+    });
+  });
+
+  describe('persistSentState vs the own-send echo (dedup race)', () => {
+    it('merges state onto the echo row, then drops the redundant PENDING row', async () => {
+      // The engine's message_create echo (onMessageCreate) won the insert race, so the SENT-state save
+      // collides on UNIQUE(sessionId, waMessageId). The echo row carries only a media-less marker —
+      // the merge must land status/timestamp/metadata on it BEFORE the placeholder is deleted, or the
+      // payload is lost. The send still succeeds.
+      (repository.save as jest.Mock)
+        .mockImplementationOnce(msg => Promise.resolve(msg)) // saveOutgoingMessage (PENDING)
+        .mockRejectedValueOnce(new Error('UNIQUE constraint failed: messages.sessionId, messages.waMessageId'));
+
+      const result = await service.sendText('sess-1', { chatId: '621@c.us', text: 'hi' });
+
+      expect(result.messageId).toBe('wa-msg-1'); // send reported success
+      expect(repository.update).toHaveBeenCalledWith(
+        { sessionId: 'sess-1', waMessageId: 'wa-msg-1' },
+        expect.objectContaining({ status: MessageStatus.SENT, timestamp: 1706868000 }),
+      );
+      expect(repository.delete).toHaveBeenCalledWith({ id: 'msg-uuid-1' });
+    });
+
+    it('merges the media payload onto the echo row for a media send (no data loss after reload)', async () => {
+      (repository.save as jest.Mock)
+        .mockImplementationOnce(msg => Promise.resolve(msg))
+        .mockRejectedValueOnce(new Error('UNIQUE constraint failed: messages.sessionId, messages.waMessageId'));
+
+      await service.sendImage('sess-1', { chatId: '621@c.us', base64: 'QUJD', mimetype: 'image/png' });
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const patch = (repository.update as jest.Mock).mock.calls[0]?.[1] as Record<string, unknown> | undefined;
+      expect((patch?.metadata as { media?: { data?: string } } | undefined)?.media?.data).toBe('QUJD');
+      expect(repository.delete).toHaveBeenCalledWith({ id: 'msg-uuid-1' });
+    });
+
+    it('does NOT delete anything on a transient (non-unique) persist error', async () => {
+      (repository.save as jest.Mock)
+        .mockImplementationOnce(msg => Promise.resolve(msg))
+        .mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'));
+
+      const result = await service.sendText('sess-1', { chatId: '621@c.us', text: 'hi' });
+
+      expect(result.messageId).toBe('wa-msg-1'); // transient persist faults never fail the send
+      expect(repository.delete).not.toHaveBeenCalled();
     });
   });
 });

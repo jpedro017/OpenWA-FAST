@@ -16,12 +16,7 @@ import {
 import { infraApi, API_BASE_URL } from '../services/api';
 import { copyToClipboard } from '../utils/clipboard';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
-import {
-  useInfraStatusQuery,
-  useInfraConfigQuery,
-  useEnginesQuery,
-  useCurrentEngineQuery,
-} from '../hooks/queries';
+import { useInfraStatusQuery, useInfraConfigQuery, useEnginesQuery, useCurrentEngineQuery } from '../hooks/queries';
 import { PageHeader } from '../components/PageHeader';
 import { useToast } from '../components/Toast';
 import './Infrastructure.css';
@@ -161,6 +156,10 @@ export function Infrastructure() {
   const engineHydrated = useRef(false);
   const engineTouched = useRef(false);
 
+  /** Whether engineConfig.type reflects a real value (seeded from the running engine or user-picked)
+   * rather than the useState default — the save payload omits `type` when it doesn't. */
+  const engineTypeKnown = (): boolean => engineHydrated.current || engineTouched.current;
+
   // LIVE indicators (not editable) — always reflect the running process, every refetch.
   useEffect(() => {
     if (!infraStatus) return;
@@ -254,10 +253,7 @@ export function Infrastructure() {
 
   if (loading) {
     return (
-      <div
-        className="infrastructure-page"
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '400px' }}
-      >
+      <div className="infrastructure-page infra-loading">
         <Loader2 className="animate-spin" size={32} />
       </div>
     );
@@ -270,10 +266,10 @@ export function Infrastructure() {
     return (
       <div className="infrastructure-page">
         <PageHeader title={t('infrastructure.title')} subtitle={t('infrastructure.subtitle')} />
-        <div className="infra-card" style={{ textAlign: 'center', padding: '2.5rem' }}>
-          <AlertTriangle size={32} style={{ color: 'var(--warning, #d97706)', marginBottom: '1rem' }} />
-          <p style={{ margin: 0 }}>{t('infrastructure.statusLoadError')}</p>
-          <button className="btn-secondary" style={{ marginTop: '1.25rem' }} onClick={() => window.location.reload()}>
+        <div className="infra-card status-error-card">
+          <AlertTriangle size={32} className="status-error-icon" />
+          <p className="status-error-text">{t('infrastructure.statusLoadError')}</p>
+          <button className="btn-secondary status-error-retry" onClick={() => window.location.reload()}>
             {t('common.retry')}
           </button>
         </div>
@@ -297,10 +293,22 @@ export function Infrastructure() {
     try {
       const payload = {
         database: { ...dbConfig },
-        redis: { enabled: redisEnabled, ...redisConfig },
+        // `connected` is runtime-only status, not persisted configuration. Keep it out of the
+        // whitelisted backend DTO so a valid dashboard save cannot be rejected as an unknown field.
+        redis: {
+          enabled: redisEnabled,
+          builtIn: redisConfig.builtIn,
+          host: redisConfig.host,
+          port: redisConfig.port,
+          password: redisConfig.password,
+        },
         queue: { enabled: queueEnabled },
         storage: { ...storageConfig },
-        engine: { ...engineConfig },
+        // Only send `type` once we actually know it — either the radio seeded from the running engine
+        // or the operator picked one. If /engines/current never resolved (endpoint down), engineConfig.type
+        // still holds its useState default, and sending that would persist ENGINE_TYPE and silently flip
+        // the engine on the next restart. The backend treats an absent `type` as "leave ENGINE_TYPE alone".
+        engine: engineTypeKnown() ? { ...engineConfig } : { ...engineConfig, type: undefined },
       };
 
       const result = await infraApi.saveConfig(payload);
@@ -359,7 +367,10 @@ export function Infrastructure() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      toast.error(t('infrastructure.migration.exportFailed'), err instanceof Error ? err.message : t('common.unknownError'));
+      toast.error(
+        t('infrastructure.migration.exportFailed'),
+        err instanceof Error ? err.message : t('common.unknownError'),
+      );
     } finally {
       setMigrating(false);
     }
@@ -385,7 +396,11 @@ export function Infrastructure() {
     try {
       const res = await infraApi.importData(parsed.tables);
       if (res.imported) toast.success(t('infrastructure.migration.importOk'));
-      else toast.error(t('infrastructure.migration.importFailed'), (res.warnings || []).slice(0, 3).join('; ') || res.message);
+      else
+        toast.error(
+          t('infrastructure.migration.importFailed'),
+          (res.warnings || []).slice(0, 3).join('; ') || res.message,
+        );
     } catch (err) {
       // A large backup can exceed the request body cap (default 25mb) — give an actionable message
       // instead of a bare "Payload Too Large". The status is carried on the Error by the api client.
@@ -519,7 +534,7 @@ export function Infrastructure() {
 
           {dbConfig.type === 'postgres' && (
             <>
-              <div className="toggle-row" style={{ marginTop: '1rem', marginBottom: '1rem' }}>
+              <div className="toggle-row toggle-row-spaced">
                 <div className="toggle-info">
                   <span>{t('infrastructure.database.useBuiltIn')}</span>
                   <small>{t('infrastructure.database.builtInDesc')}</small>
@@ -631,39 +646,14 @@ export function Infrastructure() {
             </>
           )}
 
-          <div
-            className="empty-state-card"
-            style={{
-              padding: '2.5rem',
-              textAlign: 'center',
-              background: 'var(--bg-light)',
-              borderRadius: '12px',
-              border: '1px dashed var(--border)',
-              marginTop: '1rem',
-            }}
-          >
-            <Database size={32} style={{ color: 'var(--success)', marginBottom: '1rem', opacity: 0.7 }} />
-            <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.9375rem', fontWeight: 500 }}>
-              {t('infrastructure.database.migrationsTitle')}
-            </p>
-            <p
-              style={{
-                margin: '0.75rem 0 0',
-                color: 'var(--success)',
-                fontSize: '0.875rem',
-                fontWeight: 500,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '0.375rem',
-              }}
-            >
+          <div className="empty-state-card">
+            <Database size={32} className="empty-state-icon success" />
+            <p className="empty-state-title">{t('infrastructure.database.migrationsTitle')}</p>
+            <p className="migrations-status">
               <CheckCircle size={16} />
               {t('infrastructure.database.migrationsStatus')}
             </p>
-            <p style={{ margin: '0.5rem 0 0', color: 'var(--text-muted)', fontSize: '0.8125rem', lineHeight: 1.5 }}>
-              {t('infrastructure.database.migrationsHint')}
-            </p>
+            <p className="muted-hint">{t('infrastructure.database.migrationsHint')}</p>
           </div>
 
           {/* Data backup / restore — used to carry data across a database switch (#488). */}
@@ -683,7 +673,7 @@ export function Infrastructure() {
                 <input
                   type="file"
                   accept="application/json,.json"
-                  style={{ display: 'none' }}
+                  className="hidden-file-input"
                   disabled={migrating}
                   onChange={e => {
                     const file = e.target.files?.[0];
@@ -775,14 +765,10 @@ export function Infrastructure() {
               </div>
             </div>
           ) : (
-            <p style={{ margin: '0.5rem 0 0', color: 'var(--text-muted)', fontSize: '0.8125rem', lineHeight: 1.5 }}>
-              {t('infrastructure.engine.noBrowser')}
-            </p>
+            <p className="muted-hint">{t('infrastructure.engine.noBrowser')}</p>
           )}
 
-          <p style={{ margin: '1rem 0 0', color: 'var(--text-muted)', fontSize: '0.8125rem', lineHeight: 1.5 }}>
-            {t('infrastructure.engine.restartNote')}
-          </p>
+          <p className="engine-restart-note">{t('infrastructure.engine.restartNote')}</p>
         </section>
 
         {/* Redis */}
@@ -795,7 +781,8 @@ export function Infrastructure() {
             <span
               className={`status-indicator ${redisEnabled && redisConfig.connected ? 'connected' : 'disconnected'}`}
             >
-              ● {redisEnabled
+              ●{' '}
+              {redisEnabled
                 ? redisConfig.connected
                   ? t('infrastructure.statusLabels.connected')
                   : t('infrastructure.statusLabels.disconnected')
@@ -831,7 +818,7 @@ export function Infrastructure() {
 
           {redisEnabled ? (
             <>
-              <div className="toggle-row" style={{ marginBottom: '1rem' }}>
+              <div className="toggle-row toggle-row-spaced-bottom">
                 <div className="toggle-info">
                   <span>{t('infrastructure.redis.useBuiltIn')}</span>
                   <small>{t('infrastructure.redis.builtInDesc')}</small>
@@ -878,10 +865,7 @@ export function Infrastructure() {
                 </div>
               )}
 
-              <div
-                className="toggle-row"
-                style={{ borderTop: '1px solid var(--border)', paddingTop: '1.25rem', marginTop: '0.5rem' }}
-              >
+              <div className="toggle-row queue-toggle-row">
                 <div className="toggle-info">
                   <span>{t('infrastructure.redis.queueTitle')}</span>
                   <small>{t('infrastructure.redis.queueDesc')}</small>
@@ -942,24 +926,10 @@ export function Infrastructure() {
               )}
             </>
           ) : (
-            <div
-              className="empty-state-card"
-              style={{
-                padding: '2.5rem',
-                textAlign: 'center',
-                background: 'var(--bg-light)',
-                borderRadius: '12px',
-                border: '1px dashed var(--border)',
-                marginTop: '1rem',
-              }}
-            >
-              <Server size={32} style={{ color: 'var(--text-muted)', marginBottom: '1rem', opacity: 0.5 }} />
-              <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.9375rem', fontWeight: 500 }}>
-                {t('infrastructure.redis.disabledTitle')}
-              </p>
-              <p style={{ margin: '0.5rem 0 0', color: 'var(--text-muted)', fontSize: '0.8125rem', lineHeight: 1.5 }}>
-                {t('infrastructure.redis.disabledDesc')}
-              </p>
+            <div className="empty-state-card">
+              <Server size={32} className="empty-state-icon muted" />
+              <p className="empty-state-title">{t('infrastructure.redis.disabledTitle')}</p>
+              <p className="muted-hint">{t('infrastructure.redis.disabledDesc')}</p>
             </div>
           )}
         </section>
@@ -977,7 +947,12 @@ export function Infrastructure() {
               const cls = storageConfig.type !== 's3' ? 'sqlite' : s3Unreachable ? 'disconnected' : 'connected';
               return (
                 <span className={`status-indicator ${cls}`}>
-                  ● {storageConfig.type === 's3' ? (s3Unreachable ? t('infrastructure.storage.s3Unreachable') : 'S3') : 'Local'}
+                  ●{' '}
+                  {storageConfig.type === 's3'
+                    ? s3Unreachable
+                      ? t('infrastructure.storage.s3Unreachable')
+                      : 'S3'
+                    : 'Local'}
                 </span>
               );
             })()}
@@ -1023,7 +998,7 @@ export function Infrastructure() {
 
             {storageConfig.type === 's3' && (
               <>
-                <div className="toggle-row" style={{ marginTop: '1rem', marginBottom: '1rem' }}>
+                <div className="toggle-row toggle-row-spaced">
                   <div className="toggle-info">
                     <span>{t('infrastructure.storage.useBuiltIn')}</span>
                     <small>{t('infrastructure.storage.builtInDesc')}</small>
@@ -1095,8 +1070,8 @@ export function Infrastructure() {
 
       {showRestartModal && (
         <div className="modal-overlay">
-          <div className="modal" style={{ maxWidth: '500px', textAlign: 'center' }}>
-            <div className="modal-header" style={{ justifyContent: 'center', borderBottom: 'none' }}>
+          <div className="modal restart-modal">
+            <div className="modal-header restart-modal-header">
               <h2>
                 {restartStatus === 'idle' && t('infrastructure.restart.idleTitle')}
                 {restartStatus === 'restarting' && t('infrastructure.restart.restartingTitle')}
@@ -1105,10 +1080,10 @@ export function Infrastructure() {
                 {restartStatus === 'error' && t('infrastructure.restart.errorTitle')}
               </h2>
             </div>
-            <div className="modal-body" style={{ padding: '2rem' }}>
+            <div className="modal-body restart-modal-body">
               {restartStatus === 'idle' && (
                 <>
-                  <p style={{ fontSize: '1rem', color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+                  <p className="restart-idle-desc">
                     <Trans i18nKey="infrastructure.restart.idleDesc" components={{ code: <code />, br: <br /> }} />
                   </p>
                   {(dbSwitch || storageSwitch) && (
@@ -1127,7 +1102,7 @@ export function Infrastructure() {
                       </div>
                     </div>
                   )}
-                  <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+                  <div className="restart-actions">
                     <button className="btn-secondary" onClick={() => setShowRestartModal(false)}>
                       {t('infrastructure.restart.later')}
                     </button>
@@ -1140,52 +1115,34 @@ export function Infrastructure() {
 
               {(restartStatus === 'restarting' || restartStatus === 'waiting') && (
                 <>
-                  <div style={{ marginBottom: '1.5rem' }}>
-                    <Loader2 className="animate-spin" size={48} style={{ color: 'var(--success)', marginBottom: '1rem' }} />
-                    <p style={{ fontSize: '1.125rem', color: 'var(--text-primary)', fontWeight: 500 }}>
+                  <div className="restart-countdown">
+                    <Loader2 className="animate-spin restart-status-icon" size={48} />
+                    <p className="restart-countdown-msg">
                       {restartCountdown > 0
                         ? t('infrastructure.restart.restartingMsg', { count: restartCountdown })
                         : t('infrastructure.restart.checking')}
                     </p>
                   </div>
-                  <div
-                    style={{
-                      width: '100%',
-                      height: '8px',
-                      background: 'var(--border)',
-                      borderRadius: '4px',
-                      overflow: 'hidden',
-                    }}
-                  >
+                  <div className="restart-progress-track">
                     <div
-                      style={{
-                        width: restartCountdown > 0 ? `${((30 - restartCountdown) / 30) * 100}%` : '100%',
-                        height: '100%',
-                        background: 'linear-gradient(90deg, #22C55E, #10B981)',
-                        transition: 'width 1s linear',
-                      }}
+                      className="restart-progress-fill"
+                      style={{ width: restartCountdown > 0 ? `${((30 - restartCountdown) / 30) * 100}%` : '100%' }}
                     />
                   </div>
-                  <p style={{ marginTop: '1rem', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                    {t('infrastructure.restart.dontClose')}
-                  </p>
+                  <p className="restart-dont-close">{t('infrastructure.restart.dontClose')}</p>
                 </>
               )}
 
               {restartStatus === 'success' && (
                 <>
-                  <CheckCircle size={48} style={{ color: 'var(--success)', marginBottom: '1rem' }} />
-                  <p style={{ fontSize: '1rem', color: 'var(--text-secondary)' }}>
-                    {t('infrastructure.restart.successMsg')}
-                  </p>
+                  <CheckCircle size={48} className="restart-status-icon" />
+                  <p className="restart-success-msg">{t('infrastructure.restart.successMsg')}</p>
                 </>
               )}
 
               {restartStatus === 'error' && (
                 <>
-                  <p style={{ fontSize: '1rem', color: 'var(--error)', marginBottom: '1rem' }}>
-                    {t('infrastructure.restart.errorMsg')}
-                  </p>
+                  <p className="restart-error-msg">{t('infrastructure.restart.errorMsg')}</p>
                   <button className="btn-primary" onClick={() => window.location.reload()}>
                     {t('infrastructure.restart.reload')}
                   </button>
