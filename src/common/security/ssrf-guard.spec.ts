@@ -368,6 +368,26 @@ describe('withSafeFetch (guarded + pinned fetch)', () => {
     ).rejects.toThrow('HTTP 500');
     expect(cancel).toHaveBeenCalledTimes(1);
   });
+
+  it('cancels an unread body when the response is a refused redirect (#887)', async () => {
+    // assertNoRedirect throws before `use` runs; the settle must still happen so a refused 3xx
+    // cannot reach dispatcher.destroy() with an unread body either.
+    const cancel = jest.fn().mockResolvedValue(undefined);
+    (dnsPromises.lookup as jest.Mock).mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
+    (undiciFetch as jest.Mock).mockResolvedValue({
+      status: 302,
+      type: 'basic',
+      bodyUsed: false,
+      body: { cancel },
+    });
+    const use = jest.fn();
+
+    await expect(withSafeFetch('https://example.com/hook', {}, use, { guard: true })).rejects.toThrow(
+      SsrfBlockedError,
+    );
+    expect(use).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('validatingLookup (per-hop redirect guard)', () => {

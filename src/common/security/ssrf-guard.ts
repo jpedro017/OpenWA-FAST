@@ -448,8 +448,14 @@ export async function withSafeFetch<T>(
   const dispatcher = target ? new Agent({ connect: { lookup: pinnedLookup(target) } }) : undefined;
   try {
     const response = await undiciFetch(rawUrl, { ...init, redirect: 'manual', dispatcher });
-    assertNoRedirect(response, rawUrl);
-    return await useAndSettleBody(response, use);
+    try {
+      assertNoRedirect(response, rawUrl);
+      return await use(response);
+    } finally {
+      // Settle even when assertNoRedirect throws: a refused 3xx still carries an unread body,
+      // and tearing the dispatcher down with it open is the same crash path as #887.
+      await settleUnreadResponseBody(response);
+    }
   } finally {
     if (dispatcher) await dispatcher.destroy().catch(() => undefined);
   }
