@@ -358,12 +358,12 @@ describe('WhatsAppWebJsAdapter.getChatHistory enrichment (parity with the live p
   it('derives chatId-derived fields for a group chat from the requested chatId', async () => {
     const groupMsg = {
       id: { _serialized: 'M4' },
-      from: 'me',
+      from: '621@c.us',
       to: '120363000@g.us',
       body: 'hi all',
       type: 'chat',
       timestamp: 400,
-      fromMe: true,
+      fromMe: false,
       hasMedia: false,
       hasQuotedMsg: false,
     };
@@ -372,6 +372,7 @@ describe('WhatsAppWebJsAdapter.getChatHistory enrichment (parity with the live p
 
     const out = await readyAdapter(client).getChatHistory('120363000@g.us', 50, false);
 
+    expect(out[0].chatId).toBe('120363000@g.us');
     expect(out[0].kind).toBe('group');
     expect(out[0].isGroup).toBe(true);
   });
