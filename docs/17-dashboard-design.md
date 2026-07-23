@@ -83,7 +83,8 @@ a non-admin hitting the path falls through to the `*` redirect.
 ```
 /                  → Dashboard (overview + charts)
 /sessions          → Sessions (create / start / stop / QR / delete)
-/chats             → Chats (chat list + message thread, live via WebSocket)
+/chats             → Chats (Chats / Channels / Status tabs; chat list + message thread live via
+                     WebSocket; read-only channel feed on whatsapp-web.js)
 /webhooks          → Webhooks (per-session webhook endpoints)
 /templates         → Message Templates
 /message-tester    → Message Tester (ad-hoc send-* + check-number)
