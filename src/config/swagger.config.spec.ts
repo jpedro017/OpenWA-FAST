@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { createSwaggerConfig, exemptPublicOperations, PUBLIC_PATHS } from './swagger.config';
+import { createSwaggerConfig, exemptPublicOperations, PUBLIC_PATHS, METRICS_BEARER_SCHEME } from './swagger.config';
 import type { OpenAPIObject } from '@nestjs/swagger';
 
 describe('createSwaggerConfig', () => {
@@ -11,6 +11,40 @@ describe('createSwaggerConfig', () => {
     const config = createSwaggerConfig();
 
     expect(config.security).toContainEqual({ 'X-API-Key': [] });
+  });
+
+  it('defines the METRICS_TOKEN bearer scheme without applying it globally', () => {
+    const config = createSwaggerConfig();
+
+    expect(config.components?.securitySchemes?.[METRICS_BEARER_SCHEME]).toMatchObject({
+      type: 'http',
+      scheme: 'bearer',
+    });
+    // Only the scrape endpoint uses it (per-operation @ApiSecurity) — a global bearer
+    // requirement would falsely claim every route accepts it.
+    expect(config.security).not.toContainEqual({ [METRICS_BEARER_SCHEME]: [] });
+  });
+
+  // Swagger UI aims "Try it" at servers[0]. A relative URL resolves against whatever origin served
+  // the docs, so it works on localhost, a LAN address and behind a TLS proxy alike; anything
+  // absolute here would send the reader's browser somewhere else entirely (#1068).
+  it('lists a relative server FIRST so Try-it targets the origin serving the docs', () => {
+    const config = createSwaggerConfig();
+
+    const [first] = config.servers ?? [];
+    expect(first.url).toBe('/');
+    expect(first.url.startsWith('http')).toBe(false);
+  });
+
+  it('keeps the templated absolute server so published specs still carry a concrete base URL', () => {
+    const config = createSwaggerConfig();
+
+    expect(config.servers).toHaveLength(2);
+    const templated = (config.servers ?? []).find(s => s.url.includes('{host}'));
+    expect(templated).toBeDefined();
+    expect(templated?.url).toBe('http://{host}:{port}');
+    expect(templated?.variables?.host.default).toBe('localhost');
+    expect(templated?.variables?.port.default).toBe('2785');
   });
 });
 
@@ -54,12 +88,13 @@ describe('exemptPublicOperations', () => {
 //   (1) the set of files with a real @Public() decorator must match EXPECTED_PUBLIC_CONTROLLERS —
 //       add a controller here AND its path(s) to PUBLIC_PATHS when you mark a new route @Public();
 //   (2) PUBLIC_PATHS must contain the expected entries (catches a typo or accidental removal).
-// MetricsController is @Public() but uses @ApiExcludeEndpoint, so it never appears in the spec and
-// is intentionally exempt from PUBLIC_PATHS.
+// MetricsController is @Public() but gates scrapes on the METRICS_TOKEN bearer instead, so its
+// operation carries the metrics-bearer security scheme (which overrides the global API-key
+// requirement) rather than a PUBLIC_PATHS security: [] exemption.
 describe('PUBLIC_PATHS drift guard', () => {
   const EXPECTED_PUBLIC_CONTROLLERS = [
     'src/modules/health/health.controller.ts',
-    'src/modules/infra/infra.controller.ts',
+    'src/modules/infra/infra-status.controller.ts',
     'src/modules/integration/ingress.controller.ts',
     'src/modules/metrics/metrics.controller.ts',
   ];
@@ -76,8 +111,11 @@ describe('PUBLIC_PATHS drift guard', () => {
   it('every controller using @Public() is accounted for in EXPECTED_PUBLIC_CONTROLLERS', () => {
     const srcRoot = path.resolve(__dirname, '..').replace(/\\/g, '/');
     // Match only a line that is exactly `@Public()` — ignores the decorator's doc comment
-    // (`@example @Public()`) and test/string occurrences.
+    // (`@example @Public()`) and test/string occurrences. *.spec.ts files are excluded: a real
+    // @Public() decorator only attaches to a controller class, while a spec may legitimately spell
+    // the decorator out as a string fixture (e.g. the global-route-fence structural guard).
     const usingPublic = listTsFiles(srcRoot)
+      .filter(f => !f.endsWith('.spec.ts'))
       .filter(f => /^\s*@Public\(\)\s*$/m.test(fs.readFileSync(f, 'utf8')))
       .map(f => f.replace(/^.*\/src\//, 'src/'))
       .sort();

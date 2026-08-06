@@ -75,6 +75,8 @@ type GroupSettings struct {
 	Announce         *bool `json:"announce,omitempty"`
 	Locked           *bool `json:"locked,omitempty"`
 	EphemeralSeconds *int  `json:"ephemeralSeconds,omitempty"`
+	// MemberAddMode is "all" (any member may add participants) or "admins".
+	MemberAddMode *string `json:"memberAddMode,omitempty"`
 }
 
 // ListGroupsQuery paginates the group list.
@@ -88,4 +90,17 @@ func (q *ListGroupsQuery) values() url.Values {
 	setInt(v, "limit", q.Limit)
 	setInt(v, "offset", q.Offset)
 	return v
+}
+
+// SetGroupPictureRequest sets a group's picture. Provide URL or Base64 (Base64
+// wins when both are set); Mimetype is required with Base64.
+type SetGroupPictureRequest struct {
+	URL      string `json:"url,omitempty"`
+	Base64   string `json:"base64,omitempty"`
+	Mimetype string `json:"mimetype,omitempty"`
+}
+
+// GroupPictureResponse carries the group's picture URL, empty when it has none.
+type GroupPictureResponse struct {
+	URL string `json:"url"`
 }

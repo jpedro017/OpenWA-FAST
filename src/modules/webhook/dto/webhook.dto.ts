@@ -42,15 +42,21 @@ export const WEBHOOK_EVENTS = [
   'message.revoked',
   'message.reaction',
   'message.edited',
+  'status.received',
   'session.status',
   'session.qr',
   'session.authenticated',
   'session.disconnected',
   'session.reconnect_loop',
+  'session.restriction',
+  'presence.update',
   'group.join',
   'group.leave',
   'group.update',
   'call.received',
+  'call.accepted',
+  'call.rejected',
+  'call.missed',
   ...WEBHOOK_RESERVED_EVENTS,
 ] as const;
 
@@ -64,7 +70,7 @@ export class CreateWebhookDto {
   // require_tld:false allows hostnames without a dot (e.g. http://localhost:3000); the SSRF
   // guard still decides whether the host is actually allowed to be delivered to.
   @IsUrl({ require_tld: false })
-  url: string;
+  url!: string;
 
   @ApiPropertyOptional({
     description: "Event types to subscribe to. '*' subscribes to all events.",
@@ -179,19 +185,19 @@ export class UpdateWebhookDto {
 export class WebhookResponseDto {
   @Expose()
   @ApiProperty()
-  id: string;
+  id!: string;
 
   @Expose()
   @ApiProperty()
-  sessionId: string;
+  sessionId!: string;
 
   @Expose()
   @ApiProperty()
-  url: string;
+  url!: string;
 
   @Expose()
   @ApiProperty()
-  events: string[];
+  events!: string[];
 
   @Expose()
   @ApiPropertyOptional({ description: FILTERS_API_DESCRIPTION, example: FILTERS_API_EXAMPLE })
@@ -199,11 +205,11 @@ export class WebhookResponseDto {
 
   @Expose()
   @ApiProperty()
-  active: boolean;
+  active!: boolean;
 
   @Expose()
   @ApiProperty()
-  retryCount: number;
+  retryCount!: number;
 
   @Expose()
   @ApiPropertyOptional()
@@ -211,11 +217,11 @@ export class WebhookResponseDto {
 
   @Expose()
   @ApiProperty()
-  createdAt: Date;
+  createdAt!: Date;
 
   @Expose()
   @ApiProperty()
-  updatedAt: Date;
+  updatedAt!: Date;
 
   static fromEntity(entity: Webhook): WebhookResponseDto {
     return plainToInstance(WebhookResponseDto, entity, { excludeExtraneousValues: true });

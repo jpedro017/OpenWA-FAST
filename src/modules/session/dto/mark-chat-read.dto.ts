@@ -14,5 +14,5 @@ export class MarkChatReadDto {
   @Matches(/^[^\s@]+@[^\s@]+$/, {
     message: 'chatId must be a valid chat JID in the form localpart@host',
   })
-  chatId: string;
+  chatId!: string;
 }

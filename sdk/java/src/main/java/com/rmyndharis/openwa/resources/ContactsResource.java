@@ -9,8 +9,11 @@ import com.rmyndharis.openwa.model.ContactPhoneResponse;
 import com.rmyndharis.openwa.model.ContactRecord;
 import com.rmyndharis.openwa.model.ListContactsQuery;
 import com.rmyndharis.openwa.model.ProfilePictureResponse;
+import com.rmyndharis.openwa.model.ProfilePicturesResponse;
 import com.rmyndharis.openwa.model.SuccessResult;
+import com.rmyndharis.openwa.model.UpsertContactRequest;
 import java.util.List;
+import java.util.Map;
 
 /** Contacts resource — contact lookup and management. */
 public final class ContactsResource {
@@ -60,6 +63,19 @@ public final class ContactsResource {
             ProfilePictureResponse.class);
     }
 
+    /**
+     * Batch-resolve profile picture URLs for up to 50 contacts in one request.
+     * Returns a map of contact id → URL (null when a lookup fails).
+     */
+    public ProfilePicturesResponse profilePictures(String sessionId, List<String> ids) {
+        return client.request(
+            HttpMethod.GET,
+            "/api/sessions/" + encodeSegment(sessionId) + "/contacts/profile-pictures",
+            Map.of("ids", String.join(",", ids)),
+            null,
+            ProfilePicturesResponse.class);
+    }
+
     /** Resolve a contact id (e.g. a {@code @lid}) to a phone number. */
     public ContactPhoneResponse phone(String sessionId, String contactId) {
         return client.request(
@@ -75,6 +91,26 @@ public final class ContactsResource {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/contacts/" + encodeSegment(contactId) + "/block",
+            null,
+            null,
+            SuccessResult.class);
+    }
+
+    /** Save a contact to the addressbook, or edit an existing entry. Requires an OPERATOR key. */
+    public SuccessResult upsert(String sessionId, String contactId, UpsertContactRequest body) {
+        return client.request(
+            HttpMethod.PUT,
+            "/api/sessions/" + encodeSegment(sessionId) + "/contacts/" + encodeSegment(contactId),
+            null,
+            body,
+            SuccessResult.class);
+    }
+
+    /** Remove a contact from the addressbook. Requires an OPERATOR key. */
+    public SuccessResult delete(String sessionId, String contactId) {
+        return client.request(
+            HttpMethod.DELETE,
+            "/api/sessions/" + encodeSegment(sessionId) + "/contacts/" + encodeSegment(contactId),
             null,
             null,
             SuccessResult.class);

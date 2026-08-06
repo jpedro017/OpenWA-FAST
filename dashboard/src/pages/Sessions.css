@@ -160,6 +160,19 @@
   white-space: nowrap;
 }
 
+/* Mirrors .error-text, in warning rather than error: a restriction is WhatsApp limiting the account,
+   not the gateway failing. --warning is :root-only and inherited by both themes, the same way
+   --error is, so it needs no dark-mode override. */
+.sessions-page .info-value.restriction-text {
+  color: var(--warning);
+  font-weight: 500;
+  max-width: 60%;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sessions-page .card-actions {
   display: flex;
   gap: 0.5rem;
@@ -643,6 +656,14 @@
 .sessions-page .status-pill.qr_ready {
   background: rgba(59, 130, 246, 0.1);
   color: var(--info);
+}
+
+/* Same amber token as the transient states above — a literal here was the only pill not on a theme
+   variable, and it lost contrast on the dark card. The heavier tint is what separates "needs a human"
+   from the in-progress amber, since the two must not read alike. */
+.sessions-page .status-pill.action_required {
+  background: rgba(245, 158, 11, 0.22);
+  color: var(--warning);
 }
 
 .sessions-page .status-pill.ready {

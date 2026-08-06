@@ -1,11 +1,24 @@
+// Spread the real fs so every method passes through, but as configurable props the test can spy on
+// (the bare `import * as fs` namespace is non-configurable, so jest.spyOn can't redefine its methods).
+jest.mock('fs', () => ({ __esModule: true, ...jest.requireActual<typeof import('fs')>('fs') }));
+
+// fetchSafeBuffer stays REAL by default (the SSRF redaction test below depends on it); individual
+// integrity tests queue a one-shot resolved download instead of hitting the network.
+jest.mock('./plugin-download', () => {
+  const actual = jest.requireActual<typeof import('./plugin-download')>('./plugin-download');
+  return { ...actual, fetchSafeBuffer: jest.fn(actual.fetchSafeBuffer) };
+});
+
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import AdmZip from 'adm-zip';
 import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
 import { PluginsService, isIngressCapable } from './plugins.service';
+import { fetchSafeBuffer } from './plugin-download';
 import { SECRET_SENTINEL } from './redact-config';
 import { PluginLoaderService } from '../../core/plugins/plugin-loader.service';
 import { PluginStorageService } from '../../core/plugins/plugin-storage.service';
@@ -137,6 +150,63 @@ describe('PluginsService — install / uninstall (real loader + disk)', () => {
     enableSpy.mockRestore();
   });
 
+  it('cleans up the staging + backup dirs after a successful update (swap happened)', async () => {
+    service.install({ buffer: pkg({ version: '1.0.0' }) });
+
+    const dto = await service.updatePackage('svc-plg', pkg({ version: '2.0.0' }));
+
+    expect(dto.version).toBe('2.0.0');
+    expect(loader.getPlugin('svc-plg')?.manifest.version).toBe('2.0.0');
+    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.new'))).toBe(false);
+    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.bak'))).toBe(false);
+  });
+
+  it('keeps the old install fully intact when the update fails BEFORE the swap (staging)', async () => {
+    service.install({ buffer: pkg({ version: '1.0.0' }) });
+    // A package whose entries collide as file-then-directory makes the staging WRITE fail:
+    // 'index.js' lands as a file, then 'index.js/extra.js' needs it to be a directory.
+    const z = new AdmZip();
+    z.addFile('manifest.json', Buffer.from(JSON.stringify({ ...manifest, version: '2.0.0' })));
+    z.addFile('index.js', Buffer.from('module.exports = class {};'));
+    z.addFile('index.js/extra.js', Buffer.from('module.exports = class {};'));
+
+    await expect(service.updatePackage('svc-plg', z.toBuffer())).rejects.toThrow(/Failed to stage/i);
+
+    // The old version never stopped being the install: still loaded, still on disk, no leftovers.
+    expect(loader.getPlugin('svc-plg')?.manifest.version).toBe('1.0.0');
+    const onDisk = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'svc-plg', 'manifest.json'), 'utf8')) as {
+      version: string;
+    };
+    expect(onDisk.version).toBe('1.0.0');
+    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.new'))).toBe(false);
+    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.bak'))).toBe(false);
+  });
+
+  it('restores the previous version when the swap itself fails mid-way', async () => {
+    service.install({ buffer: pkg({ version: '1.0.0' }) });
+
+    // Let the first swap rename (live → backup) through, then fail the second (staging → live).
+    const realRename = fs.renameSync;
+    const spy = jest.spyOn(fs, 'renameSync').mockImplementation((a: fs.PathLike, b: fs.PathLike) => {
+      if (String(a).endsWith('.new')) throw new Error('simulated swap failure');
+      return realRename(a, b);
+    });
+
+    await expect(service.updatePackage('svc-plg', pkg({ version: '2.0.0' }))).rejects.toThrow(
+      /Failed to update plugin/i,
+    );
+    spy.mockRestore();
+
+    // The failed swap must leave the OLD version loadable: backup restored on disk and reloaded.
+    expect(loader.getPlugin('svc-plg')?.manifest.version).toBe('1.0.0');
+    const onDisk = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'svc-plg', 'manifest.json'), 'utf8')) as {
+      version: string;
+    };
+    expect(onDisk.version).toBe('1.0.0');
+    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.new'))).toBe(false);
+    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.bak'))).toBe(false);
+  });
+
   it('serializes concurrent lifecycle operations on the same plugin id', async () => {
     service.install({ buffer: pkg() });
     let resolveFirst: () => void = () => undefined;
@@ -169,6 +239,114 @@ describe('PluginsService — install / uninstall (real loader + disk)', () => {
     expect(message).toMatch(/^Failed to download plugin from URL: /);
     expect(message).not.toMatch(/169\.254\.169\.254/);
     expect(message).toBe('Failed to download plugin from URL: Destination address is not allowed');
+  });
+});
+
+describe('PluginsService — download integrity (optional #sha256 pinning)', () => {
+  let tmpDir: string;
+  let pluginsDir: string;
+  let loader: PluginLoaderService;
+  let service: PluginsService;
+  const fetchMock = fetchSafeBuffer as unknown as jest.Mock;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-dl-integrity-'));
+    pluginsDir = path.join(tmpDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const config = {
+      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
+    } as unknown as ConfigService;
+    loader = new PluginLoaderService(
+      config,
+      new HookManager(),
+      new PluginStorageService(config),
+      {} as unknown as ModuleRef,
+    );
+    service = new PluginsService(loader, config);
+  });
+  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  /** Queue a one-shot offline download; the mock then falls back to the real (SSRF-guarded) implementation. */
+  const serveOnce = (buffer: Buffer): void => {
+    fetchMock.mockImplementationOnce(() => Promise.resolve(buffer));
+  };
+  const sha256 = (buffer: Buffer): string => createHash('sha256').update(buffer).digest('hex');
+
+  it('installs when the #sha256 fragment matches the downloaded bytes', async () => {
+    const buf = pkg();
+    serveOnce(buf);
+
+    const dto = await service.installFromUrl(`https://plugins.example/svc-plg.zip#sha256=${sha256(buf)}`);
+
+    expect(dto.id).toBe('svc-plg');
+    expect(loader.getPlugin('svc-plg')).toBeDefined();
+  });
+
+  it('ignores a ?sha256= query parameter — only the #sha256= fragment pins the digest', async () => {
+    const buf = pkg();
+    serveOnce(buf);
+    const wrong = '0'.repeat(64);
+
+    // The query digest does not match the bytes, yet the install still succeeds on the fragment's
+    // verdict: a query param is never an integrity marker (it belongs to the download host).
+    const dto = await service.installFromUrl(
+      `https://plugins.example/svc-plg.zip?sha256=${wrong}#sha256=${sha256(buf)}`,
+    );
+
+    expect(dto.id).toBe('svc-plg');
+    expect(loader.getPlugin('svc-plg')).toBeDefined();
+  });
+
+  it('fails closed when the pinned digest does not match (package substituted in transit)', async () => {
+    serveOnce(pkg());
+    const wrong = '0'.repeat(64);
+
+    await expect(service.installFromUrl(`https://plugins.example/svc-plg.zip#sha256=${wrong}`)).rejects.toThrow(
+      /integrity check failed/i,
+    );
+
+    // Nothing was installed from the substituted bytes.
+    expect(loader.getPlugin('svc-plg')).toBeUndefined();
+    expect(fs.existsSync(path.join(pluginsDir, 'svc-plg'))).toBe(false);
+  });
+
+  it('rejects a malformed integrity marker instead of silently skipping verification', async () => {
+    serveOnce(pkg());
+
+    await expect(service.installFromUrl('https://plugins.example/svc-plg.zip#sha256=not-hex')).rejects.toThrow(
+      /integrity check failed/i,
+    );
+    expect(loader.getPlugin('svc-plg')).toBeUndefined();
+  });
+
+  it('rejects conflicting markers (fragment vs query disagree)', async () => {
+    const buf = pkg();
+    serveOnce(buf);
+    const other = '1'.repeat(64);
+
+    await expect(
+      service.installFromUrl(`https://plugins.example/svc-plg.zip?sha256=${sha256(buf)}#sha256=${other}`),
+    ).rejects.toThrow(/integrity check failed/i);
+  });
+
+  it('installs without a marker (HTTPS + the SSRF guard remain the baseline)', async () => {
+    serveOnce(pkg());
+
+    const dto = await service.installFromUrl('https://plugins.example/svc-plg.zip');
+
+    expect(dto.id).toBe('svc-plg');
+  });
+
+  it('updateFromUrl fails closed on a mismatch and leaves the old version intact', async () => {
+    service.install({ buffer: pkg({ version: '1.0.0' }) });
+    serveOnce(pkg({ version: '2.0.0' }));
+    const wrong = '0'.repeat(64);
+
+    await expect(
+      service.updateFromUrl('svc-plg', `https://plugins.example/svc-plg.zip#sha256=${wrong}`),
+    ).rejects.toThrow(/integrity check failed/i);
+
+    expect(loader.getPlugin('svc-plg')?.manifest.version).toBe('1.0.0');
   });
 });
 
@@ -311,20 +489,17 @@ describe('PluginsService — per-session config', () => {
     expect(plugin?.sessionConfig?.['sess-A']).toEqual({ apiKey: 'A-secret', lang: 'he' });
   });
 
-  // A session-restricted API key must not activate the plugin for sessions outside its allowedSessions
-  // scope (the target sessions are in the request body the guard never inspects).
-  it('rejects activating for a session outside a restricted key scope', () => {
-    expect(() => service.updateSessions('sess-cfg', ['sess-B'], ['sess-A'])).toThrow(/not authorized/i);
-    expect(() => service.updateSessions('sess-cfg', ['*'], ['sess-A'])).toThrow(/not authorized/i);
-  });
-
-  it('allows a restricted key to activate only within its scope', () => {
-    expect(service.updateSessions('sess-cfg', ['sess-A'], ['sess-A']).activeSessions).toEqual(['sess-A']);
+  // The route is fenced with @RequireUnscopedKey, so the service signature no longer carries a
+  // scope argument. updateSessions is a FULL replacement: each write overwrites the entire active
+  // set, so the exact array survives each call (setPluginSessions assigns plugin.activeSessions).
+  it('fully replaces the active set on each write (single, wildcard, then cleared)', () => {
+    expect(service.updateSessions('sess-cfg', ['sess-A']).activeSessions).toEqual(['sess-A']);
+    expect(service.updateSessions('sess-cfg', ['*']).activeSessions).toEqual(['*']);
+    expect(service.updateSessions('sess-cfg', []).activeSessions).toEqual([]);
   });
 
   it('lets an unrestricted key activate for all sessions', () => {
-    expect(service.updateSessions('sess-cfg', ['*'], undefined).activeSessions).toEqual(['*']);
-    expect(service.updateSessions('sess-cfg', ['*'], []).activeSessions).toEqual(['*']);
+    expect(service.updateSessions('sess-cfg', ['*']).activeSessions).toEqual(['*']);
   });
 
   it('clears the override when an empty slice is written', () => {
@@ -418,5 +593,54 @@ describe('isIngressCapable', () => {
   it('is false without the webhook:ingress permission', () => {
     expect(isIngressCapable({ ingress: [{ route: 'events' }], permissions: [] })).toBe(false);
     expect(isIngressCapable({ ingress: [{ route: 'events' }] })).toBe(false);
+  });
+});
+
+describe('PluginsService — disable when the plugin is not loaded', () => {
+  let tmpDir: string;
+  let pluginsDir: string;
+  let config: ConfigService;
+
+  const build = () => {
+    const storage = new PluginStorageService(config);
+    const loader = new PluginLoaderService(config, new HookManager(), storage, {} as unknown as ModuleRef);
+    return { storage, loader, service: new PluginsService(loader, config) };
+  };
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-disable-'));
+    pluginsDir = path.join(tmpDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    config = {
+      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
+    } as unknown as ConfigService;
+  });
+  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  // Regression: a plugin whose package directory is gone (an interrupted update, or a directory that
+  // was never on the data volume) still has a registry entry carrying enabledByOperator — the standing
+  // instruction to enable it on every boot. disable() threw NotFound because the loader had nothing to
+  // tear down, so the operator could not withdraw that decision by any route: reinstalling the code
+  // brought the plugin straight back up.
+  it('clears the boot decision for an installed plugin whose code is missing', async () => {
+    const first = build();
+    first.service.install({ buffer: pkg() });
+    first.loader.setOperatorEnabled('svc-plg', true);
+
+    // The code disappears; a restart re-reads the registry but loads nothing.
+    fs.rmSync(path.join(pluginsDir, 'svc-plg'), { recursive: true, force: true });
+    const restarted = build();
+    expect(restarted.loader.getPlugin('svc-plg')).toBeUndefined();
+    expect(restarted.storage.getPluginEntry('svc-plg')?.enabledByOperator).toBe(true);
+
+    const res = await restarted.service.disable('svc-plg');
+
+    expect(res.success).toBe(true);
+    expect(restarted.storage.getPluginEntry('svc-plg')?.enabledByOperator).toBe(false);
+  });
+
+  it('still throws NotFound for an id with no registry entry at all', async () => {
+    const { service } = build();
+    await expect(service.disable('never-installed')).rejects.toThrow(/not found/i);
   });
 });

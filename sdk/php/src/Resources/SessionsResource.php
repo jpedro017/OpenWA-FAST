@@ -58,6 +58,25 @@ class SessionsResource
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($id)}/stop");
     }
 
+    /**
+     * Attempt an engine-native unlink of this device, then stop the session. A 200 means the
+     * unlink operation AND the required local credential cleanup completed — it is not an
+     * independent observation that the handset UI no longer shows the linked device. Because a
+     * completed unlink wipes the stored credentials, a later start() requires a fresh QR scan or
+     * pairing code. Requires a running session. Throws on HTTP 502 with
+     * `code: 'SESSION_LOGOUT_INCOMPLETE'` when the session was stopped locally but the logout
+     * operation did not complete (no send, no acknowledgement, timeout/transport error, or local
+     * cleanup failure); `phone` is cleared and no success audit is written. Start the session
+     * again and retry the logout; do not assume the retry reconnects automatically or lands in a
+     * guaranteed QR state.
+     *
+     * @return array<string,mixed>
+     */
+    public function logout(string $id): array
+    {
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($id)}/logout");
+    }
+
     /** @return array<string,mixed> */
     public function forceKill(string $id): array
     {

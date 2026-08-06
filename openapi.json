@@ -17,16 +17,23 @@
                 "api_key_revoked",
                 "api_key_deleted",
                 "api_key_auth_failed",
+                "rate_limit_exceeded",
+                "queue_board_mutated",
                 "session_created",
                 "session_started",
                 "session_stopped",
                 "session_force_killed",
+                "session_logged_out",
                 "session_deleted",
                 "session_qr_generated",
                 "session_connected",
                 "session_disconnected",
+                "session_restricted",
+                "session_restriction_lifted",
                 "message_sent",
                 "message_failed",
+                "send_pacing_blocked",
+                "send_breaker_tripped",
                 "webhook_created",
                 "webhook_deleted",
                 "webhook_triggered",
@@ -35,6 +42,7 @@
                 "integration_instance_updated",
                 "integration_instance_secret_regenerated",
                 "integration_instance_deleted",
+                "integration_instance_redriven",
                 "infra_config_saved",
                 "infra_restart_requested",
                 "infra_data_exported",
@@ -446,6 +454,9 @@
           },
           "404": {
             "description": "Session not found"
+          },
+          "409": {
+            "description": "A credential teardown for the same session name is still in flight (retryable — the body carries `code: 'SESSION_NAME_TEARDOWN_PENDING'`; wait for it to settle and retry), OR another node currently holds this session's live engine and deleting it here would strip a session the owner is running. No destructive side effect runs before either refusal."
           }
         },
         "summary": "Delete a session",
@@ -484,6 +495,9 @@
           },
           "404": {
             "description": "Session not found"
+          },
+          "409": {
+            "description": "A credential teardown for the same session name is still in flight (e.g. a prior logout that owns destructive cleanup). Retryable — the body carries `code: SESSION_NAME_TEARDOWN_PENDING`; wait for it to settle and retry. No destructive side effect runs before this refusal. Also returned when another node currently holds this session's engine: only the owner may start it, and the claim is refused before any engine is launched, so no second connection to the account is opened."
           }
         },
         "summary": "Start a session and initialize WhatsApp connection",
@@ -519,9 +533,66 @@
           },
           "404": {
             "description": "Session not found"
+          },
+          "409": {
+            "description": "Another node currently holds this session's live engine (multi-node deployments): stopping it here would report the session down while the owner keeps running it, so the request is refused. Retry against the owning node, or once its lease has lapsed."
           }
         },
         "summary": "Stop a session and disconnect WhatsApp",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/sessions/{id}/logout": {
+      "post": {
+        "description": "Attempts an engine-native unlink of this companion device, then tears the session down locally. `200` means the engine-native unlink operation completed AND the required local credential cleanup completed — for Baileys a valid companion identity, an acknowledged `remove-companion-device` IQ response, and removal of the on-disk auth dir; for whatsapp-web.js the native `Client.logout()` promise settled. `200` is NOT an independent observation that the handset UI no longer shows the linked device. Because a completed unlink wipes the stored credentials, reconnecting after a `200` always requires a fresh QR scan or pairing code.",
+        "operationId": "SessionController_logout",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unlink operation and required local cleanup completed; session is stopped and `phone` is cleared. Recorded in the audit log as `session_logged_out`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponseDto"
+                },
+                "example": {
+                  "id": "8f3c2b1a-9d4e-4c7a-8b2f-1e6d5a4c3b2a",
+                  "name": "my-bot",
+                  "status": "disconnected",
+                  "phone": null,
+                  "pushName": null,
+                  "connectedAt": null,
+                  "lastActive": "2026-06-25T09:01:55.000Z",
+                  "createdAt": "2026-06-20T11:30:00.000Z",
+                  "updatedAt": "2026-06-25T09:11:00.000Z",
+                  "lastError": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Session is not started (no engine to send through); the row is left untouched"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "502": {
+            "description": "Session was stopped locally, but the logout operation is incomplete (no send, no acknowledgement, timeout/transport error, or local-cleanup failure). Retryable — the body carries `code: 'SESSION_LOGOUT_INCOMPLETE'`; `phone` is cleared and no success audit is written. Start the session again and retry the logout."
+          }
+        },
+        "summary": "Log out of WhatsApp (unlinks this device) and stop the session",
         "tags": [
           "sessions"
         ]
@@ -551,6 +622,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Session is not started"
           },
           "404": {
             "description": "Session not found"
@@ -797,6 +871,96 @@
         ]
       }
     },
+    "/api/sessions/{id}/presence/subscribe": {
+      "post": {
+        "description": "Asks WhatsApp to start reporting who is online or typing in this chat. Updates arrive as the `presence.update` webhook and socket event — there is no synchronous answer, because presence cannot be queried from either engine, only received.\n\nThe subscription belongs to the connection: it does **not** survive a restart or an automatic reconnect, and must be re-issued. Subscribe per chat rather than to everything — WhatsApp emits an update on every transition, so a broad subscription is a firehose.\n\nwhatsapp-web.js cannot do this at all (it exposes no presence subscribe and emits no presence event) and answers `501`.",
+        "operationId": "SessionController_subscribeToPresence",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubscribePresenceDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Subscribed; updates now arrive as presence.update events"
+          },
+          "400": {
+            "description": "Session not started"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "501": {
+            "description": "The active engine cannot observe presence (whatsapp-web.js)"
+          }
+        },
+        "summary": "Subscribe to a chat's presence",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/sessions/{id}/presence/{chatId}": {
+      "get": {
+        "description": "Serves the most recent report received since the chat was subscribed. Returns `null` when nothing has been reported — either the chat was never subscribed, or nothing has changed since. That is a normal state, not a missing resource, so it is `200` with a null body rather than a `404`.\n\nHeld in memory and never persisted: presence is short-lived, and answering \"typing\" from before a restart would be worse than answering nothing.",
+        "operationId": "SessionController_getPresence",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chatId",
+            "required": true,
+            "in": "path",
+            "description": "Chat ID as subscribed",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Last reported presence, or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatPresenceResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Read a chat's last reported presence",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/api/sessions/{id}/chats/unread": {
       "post": {
         "operationId": "SessionController_markChatUnread",
@@ -833,6 +997,87 @@
           }
         },
         "summary": "Mark a chat as unread",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/sessions/{id}/chats/{chatId}/messages": {
+      "delete": {
+        "operationId": "SessionController_clearChatMessages",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chatId",
+            "required": true,
+            "in": "path",
+            "description": "Chat JID, e.g. 1234567890-123@g.us (URL-encode the '@')",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns `{ success }`. `false` means the engine declined to act — an unknown chat, or on the Baileys engine a chat with no known history, since the change is keyed to its last message."
+          },
+          "400": {
+            "description": "Session not ready"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Delete every message in a chat, keeping the chat itself",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/sessions/{id}/chats/archive": {
+      "post": {
+        "operationId": "SessionController_archiveChat",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveChatDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Returns `{ success }`. `false` means the engine declined to act — on the Baileys engine a chat with no known history cannot be archived, since the change is keyed to its last message."
+          },
+          "400": {
+            "description": "Session not ready"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Archive or unarchive a chat",
         "tags": [
           "sessions"
         ]
@@ -1262,6 +1507,205 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/automation-rules": {
+      "post": {
+        "operationId": "AutomationRuleController_create",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAutomationRuleDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Rule created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationRuleResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid rule (bad conditions, over-limit text)."
+          }
+        },
+        "summary": "Create an autoreply rule",
+        "tags": [
+          "automation"
+        ]
+      },
+      "get": {
+        "operationId": "AutomationRuleController_findAll",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rules in evaluation order: creation time, id as the same-second tiebreak."
+          }
+        },
+        "summary": "List the session’s autoreply rules",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/automation-rules/{ruleId}": {
+      "get": {
+        "operationId": "AutomationRuleController_findOne",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ruleId",
+            "required": true,
+            "in": "path",
+            "description": "Rule ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationRuleResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such rule in this session."
+          }
+        },
+        "summary": "Get one autoreply rule",
+        "tags": [
+          "automation"
+        ]
+      },
+      "put": {
+        "operationId": "AutomationRuleController_update",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ruleId",
+            "required": true,
+            "in": "path",
+            "description": "Rule ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAutomationRuleDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationRuleResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such rule in this session."
+          }
+        },
+        "summary": "Update an autoreply rule",
+        "tags": [
+          "automation"
+        ]
+      },
+      "delete": {
+        "operationId": "AutomationRuleController_remove",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ruleId",
+            "required": true,
+            "in": "path",
+            "description": "Rule ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Rule deleted."
+          },
+          "404": {
+            "description": "No such rule in this session."
+          }
+        },
+        "summary": "Delete an autoreply rule",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/messages": {
       "get": {
         "operationId": "MessageController_getMessages",
@@ -1288,7 +1732,7 @@
             "name": "from",
             "required": false,
             "in": "query",
-            "description": "Filter by sender. A phone also matches messages from a lid that resolves to it.",
+            "description": "Filter by sender. A phone also matches group messages via the author field and any lid that resolves to it.",
             "schema": {
               "type": "string"
             }
@@ -1343,6 +1787,25 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SendTextMessageDto"
+              },
+              "examples": {
+                "minimal": {
+                  "summary": "Plain text message",
+                  "value": {
+                    "chatId": "628123456789@c.us",
+                    "text": "Hello from OpenWA!"
+                  }
+                },
+                "withMentions": {
+                  "summary": "Group message with an @mention (the text must carry the @<number> token)",
+                  "value": {
+                    "chatId": "120363000000000000@g.us",
+                    "text": "Hello @62811",
+                    "mentions": [
+                      "62811@c.us"
+                    ]
+                  }
+                }
               }
             }
           }
@@ -1439,6 +1902,16 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SendMediaMessageDto"
+              },
+              "examples": {
+                "fromUrl": {
+                  "summary": "Fetch the media from a URL",
+                  "value": {
+                    "chatId": "628123456789@c.us",
+                    "url": "https://example.com/image.jpg",
+                    "caption": "Check out this image!"
+                  }
+                }
               }
             }
           }
@@ -1484,6 +1957,15 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SendMediaMessageDto"
+              },
+              "examples": {
+                "fromUrl": {
+                  "summary": "Fetch the media from a URL",
+                  "value": {
+                    "chatId": "628123456789@c.us",
+                    "url": "https://example.com/video.mp4"
+                  }
+                }
               }
             }
           }
@@ -1529,6 +2011,16 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SendAudioMessageDto"
+              },
+              "examples": {
+                "fromUrl": {
+                  "summary": "Fetch the media from a URL",
+                  "value": {
+                    "chatId": "628123456789@c.us",
+                    "url": "https://example.com/audio.ogg",
+                    "ptt": true
+                  }
+                }
               }
             }
           }
@@ -1574,6 +2066,16 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SendMediaMessageDto"
+              },
+              "examples": {
+                "fromUrl": {
+                  "summary": "Fetch the media from a URL",
+                  "value": {
+                    "chatId": "628123456789@c.us",
+                    "url": "https://example.com/report.pdf",
+                    "filename": "report.pdf"
+                  }
+                }
               }
             }
           }
@@ -1703,6 +2205,15 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SendMediaMessageDto"
+              },
+              "examples": {
+                "fromUrl": {
+                  "summary": "Fetch the media from a URL",
+                  "value": {
+                    "chatId": "628123456789@c.us",
+                    "url": "https://example.com/sticker.png"
+                  }
+                }
               }
             }
           }
@@ -1994,6 +2505,52 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/messages/{chatId}/{messageId}/media": {
+      "get": {
+        "operationId": "MessageController_getChatMedia",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chatId",
+            "required": true,
+            "in": "path",
+            "description": "Chat ID containing the message",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "messageId",
+            "required": true,
+            "in": "path",
+            "description": "WhatsApp message ID whose media to download",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived media bytes, served as an attachment."
+          },
+          "404": {
+            "description": "Nothing archived for this message — archiving was off when it arrived, the message carries no media, the media was above the archive cap, retention has since cleared it, or the message was sent BY this account (only inbound media is archived)."
+          }
+        },
+        "summary": "Download a message’s archived media",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/messages/delete": {
       "post": {
         "operationId": "MessageController_deleteMessage",
@@ -2027,6 +2584,179 @@
           }
         },
         "summary": "Delete a message",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/messages/vote-poll": {
+      "post": {
+        "operationId": "MessageController_votePoll",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VotePollDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Vote cast"
+          },
+          "400": {
+            "description": "Session not active, or the target message is not a poll"
+          },
+          "404": {
+            "description": "Poll not found in the chat’s recent history"
+          },
+          "501": {
+            "description": "Not supported on the Baileys engine"
+          }
+        },
+        "summary": "Cast a vote on a poll",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/messages/pin": {
+      "post": {
+        "operationId": "MessageController_pinMessage",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PinMessageDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message pinned"
+          },
+          "400": {
+            "description": "Session not active, or durationSeconds is not one of 86400 / 604800 / 2592000"
+          },
+          "403": {
+            "description": "The engine refused the pin — in a group only admins may pin"
+          },
+          "404": {
+            "description": "Message not found in the chat"
+          }
+        },
+        "summary": "Pin a message in its chat",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/messages/unpin": {
+      "post": {
+        "operationId": "MessageController_unpinMessage",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnpinMessageDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message unpinned"
+          },
+          "400": {
+            "description": "Session not active"
+          },
+          "403": {
+            "description": "The engine refused the unpin — in a group only admins may unpin"
+          },
+          "404": {
+            "description": "Message not found in the chat"
+          }
+        },
+        "summary": "Remove a message’s pin",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/messages/star": {
+      "post": {
+        "operationId": "MessageController_starMessage",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StarMessageDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Instruction delivered. On whatsapp-web.js the engine silently ignores a message it will not star, so this does not guarantee the star is set."
+          },
+          "400": {
+            "description": "Session not active"
+          },
+          "404": {
+            "description": "Message not found in the chat"
+          }
+        },
+        "summary": "Star or unstar a message",
         "tags": [
           "messages"
         ]
@@ -2193,7 +2923,7 @@
             "description": "Batch cancelled"
           },
           "400": {
-            "description": "Batch already completed or cancelled"
+            "description": "Batch already completed, cancelled, or failed (terminal statuses are exclusive)"
           },
           "404": {
             "description": "Batch not found"
@@ -2492,7 +3222,7 @@
     },
     "/api/infra/status": {
       "get": {
-        "operationId": "InfraController_getStatus",
+        "operationId": "InfraStatusController_getStatus",
         "parameters": [],
         "responses": {
           "200": {
@@ -2507,7 +3237,7 @@
     },
     "/api/infra/engines": {
       "get": {
-        "operationId": "InfraController_getEngines",
+        "operationId": "InfraStatusController_getEngines",
         "parameters": [],
         "responses": {
           "200": {
@@ -2522,7 +3252,7 @@
     },
     "/api/infra/engines/current": {
       "get": {
-        "operationId": "InfraController_getCurrentEngine",
+        "operationId": "InfraStatusController_getCurrentEngine",
         "parameters": [],
         "responses": {
           "200": {
@@ -2535,9 +3265,25 @@
         ]
       }
     },
+    "/api/infra/health": {
+      "get": {
+        "operationId": "InfraStatusController_healthCheck",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Server is healthy"
+          }
+        },
+        "summary": "Health check endpoint",
+        "tags": [
+          "infrastructure"
+        ],
+        "security": []
+      }
+    },
     "/api/infra/config": {
       "get": {
-        "operationId": "InfraController_getConfig",
+        "operationId": "InfraConfigController_getConfig",
         "parameters": [],
         "responses": {
           "200": {
@@ -2550,7 +3296,7 @@
         ]
       },
       "put": {
-        "operationId": "InfraController_saveConfig",
+        "operationId": "InfraConfigController_saveConfig",
         "parameters": [],
         "requestBody": {
           "required": true,
@@ -2576,7 +3322,7 @@
     },
     "/api/infra/restart": {
       "post": {
-        "operationId": "InfraController_requestRestart",
+        "operationId": "InfraConfigController_requestRestart",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -2599,25 +3345,9 @@
         ]
       }
     },
-    "/api/infra/health": {
-      "get": {
-        "operationId": "InfraController_healthCheck",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "Server is healthy"
-          }
-        },
-        "summary": "Health check endpoint",
-        "tags": [
-          "infrastructure"
-        ],
-        "security": []
-      }
-    },
     "/api/infra/export-data": {
       "get": {
-        "operationId": "InfraController_exportData",
+        "operationId": "InfraDataController_exportData",
         "parameters": [],
         "responses": {
           "200": {
@@ -2632,7 +3362,7 @@
     },
     "/api/infra/import-data": {
       "post": {
-        "operationId": "InfraController_importData",
+        "operationId": "InfraDataController_importData",
         "parameters": [],
         "requestBody": {
           "required": true,
@@ -2642,6 +3372,14 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "force": {
+                    "type": "boolean",
+                    "description": "Allow the replace to proceed even while engines are running for sessions the backup does not contain (they keep running until restart; see restartRequired). Prefer stopOrphans, which closes that window inside this request instead."
+                  },
+                  "stopOrphans": {
+                    "type": "boolean",
+                    "description": "Stop the running engines for sessions the backup does not contain, inside this request and before the replace runs. Supersedes force for the orphan case: with stopOrphans the engines no longer need a process restart to reconcile, so restartRequired stays false on the success path."
+                  },
                   "tables": {
                     "type": "object",
                     "properties": {
@@ -2656,6 +3394,9 @@
                       },
                       "messageBatches": {
                         "type": "array"
+                      },
+                      "statusUpdates": {
+                        "type": "array"
                       }
                     }
                   }
@@ -2667,6 +3408,9 @@
         "responses": {
           "200": {
             "description": "Data imported successfully"
+          },
+          "409": {
+            "description": "Refused, with the reason in `code`. IMPORT_ALREADY_RUNNING: another import is running — wait for it. IMPORT_NESTED_TRANSACTION: another database transaction holds this connection, so a restore could not be made durable — retry with nothing else in flight. IMPORT_WOULD_ORPHAN_ENGINES: live engines exist for sessions the backup would remove — retry with stopOrphans=true to stop them in-request, or force=true to proceed and restart after. Only the last of these is retryable with stopOrphans; the others leave nothing to decide"
           }
         },
         "summary": "Import data to Data DB (replaces existing data)",
@@ -2677,7 +3421,7 @@
     },
     "/api/infra/storage/files/count": {
       "get": {
-        "operationId": "InfraController_getStorageFileCount",
+        "operationId": "InfraStorageController_getStorageFileCount",
         "parameters": [],
         "responses": {
           "200": {
@@ -2692,7 +3436,7 @@
     },
     "/api/infra/storage/export": {
       "get": {
-        "operationId": "InfraController_exportStorage",
+        "operationId": "InfraStorageController_exportStorage",
         "parameters": [],
         "responses": {
           "200": {
@@ -2707,7 +3451,7 @@
     },
     "/api/infra/storage/import": {
       "post": {
-        "operationId": "InfraController_importStorage",
+        "operationId": "InfraStorageController_importStorage",
         "parameters": [],
         "requestBody": {
           "required": true,
@@ -2847,6 +3591,86 @@
           }
         },
         "summary": "Get a specific contact by ID",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "put": {
+        "operationId": "ContactController_upsertContact",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "contactId",
+            "required": true,
+            "in": "path",
+            "description": "Contact ID (e.g., 628xxx@c.us)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertContactDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Contact saved"
+          },
+          "400": {
+            "description": "Session not active or invalid request"
+          }
+        },
+        "summary": "Save a contact to the account's addressbook, or edit an existing entry",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "delete": {
+        "operationId": "ContactController_deleteContact",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "contactId",
+            "required": true,
+            "in": "path",
+            "description": "Contact ID (e.g., 628xxx@c.us)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contact deleted"
+          },
+          "400": {
+            "description": "Session not active"
+          }
+        },
+        "summary": "Remove a contact from the account's addressbook",
         "tags": [
           "contacts"
         ]
@@ -3018,6 +3842,47 @@
         "summary": "Unblock a contact",
         "tags": [
           "contacts"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/groups/join-info": {
+      "get": {
+        "description": "Read-only: nothing about the account changes, which is what makes it safe to call on a code from an untrusted source. Supported on both engines.\n\nThere is no participant LIST — the account is not a member — only a count, and only when WhatsApp discloses one. Fields the engine does not report are omitted rather than defaulted, because whatsapp-web.js returns an untyped object with no guaranteed shape.",
+        "operationId": "GroupController_joinInfo",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "required": true,
+            "in": "query",
+            "description": "Group invite code (the part after the invite link)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the invite discloses about the group"
+          },
+          "400": {
+            "description": "Session not started, or no code supplied"
+          },
+          "404": {
+            "description": "No such invite — invalid, expired or revoked"
+          }
+        },
+        "summary": "Preview a group from its invite code, without joining",
+        "tags": [
+          "groups"
         ]
       }
     },
@@ -3257,7 +4122,7 @@
         },
         "responses": {
           "200": {
-            "description": "Participants added"
+            "description": "Participants processed — `results` carries the per-participant outcome (a partial refusal does not fail the batch; a total refusal is an error)"
           }
         },
         "summary": "Add participants to a group",
@@ -3299,7 +4164,7 @@
         },
         "responses": {
           "200": {
-            "description": "Participants removed"
+            "description": "Participants processed — `results` carries the per-participant outcome (a partial refusal does not fail the batch; a total refusal is an error)"
           }
         },
         "summary": "Remove participants from a group",
@@ -3343,7 +4208,7 @@
         },
         "responses": {
           "200": {
-            "description": "Participants promoted"
+            "description": "Participants processed — `results` carries the per-participant outcome (a partial refusal does not fail the batch; a total refusal is an error)"
           }
         },
         "summary": "Promote participants to admin",
@@ -3387,7 +4252,7 @@
         },
         "responses": {
           "200": {
-            "description": "Participants demoted"
+            "description": "Participants processed — `results` carries the per-participant outcome (a partial refusal does not fail the batch; a total refusal is an error)"
           }
         },
         "summary": "Demote participants from admin",
@@ -3432,6 +4297,9 @@
         "responses": {
           "200": {
             "description": "Subject updated"
+          },
+          "403": {
+            "description": "The engine refused the change — admin rights are required"
           }
         },
         "summary": "Change group name/subject",
@@ -3476,6 +4344,9 @@
         "responses": {
           "200": {
             "description": "Description updated"
+          },
+          "403": {
+            "description": "The engine refused the change — admin rights are required"
           }
         },
         "summary": "Change group description",
@@ -3513,6 +4384,123 @@
           }
         },
         "summary": "Leave a group",
+        "tags": [
+          "groups"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/groups/{groupId}/picture": {
+      "get": {
+        "operationId": "GroupController_getPicture",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "required": true,
+            "in": "path",
+            "description": "Group ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Picture URL, or null when the group has none"
+          }
+        },
+        "summary": "Get the group's picture URL",
+        "tags": [
+          "groups"
+        ]
+      },
+      "put": {
+        "operationId": "GroupController_setPicture",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "required": true,
+            "in": "path",
+            "description": "Group ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetGroupPictureDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Group picture updated"
+          },
+          "400": {
+            "description": "Session not active, or neither url nor base64 supplied"
+          },
+          "403": {
+            "description": "The engine refused the change — admin rights required"
+          }
+        },
+        "summary": "Set the group's picture",
+        "tags": [
+          "groups"
+        ]
+      },
+      "delete": {
+        "operationId": "GroupController_deletePicture",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "required": true,
+            "in": "path",
+            "description": "Group ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group picture removed"
+          },
+          "403": {
+            "description": "The engine refused the change — admin rights required"
+          }
+        },
+        "summary": "Remove the group's picture",
         "tags": [
           "groups"
         ]
@@ -3815,6 +4803,135 @@
         "tags": [
           "labels"
         ]
+      },
+      "put": {
+        "description": "Baileys only. `PUT` rather than `POST` because the label id is chosen by the caller: WhatsApp carries one `label_edit` write keyed on that id, so whether this creates or updates depends purely on whether the id already exists, and there is no server-assigned id to return.\n\n**Choose an unused id to create.** Reusing one silently rewrites that label rather than failing, because the protocol has no create-only form. Fields left out are left alone.\n\nwhatsapp-web.js can read and assign labels but cannot edit one, and answers `501`.",
+        "operationId": "LabelController_upsertLabel",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelId",
+            "required": true,
+            "in": "path",
+            "description": "Label ID — caller-chosen",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertLabelDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Label created or updated"
+          },
+          "400": {
+            "description": "Session not started, or validation failed"
+          },
+          "501": {
+            "description": "The active engine cannot edit labels (whatsapp-web.js)"
+          }
+        },
+        "summary": "Create or update a label",
+        "tags": [
+          "labels"
+        ]
+      },
+      "delete": {
+        "description": "Baileys only. The label disappears from every chat it was on. whatsapp-web.js cannot edit labels and answers `501`.",
+        "operationId": "LabelController_deleteLabel",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelId",
+            "required": true,
+            "in": "path",
+            "description": "Label ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Label deleted"
+          },
+          "400": {
+            "description": "Session not started"
+          },
+          "501": {
+            "description": "The active engine cannot edit labels (whatsapp-web.js)"
+          }
+        },
+        "summary": "Delete a label",
+        "tags": [
+          "labels"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/labels/{labelId}/chats": {
+      "get": {
+        "description": "whatsapp-web.js only. Baileys exposes label writes but no label query of any kind, so it answers `501`.",
+        "operationId": "LabelController_getChatsByLabel",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelId",
+            "required": true,
+            "in": "path",
+            "description": "Label ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chats carrying the label"
+          },
+          "400": {
+            "description": "Session not started"
+          },
+          "501": {
+            "description": "The active engine cannot list chats by label (Baileys)"
+          }
+        },
+        "summary": "Get every chat carrying a label",
+        "tags": [
+          "labels"
+        ]
       }
     },
     "/api/sessions/{sessionId}/labels/chat/{chatId}": {
@@ -3977,6 +5094,46 @@
         "tags": [
           "channels"
         ]
+      },
+      "post": {
+        "description": "The account becomes the channel owner, which is what makes deleting it possible later — neither engine can delete a channel it does not own.",
+        "operationId": "ChannelController_create",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChannelDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created channel"
+          },
+          "400": {
+            "description": "Session not started, or validation failed"
+          },
+          "403": {
+            "description": "The engine refused — channel creation may be disabled for this account"
+          }
+        },
+        "summary": "Create a channel",
+        "tags": [
+          "channels"
+        ]
       }
     },
     "/api/sessions/{sessionId}/channels/{channelId}": {
@@ -4074,7 +5231,7 @@
             "name": "limit",
             "required": false,
             "in": "query",
-            "description": "Max messages to return (default 50)",
+            "description": "Max messages to return (default 50, max 100)",
             "schema": {
               "type": "number"
             }
@@ -4086,6 +5243,98 @@
           }
         },
         "summary": "Get messages from a channel",
+        "tags": [
+          "channels"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/channels/{channelId}/delete": {
+      "post": {
+        "description": "Irreversible, and every subscriber loses the channel. Deliberately NOT `DELETE /channels/:channelId` — that route unsubscribes, and the two must not be reachable by the same request with a slip of the wrist. Only the owner can delete.",
+        "operationId": "ChannelController_remove",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channelId",
+            "required": true,
+            "in": "path",
+            "description": "Channel ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Channel deleted"
+          },
+          "400": {
+            "description": "Session not started"
+          },
+          "403": {
+            "description": "The engine refused — not found, or this account does not own it"
+          }
+        },
+        "summary": "Delete a channel this account owns",
+        "tags": [
+          "channels"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/channels/{channelId}/mute": {
+      "post": {
+        "description": "Silences the channel's notifications for this account. The subscription is untouched.",
+        "operationId": "ChannelController_mute",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channelId",
+            "required": true,
+            "in": "path",
+            "description": "Channel ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MuteChannelDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Channel muted or unmuted"
+          },
+          "400": {
+            "description": "Session not started, or validation failed"
+          },
+          "403": {
+            "description": "The engine refused"
+          }
+        },
+        "summary": "Mute or unmute a channel",
         "tags": [
           "channels"
         ]
@@ -4190,6 +5439,32 @@
         ]
       }
     },
+    "/api/metrics": {
+      "get": {
+        "operationId": "MetricsController_scrape",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Prometheus exposition text"
+          },
+          "401": {
+            "description": "METRICS_TOKEN is configured but the bearer is missing or wrong"
+          },
+          "404": {
+            "description": "Metrics endpoint is disabled (METRICS_TOKEN unset)"
+          }
+        },
+        "security": [
+          {
+            "metrics-bearer": []
+          }
+        ],
+        "summary": "Prometheus metrics (requires METRICS_TOKEN bearer)",
+        "tags": [
+          "metrics"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/status": {
       "get": {
         "operationId": "StatusController_getStatuses",
@@ -4241,6 +5516,41 @@
           }
         },
         "summary": "Get status updates from a specific contact",
+        "tags": [
+          "status"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/status/{statusId}/media": {
+      "get": {
+        "operationId": "StatusController_getStatusMedia",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "statusId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The status image/video bytes."
+          },
+          "404": {
+            "description": "No stored media (text status, omitted, or expired)."
+          }
+        },
+        "summary": "Stream a stored status media file",
         "tags": [
           "status"
         ]
@@ -4363,6 +5673,46 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/status/send-voice": {
+      "post": {
+        "operationId": "StatusController_sendVoiceStatus",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendVoiceStatusDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Voice status posted. WhatsApp plays a status voice note only as Ogg/Opus and neither engine transcodes, so convert first via POST /media/convert/voice. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts to the account's status-privacy audience."
+          },
+          "400": {
+            "description": "Neither url nor base64 provided, or the post was blocked by a plugin."
+          },
+          "413": {
+            "description": "Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES."
+          }
+        },
+        "summary": "Post an audio status as a voice note",
+        "tags": [
+          "status"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/status/{statusId}": {
       "delete": {
         "operationId": "StatusController_deleteStatus",
@@ -4395,6 +5745,89 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/media/convert": {
+      "get": {
+        "operationId": "MediaController_conversionStatus",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Reports whether conversion is switched on AND the ffmpeg binary can be run, so a client can decide between converting here and converting before it sends."
+          }
+        },
+        "summary": "Whether server-side media conversion is available",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/media/convert/voice": {
+      "post": {
+        "operationId": "MediaController_convertVoice",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvertMediaDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Converted bytes, ready to post to send-audio with ptt=true. WhatsApp only renders a playable mic bubble for Ogg/Opus; other formats arrive as an audio file that will not play."
+          },
+          "400": {
+            "description": "Neither url nor base64 given, or ffmpeg refused the input."
+          },
+          "413": {
+            "description": "The supplied media is above the media size cap."
+          },
+          "503": {
+            "description": "Conversion is disabled, the ffmpeg binary is not runnable, or the conversion queue is saturated — retry shortly."
+          }
+        },
+        "summary": "Convert audio into a WhatsApp voice note (Ogg/Opus)",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/media/convert/video": {
+      "post": {
+        "operationId": "MediaController_convertVideo",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvertMediaDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Converted bytes: baseline H.264 with AAC audio, long edge bounded at 1280, index moved to the front so the recipient can start playing before the whole file arrives."
+          },
+          "400": {
+            "description": "Neither url nor base64 given, or ffmpeg refused the input."
+          },
+          "413": {
+            "description": "The supplied media is above the media size cap."
+          },
+          "503": {
+            "description": "Conversion is disabled, the ffmpeg binary is not runnable, or the conversion queue is saturated — retry shortly."
+          }
+        },
+        "summary": "Convert video into a WhatsApp-compatible MP4",
+        "tags": [
+          "media"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/catalog": {
       "get": {
         "operationId": "CatalogController_getCatalog",
@@ -4409,14 +5842,11 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Always null on whatsapp-web.js: catalog reads are not implemented on either engine."
-          },
           "501": {
-            "description": "Not supported by the active engine: Baileys does not implement catalog reads."
+            "description": "Not supported by the active engine: whatsapp-web.js has no catalog API."
           }
         },
-        "summary": "Get business catalog info (not implemented by any engine)",
+        "summary": "Get business catalog info (Baileys engine only)",
         "tags": [
           "catalog"
         ]
@@ -4458,14 +5888,11 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Always an empty page on whatsapp-web.js: catalog reads are not implemented on either engine."
-          },
           "501": {
-            "description": "Not supported by the active engine: Baileys does not implement catalog reads."
+            "description": "Not supported by the active engine: whatsapp-web.js has no catalog API."
           }
         },
-        "summary": "List catalog products (not implemented by any engine)",
+        "summary": "List catalog products (Baileys engine only)",
         "tags": [
           "catalog"
         ]
@@ -4493,14 +5920,11 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Always null on whatsapp-web.js: catalog reads are not implemented on either engine."
-          },
           "501": {
-            "description": "Not supported by the active engine: Baileys does not implement catalog reads."
+            "description": "Not supported by the active engine: whatsapp-web.js has no catalog API."
           }
         },
-        "summary": "Get a specific product (not implemented by any engine)",
+        "summary": "Get a specific product (Baileys engine only)",
         "tags": [
           "catalog"
         ]
@@ -4530,11 +5954,17 @@
           }
         },
         "responses": {
+          "400": {
+            "description": "Product has no image — a product card requires one."
+          },
+          "404": {
+            "description": "Product id not found in the session catalog."
+          },
           "501": {
-            "description": "Not supported by the active engine: no engine can send product messages."
+            "description": "Not supported by the active engine: whatsapp-web.js cannot send product messages."
           }
         },
-        "summary": "Send a product message (not supported by any engine)",
+        "summary": "Send a product message (Baileys engine only)",
         "tags": [
           "catalog"
         ]
@@ -4907,6 +6337,9 @@
           },
           "400": {
             "description": "Plugin is global (not session-scoped)"
+          },
+          "403": {
+            "description": "A session-restricted key may not replace the full active set — full activation replacement requires an unrestricted key"
           },
           "404": {
             "description": "Plugin not found"
@@ -5741,7 +7174,7 @@
   "info": {
     "title": "OpenWA API",
     "description": "Open Source WhatsApp API Gateway - Free, Self-Hosted HTTP API",
-    "version": "0.10.8",
+    "version": "0.14.2",
     "contact": {
       "name": "OpenWA",
       "url": "https://github.com/rmyndharis/OpenWA",
@@ -5786,6 +7219,18 @@
       "description": "Status/Stories"
     },
     {
+      "name": "calls",
+      "description": "Call handling"
+    },
+    {
+      "name": "profile",
+      "description": "Own profile management"
+    },
+    {
+      "name": "search",
+      "description": "Global message search"
+    },
+    {
       "name": "statistics",
       "description": "Usage statistics"
     },
@@ -5826,13 +7271,37 @@
       "description": "Health check endpoints"
     }
   ],
-  "servers": [],
+  "servers": [
+    {
+      "url": "/",
+      "description": "This instance (the origin serving these docs)"
+    },
+    {
+      "url": "http://{host}:{port}",
+      "description": "Another instance (set host and port)",
+      "variables": {
+        "host": {
+          "default": "localhost"
+        },
+        "port": {
+          "default": "2785",
+          "description": "PORT env var"
+        }
+      }
+    }
+  ],
   "components": {
     "securitySchemes": {
       "X-API-Key": {
         "type": "apiKey",
         "in": "header",
         "name": "X-API-Key"
+      },
+      "metrics-bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "opaque",
+        "type": "http",
+        "description": "METRICS_TOKEN for the GET /api/metrics scrape endpoint"
       }
     },
     "schemas": {
@@ -6084,6 +7553,37 @@
           "name"
         ]
       },
+      "AccountRestrictionDto": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "reachout_timelock",
+              "tos_block",
+              "proxy_block"
+            ],
+            "description": "What WhatsApp is restricting. `reachout_timelock` leaves the session connected and existing chats working, blocking only the start of new conversations. `tos_block` and `proxy_block` are connection-level refusals — the session cannot stay linked while one is in force, so seeing either alongside a `ready` status is not possible.",
+            "example": "reachout_timelock"
+          },
+          "code": {
+            "type": "string",
+            "description": "The engine's own token for the cause, passed through verbatim so it can be searched for and so a value newer than this gateway is still surfaced rather than flattened.",
+            "example": "BIZ_QUALITY"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When enforcement ends, if the engine states it. Only reachout timelocks carry an expiry; absent means the engine gave no end time, not that the restriction is permanent.",
+            "example": "2026-08-04T09:00:00Z",
+            "nullable": true
+          }
+        },
+        "required": [
+          "kind",
+          "code"
+        ]
+      },
       "SessionResponseDto": {
         "type": "object",
         "properties": {
@@ -6104,6 +7604,7 @@
               "authenticating",
               "ready",
               "disconnected",
+              "action_required",
               "failed"
             ],
             "example": "ready"
@@ -6142,9 +7643,24 @@
           },
           "lastError": {
             "type": "string",
-            "description": "Human-readable reason for the most recent terminal engine failure (only set when status is FAILED).",
+            "description": "Human-readable reason carried while the status is FAILED (a terminal engine failure) or ACTION_REQUIRED (the engine is running but something needs a human). Cleared on any other status.",
             "example": "Failed to launch the browser process: spawn /usr/bin/chromium ENOENT",
             "nullable": true
+          },
+          "restriction": {
+            "description": "A restriction WhatsApp itself has placed on this session's account, or null when there is none. Distinct from `lastError`, which describes a fault on our side of the link. Derived from live engine state, so it is never persisted: it is re-established on the next connect.",
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AccountRestrictionDto"
+              }
+            ]
+          },
+          "engineLoaded": {
+            "type": "boolean",
+            "description": "Whether the gateway currently holds a live engine for this session. This is the precondition the lifecycle routes actually enforce, and `status` alone does not imply it: a `disconnected` session keeps its engine for the duration of an automatic reconnect backoff, while a session stopped through `POST /sessions/:id/stop` carries the same status with no engine. When `true`, `stop`, `logout` and `force-kill` can act and `start` answers 400; when `false`, the reverse. Derived per request from live process state, so it is never persisted and never historical.",
+            "example": true
           }
         },
         "required": [
@@ -6152,7 +7668,8 @@
           "name",
           "status",
           "createdAt",
-          "updatedAt"
+          "updatedAt",
+          "engineLoaded"
         ]
       },
       "QRCodeResponseDto": {
@@ -6172,6 +7689,7 @@
               "authenticating",
               "ready",
               "disconnected",
+              "action_required",
               "failed"
             ],
             "example": "qr_ready"
@@ -6279,6 +7797,99 @@
           "chatId"
         ]
       },
+      "SubscribePresenceDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string",
+            "description": "Chat ID in the active engine's native format (e.g. 1234567890@c.us on whatsapp-web.js)",
+            "example": "1234567890@c.us"
+          }
+        },
+        "required": [
+          "chatId"
+        ]
+      },
+      "ParticipantPresenceDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Participant id. In a 1:1 chat this is the chat itself.",
+            "example": "1234567890@c.us"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "available",
+              "unavailable",
+              "composing",
+              "recording",
+              "paused"
+            ],
+            "description": "`composing` and `recording` mean actively typing or recording in this chat; `paused` means they stopped without sending. `available`/`unavailable` describe reachability.",
+            "example": "composing"
+          },
+          "lastSeen": {
+            "type": "number",
+            "description": "Unix SECONDS the contact was last seen. Absent whenever the contact's privacy settings hide last-seen — the common case, and not an error.",
+            "example": 1786000000
+          }
+        },
+        "required": [
+          "id",
+          "state"
+        ]
+      },
+      "ChatPresenceResponseDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string",
+            "example": "1234567890@c.us"
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ParticipantPresenceDto"
+            }
+          },
+          "groupOnlineCount": {
+            "type": "number",
+            "description": "Online member count, groups only.",
+            "example": 3
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this gateway received the report — NOT a WhatsApp timestamp. Presence is short-lived, so an old `observedAt` means the state is stale rather than steady.",
+            "example": "2026-08-03T12:00:00Z"
+          }
+        },
+        "required": [
+          "chatId",
+          "participants",
+          "observedAt"
+        ]
+      },
+      "ArchiveChatDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string",
+            "description": "Chat ID in the active engine's native format (e.g. 1234567890-123@g.us on whatsapp-web.js)",
+            "example": "1234567890-123@g.us"
+          },
+          "archive": {
+            "type": "boolean",
+            "description": "true to archive, false to unarchive."
+          }
+        },
+        "required": [
+          "chatId",
+          "archive"
+        ]
+      },
       "DeleteChatDto": {
         "type": "object",
         "properties": {
@@ -6342,15 +7953,21 @@
                 "message.revoked",
                 "message.reaction",
                 "message.edited",
+                "status.received",
                 "session.status",
                 "session.qr",
                 "session.authenticated",
                 "session.disconnected",
                 "session.reconnect_loop",
+                "session.restriction",
+                "presence.update",
                 "group.join",
                 "group.leave",
                 "group.update",
                 "call.received",
+                "call.accepted",
+                "call.rejected",
+                "call.missed",
                 "*"
               ]
             }
@@ -6487,15 +8104,21 @@
                 "message.revoked",
                 "message.reaction",
                 "message.edited",
+                "status.received",
                 "session.status",
                 "session.qr",
                 "session.authenticated",
                 "session.disconnected",
                 "session.reconnect_loop",
+                "session.restriction",
+                "presence.update",
                 "group.join",
                 "group.leave",
                 "group.update",
                 "call.received",
+                "call.accepted",
+                "call.rejected",
+                "call.missed",
                 "*"
               ]
             }
@@ -6538,6 +8161,144 @@
           }
         }
       },
+      "CreateAutomationRuleDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Display name for the rule",
+            "example": "Greet new enquiries",
+            "maxLength": 100
+          },
+          "replyText": {
+            "type": "string",
+            "description": "Text sent back into the chat when the rule matches",
+            "example": "Thanks for reaching out — we reply within the hour.",
+            "maxLength": 4096
+          },
+          "conditions": {
+            "type": "object",
+            "description": "Match conditions in the webhook filter format (message family: sender, recipient, body, type, isGroup, fromMe, hasMedia, mentions). All conditions must match (AND). Omitted or empty means the rule matches every inbound message."
+          },
+          "cooldownSeconds": {
+            "type": "number",
+            "description": "Quiet period per chat, in seconds: after the rule replies in a chat it stays silent there for this long (default 60, 0 disables). This is the guard against two auto-repliers answering each other forever, so disable it knowingly.",
+            "default": 60,
+            "minimum": 0,
+            "maximum": 86400
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the rule is active",
+            "default": true
+          }
+        },
+        "required": [
+          "name",
+          "replyText"
+        ]
+      },
+      "AutomationRuleResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "conditions": {
+            "type": "object",
+            "description": "Match conditions in the webhook filter format (message family: sender, recipient, body, type, isGroup, fromMe, hasMedia, mentions). All conditions must match (AND). Omitted or empty means the rule matches every inbound message.",
+            "nullable": true
+          },
+          "replyText": {
+            "type": "string"
+          },
+          "cooldownSeconds": {
+            "type": "number"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sessionId",
+          "name",
+          "enabled",
+          "replyText",
+          "cooldownSeconds",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "UpdateAutomationRuleDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Display name for the rule",
+            "maxLength": 100
+          },
+          "replyText": {
+            "type": "string",
+            "description": "Text sent back into the chat when the rule matches",
+            "maxLength": 4096
+          },
+          "conditions": {
+            "type": "object",
+            "description": "Match conditions in the webhook filter format (message family: sender, recipient, body, type, isGroup, fromMe, hasMedia, mentions). All conditions must match (AND). Omitted or empty means the rule matches every inbound message."
+          },
+          "cooldownSeconds": {
+            "type": "number",
+            "description": "Quiet period per chat, in seconds: after the rule replies in a chat it stays silent there for this long (default 60, 0 disables). This is the guard against two auto-repliers answering each other forever, so disable it knowingly.",
+            "minimum": 0,
+            "maximum": 86400
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the rule is active"
+          }
+        }
+      },
+      "CustomLinkPreviewDto": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The URL as it appears in the message text — WhatsApp anchors the preview to it.",
+            "example": "https://example.com/launch"
+          },
+          "title": {
+            "type": "string",
+            "description": "Required: WhatsApp will not render a preview without a title.",
+            "example": "We just launched",
+            "maxLength": 256
+          },
+          "description": {
+            "type": "string",
+            "description": "Preview description",
+            "example": "Read the announcement.",
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "url",
+          "title"
+        ]
+      },
       "SendTextMessageDto": {
         "type": "object",
         "properties": {
@@ -6561,6 +8322,19 @@
             "items": {
               "type": "string"
             }
+          },
+          "linkPreview": {
+            "type": "boolean",
+            "description": "Controls the URL preview, and the engines differ. On whatsapp-web.js WhatsApp Web builds one by default and `false` suppresses it. On Baileys previews are OPT-IN: `true` asks the gateway to fetch the page and attach one, while unset or `false` sends none — generating a preview is a blocking outbound fetch per URL in the text, so it is never done unless asked for.",
+            "example": false
+          },
+          "customLinkPreview": {
+            "description": "Attach a preview you supply yourself, instead of one fetched from the URL. Nothing is fetched for these, so a preview can be attached even for a URL this server cannot reach. **Baileys only** — whatsapp-web.js takes a boolean and answers `501`. Cannot be combined with `linkPreview: false`, which asks for the opposite.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CustomLinkPreviewDto"
+              }
+            ]
           }
         },
         "required": [
@@ -6642,7 +8416,7 @@
           },
           "filename": {
             "type": "string",
-            "description": "Filename for the media",
+            "description": "Filename for the media. Only rendered on document sends — defaults to 'file' when omitted (a URL-based document send on whatsapp-web.js first derives the URL basename)",
             "example": "image.jpg"
           },
           "caption": {
@@ -6690,7 +8464,7 @@
           },
           "filename": {
             "type": "string",
-            "description": "Filename for the media",
+            "description": "Filename for the media. Only rendered on document sends — defaults to 'file' when omitted (a URL-based document send on whatsapp-web.js first derives the URL basename)",
             "example": "image.jpg"
           },
           "caption": {
@@ -6884,6 +8658,91 @@
           "messageId"
         ]
       },
+      "VotePollDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string"
+          },
+          "pollMessageId": {
+            "type": "string",
+            "description": "The poll creation message to vote on."
+          },
+          "options": {
+            "description": "The option TEXTS to select, exactly as they appear on the poll. Replaces the current selection; an empty array clears the vote.",
+            "maxItems": 12,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "chatId",
+          "pollMessageId",
+          "options"
+        ]
+      },
+      "PinMessageDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "durationSeconds": {
+            "type": "number",
+            "description": "Pin duration in seconds: 86400 (24h), 604800 (7d) or 2592000 (30d). Defaults to 24h.",
+            "enum": [
+              86400,
+              604800,
+              2592000
+            ],
+            "default": 86400
+          }
+        },
+        "required": [
+          "chatId",
+          "messageId"
+        ]
+      },
+      "UnpinMessageDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "chatId",
+          "messageId"
+        ]
+      },
+      "StarMessageDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "star": {
+            "type": "boolean",
+            "description": "true to star, false to remove the star."
+          }
+        },
+        "required": [
+          "chatId",
+          "messageId",
+          "star"
+        ]
+      },
       "EditMessageDto": {
         "type": "object",
         "properties": {
@@ -7043,7 +8902,7 @@
             "description": "Custom batch ID (auto-generated if not provided)"
           },
           "messages": {
-            "description": "Array of messages (max 100 per request)",
+            "description": "Array of messages (max 100 per request; exact duplicate entries are collapsed — first occurrence wins)",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/BulkMessageItemDto"
@@ -7350,6 +9209,24 @@
           }
         }
       },
+      "UpsertContactDto": {
+        "type": "object",
+        "properties": {
+          "firstName": {
+            "type": "string",
+            "description": "The contact's first name.",
+            "maxLength": 100
+          },
+          "lastName": {
+            "type": "string",
+            "description": "The contact's last name. Omit for a single-name contact — WhatsApp allows those.",
+            "maxLength": 100
+          }
+        },
+        "required": [
+          "firstName"
+        ]
+      },
       "JoinGroupDto": {
         "type": "object",
         "properties": {
@@ -7378,6 +9255,14 @@
             "type": "number",
             "description": "Disappearing-messages timer in seconds; 0 disables. Known values: 86400 (24h), 604800 (7d), 7776000 (90d)",
             "minimum": 0
+          },
+          "memberAddMode": {
+            "type": "string",
+            "description": "Who may add participants: 'all' (any member) or 'admins' (admins only)",
+            "enum": [
+              "all",
+              "admins"
+            ]
           }
         }
       },
@@ -7391,6 +9276,7 @@
           },
           "participants": {
             "description": "Participant WhatsApp IDs (e.g. 628123456789@c.us)",
+            "maxItems": 256,
             "type": "array",
             "items": {
               "type": "string"
@@ -7407,6 +9293,7 @@
         "properties": {
           "participants": {
             "description": "Participant WhatsApp IDs (e.g. 628123456789@c.us)",
+            "maxItems": 256,
             "type": "array",
             "items": {
               "type": "string"
@@ -7442,6 +9329,25 @@
         "required": [
           "description"
         ]
+      },
+      "SetGroupPictureDto": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Image URL (http/https)",
+            "example": "https://example.com/group.jpg"
+          },
+          "base64": {
+            "type": "string",
+            "description": "Base64 encoded image data"
+          },
+          "mimetype": {
+            "type": "string",
+            "description": "Image MIME type (required when using base64)",
+            "example": "image/jpeg"
+          }
+        }
       },
       "SetProfileNameDto": {
         "type": "object",
@@ -7488,6 +9394,57 @@
           }
         }
       },
+      "UpsertLabelDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Label name. Omit to leave the current name untouched.",
+            "example": "VIP customer",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "color": {
+            "type": "number",
+            "description": "WhatsApp's colour INDEX (0-19), not a hex value — the read path's `hexColor` cannot be translated back, because neither engine exposes the mapping. Omit to leave the colour alone.",
+            "example": 3,
+            "minimum": 0,
+            "maximum": 19
+          }
+        }
+      },
+      "CreateChannelDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Channel name",
+            "example": "Product updates",
+            "maxLength": 100
+          },
+          "description": {
+            "type": "string",
+            "description": "Channel description",
+            "example": "Release notes and downtime notices"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "MuteChannelDto": {
+        "type": "object",
+        "properties": {
+          "mute": {
+            "type": "boolean",
+            "description": "True to mute the channel, false to unmute it. Subscription is unaffected either way.",
+            "example": true
+          }
+        },
+        "required": [
+          "mute"
+        ]
+      },
       "SendTextStatusDto": {
         "type": "object",
         "properties": {
@@ -7504,17 +9461,24 @@
           },
           "font": {
             "type": "number",
-            "description": "Font family index (0–5).",
+            "description": "Font family index from the WhatsApp status font enum: 0 (default), 1, 2, 6 (bold), 7, 8, 9, or 10. whatsapp-web.js honors only 0–7 and clamps anything above to the default.",
             "example": 0,
-            "minimum": 0,
-            "maximum": 5
+            "enum": [
+              0,
+              1,
+              2,
+              6,
+              7,
+              8,
+              9,
+              10
+            ]
           },
           "recipients": {
-            "description": "Recipient JIDs (1–256). WhatsApp Status is not posted to a group — use @c.us or @lid individuals. Honored on the Baileys engine only: whatsapp-web.js ignores this allow-list and broadcasts to the account's status-privacy audience.",
+            "description": "Recipient JIDs (0–256). WhatsApp Status is not posted to a group — use @c.us or @lid individuals. Required on the Baileys engine (it posts to exactly this allow-list); ignored by whatsapp-web.js, which broadcasts to the account's status-privacy audience — omit it there.",
             "example": [
               "628123456789@c.us"
             ],
-            "minItems": 1,
             "maxItems": 256,
             "type": "array",
             "items": {
@@ -7523,8 +9487,7 @@
           }
         },
         "required": [
-          "text",
-          "recipients"
+          "text"
         ]
       },
       "StatusMediaInput": {
@@ -7565,11 +9528,10 @@
             "maxLength": 1024
           },
           "recipients": {
-            "description": "Recipient JIDs (1–256), @c.us or @lid. Honored on the Baileys engine only: whatsapp-web.js ignores this allow-list and broadcasts to the account's status-privacy audience.",
+            "description": "Recipient JIDs (0–256), @c.us or @lid. Required on the Baileys engine (it posts to exactly this allow-list); ignored by whatsapp-web.js, which broadcasts to the account's status-privacy audience — omit it there.",
             "example": [
               "628123456789@c.us"
             ],
-            "minItems": 1,
             "maxItems": 256,
             "type": "array",
             "items": {
@@ -7578,8 +9540,7 @@
           }
         },
         "required": [
-          "image",
-          "recipients"
+          "image"
         ]
       },
       "SendVideoStatusDto": {
@@ -7600,11 +9561,10 @@
             "maxLength": 1024
           },
           "recipients": {
-            "description": "Recipient JIDs (1–256), @c.us or @lid. Honored on the Baileys engine only: whatsapp-web.js ignores this allow-list and broadcasts to the account's status-privacy audience.",
+            "description": "Recipient JIDs (0–256), @c.us or @lid. Required on the Baileys engine (it posts to exactly this allow-list); ignored by whatsapp-web.js, which broadcasts to the account's status-privacy audience — omit it there.",
             "example": [
               "628123456789@c.us"
             ],
-            "minItems": 1,
             "maxItems": 256,
             "type": "array",
             "items": {
@@ -7613,9 +9573,55 @@
           }
         },
         "required": [
-          "video",
-          "recipients"
+          "video"
         ]
+      },
+      "SendVoiceStatusDto": {
+        "type": "object",
+        "properties": {
+          "audio": {
+            "description": "Audio source (URL or base64). WhatsApp plays a status voice note only as Ogg/Opus, and neither engine transcodes — use the media conversion endpoint to produce it. The mimetype defaults to 'audio/ogg; codecs=opus'.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/StatusMediaInput"
+              }
+            ]
+          },
+          "backgroundColor": {
+            "type": "string",
+            "description": "Background colour as `#RRGGBB`, which WhatsApp renders behind the voice-note bubble. Baileys only — whatsapp-web.js exposes no styling for a status and ignores it.",
+            "example": "#25D366"
+          },
+          "recipients": {
+            "description": "Recipient JIDs (0–256), @c.us or @lid. Required on the Baileys engine (it posts to exactly this allow-list); ignored by whatsapp-web.js, which broadcasts to the account's status-privacy audience — omit it there.",
+            "example": [
+              "628123456789@c.us"
+            ],
+            "maxItems": 256,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "audio"
+        ]
+      },
+      "ConvertMediaDto": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Public http(s) URL of the media to convert (server-fetched, SSRF-guarded).",
+            "example": "https://example.com/note.m4a"
+          },
+          "base64": {
+            "type": "string",
+            "description": "Base64-encoded media to convert. Takes precedence when both are supplied.",
+            "example": "SUQzBAAAAAAA..."
+          }
+        }
       },
       "SendProductDto": {
         "type": "object",
@@ -7664,7 +9670,7 @@
         "properties": {
           "url": {
             "type": "string",
-            "description": "HTTP(S) URL of the plugin .zip to download and install"
+            "description": "HTTPS URL of the plugin .zip to download and install. Plain http:// is rejected: the package is executable code, so it must be integrity-protected in transit (hosts on private networks remain subject to the SSRF guard). Optional content pinning: append `#sha256=<64 hex>` (fragment — never sent to the server; query params are ignored) to require the downloaded archive to match that digest; a mismatch fails the install."
           }
         },
         "required": [
@@ -7903,7 +9909,7 @@
           },
           "config": {
             "type": "object",
-            "description": "Per-instance config slice passed to the adapter, or null.",
+            "description": "Per-instance config slice passed to the adapter, or null. Fields flagged `secret` in the plugin's config schema are masked ('***') on EVERY response — including create/regenerate-secret; only the ingress secret and verifyToken are ever revealed once.",
             "nullable": true
           },
           "enabled": {

@@ -34,6 +34,30 @@ func (s *ChannelsService) Messages(ctx context.Context, sessionID, channelID str
 	return out, err
 }
 
+// Create makes a channel. The account owns it, which is what makes Delete possible later.
+func (s *ChannelsService) Create(ctx context.Context, sessionID string, body CreateChannelRequest) (*ChannelRecord, error) {
+	var out ChannelRecord
+	err := s.client.do(ctx, "POST", s.base(sessionID), nil, body, &out)
+	return &out, err
+}
+
+// Delete destroys a channel this account owns. Irreversible, and every subscriber loses it.
+//
+// Note the path: Unsubscribe is the DELETE route, and the two are deliberately not reachable by the
+// same request — leaving a channel and destroying it are very different acts.
+func (s *ChannelsService) Delete(ctx context.Context, sessionID, channelID string) (*SuccessResult, error) {
+	var out SuccessResult
+	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(channelID)+"/delete", nil, nil, &out)
+	return &out, err
+}
+
+// Mute mutes or unmutes a channel's notifications. The subscription is untouched either way.
+func (s *ChannelsService) Mute(ctx context.Context, sessionID, channelID string, body MuteChannelRequest) (*SuccessResult, error) {
+	var out SuccessResult
+	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(channelID)+"/mute", nil, body, &out)
+	return &out, err
+}
+
 // Subscribe subscribes to a channel by invite code. Requires an OPERATOR-level key.
 func (s *ChannelsService) Subscribe(ctx context.Context, sessionID string, body SubscribeChannelRequest) (*ChannelRecord, error) {
 	var out ChannelRecord

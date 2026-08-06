@@ -1,8 +1,9 @@
-import { Controller, Get, Post, Delete, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import { Body, Controller, Get, Post, Put, Delete, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { ContactService } from './contact.service';
 import { RequireRole } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
+import { UpsertContactDto } from './dto/upsert-contact.dto';
 
 @ApiTags('contacts')
 @Controller('sessions/:sessionId/contacts')
@@ -115,6 +116,37 @@ export class ContactController {
   async resolvePhone(@Param('sessionId') sessionId: string, @Param('contactId') contactId: string) {
     const phone = await this.contactService.resolveContactPhone(sessionId, contactId);
     return { contactId, phone };
+  }
+
+  @Put(':contactId')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Save a contact to the account's addressbook, or edit an existing entry" })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'contactId', description: 'Contact ID (e.g., 628xxx@c.us)' })
+  @ApiResponse({ status: 200, description: 'Contact saved' })
+  @ApiResponse({ status: 400, description: 'Session not active or invalid request' })
+  async upsertContact(
+    @Param('sessionId') sessionId: string,
+    @Param('contactId') contactId: string,
+    @Body() dto: UpsertContactDto,
+  ) {
+    await this.contactService.upsertContact(sessionId, contactId, dto.firstName, dto.lastName);
+    return { success: true, message: 'Contact saved' };
+  }
+
+  // Two path segments on the sibling route (`:contactId/block`) keep this single-segment DELETE
+  // from shadowing the unblock route, whichever order they are declared in.
+  @Delete(':contactId')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @ApiOperation({ summary: "Remove a contact from the account's addressbook" })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'contactId', description: 'Contact ID (e.g., 628xxx@c.us)' })
+  @ApiResponse({ status: 200, description: 'Contact deleted' })
+  @ApiResponse({ status: 400, description: 'Session not active' })
+  async deleteContact(@Param('sessionId') sessionId: string, @Param('contactId') contactId: string) {
+    await this.contactService.deleteContact(sessionId, contactId);
+    return { success: true, message: 'Contact deleted' };
   }
 
   @Post(':contactId/block')

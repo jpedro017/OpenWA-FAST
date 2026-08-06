@@ -13,39 +13,39 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 @Index('IDX_webhook_delivery_failures_sessionId', ['sessionId'])
 export class WebhookDeliveryFailure {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column()
-  webhookId: string;
+  webhookId!: string;
 
   @Column()
-  sessionId: string;
+  sessionId!: string;
 
   @Column()
-  event: string;
+  event!: string;
 
   @Column()
-  url: string;
+  url!: string;
 
   /** The idempotency key the receiver would have deduped on (lets an operator correlate the lost event). */
   @Column({ nullable: true })
-  idempotencyKey: string;
+  idempotencyKey!: string;
 
   @Column({ nullable: true })
-  deliveryId: string;
+  deliveryId!: string;
 
   /** Total attempts made before giving up. */
   @Column({ type: 'int' })
-  attempts: number;
+  attempts!: number;
 
   /** Last HTTP status, when the failure was a non-2xx response (null for a network/timeout/SSRF error). */
   @Column({ type: 'int', nullable: true })
-  lastStatusCode: number | null;
+  lastStatusCode!: number | null;
 
   @Column({ type: 'text' })
-  lastError: string;
+  lastError!: string;
 
   /** When the delivery was finally abandoned. */
   @CreateDateColumn()
-  createdAt: Date;
+  createdAt!: Date;
 }

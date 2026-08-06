@@ -24,6 +24,12 @@ type ProfilePictureResponse struct {
 	URL *string `json:"url,omitempty"`
 }
 
+// ProfilePicturesResponse is a batch profile-picture lookup: a map of contact
+// id → picture URL (null when the lookup failed).
+type ProfilePicturesResponse struct {
+	Pictures map[string]*string `json:"pictures"`
+}
+
 // ContactPhoneResponse resolves a contact's phone number.
 type ContactPhoneResponse struct {
 	ContactID string  `json:"contactId"`
@@ -41,4 +47,11 @@ func (q *ListContactsQuery) values() url.Values {
 	setInt(v, "limit", q.Limit)
 	setInt(v, "offset", q.Offset)
 	return v
+}
+
+// UpsertContactRequest saves or edits an addressbook contact. LastName may be
+// empty for a single-name contact.
+type UpsertContactRequest struct {
+	FirstName string `json:"firstName"`
+	LastName  string `json:"lastName,omitempty"`
 }

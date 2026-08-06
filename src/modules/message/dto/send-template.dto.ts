@@ -8,7 +8,7 @@ export class SendTemplateMessageDto {
   })
   @IsString()
   @IsNotEmpty()
-  chatId: string;
+  chatId!: string;
 
   @ApiPropertyOptional({
     description: 'Template ID to render. Provide either templateId or templateName.',

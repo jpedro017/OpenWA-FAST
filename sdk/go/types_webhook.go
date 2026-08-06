@@ -21,10 +21,16 @@ const (
 	EventSessionAuthenticated WebhookEvent = "session.authenticated"
 	EventSessionDisconnected  WebhookEvent = "session.disconnected"
 	EventSessionReconnectLoop WebhookEvent = "session.reconnect_loop"
+	EventSessionRestriction   WebhookEvent = "session.restriction"
+	EventPresenceUpdate       WebhookEvent = "presence.update"
+	EventCallAccepted         WebhookEvent = "call.accepted"
+	EventCallRejected         WebhookEvent = "call.rejected"
+	EventCallMissed           WebhookEvent = "call.missed"
 	EventGroupJoin            WebhookEvent = "group.join"
 	EventGroupLeave           WebhookEvent = "group.leave"
 	EventGroupUpdate          WebhookEvent = "group.update"
 	EventCallReceived         WebhookEvent = "call.received"
+	EventStatusReceived       WebhookEvent = "status.received"
 	EventAll                  WebhookEvent = "*"
 )
 

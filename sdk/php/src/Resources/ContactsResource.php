@@ -47,6 +47,21 @@ class ContactsResource
         return $this->http->request('GET', "/api/sessions/{$this->http->encodeSegment($sessionId)}/contacts/{$this->http->encodeSegment($contactId)}/profile-picture");
     }
 
+    /**
+     * Batch-resolve profile picture URLs for up to 50 contacts in one request.
+     *
+     * @param list<string> $ids
+     * @return array{pictures: array<string,?string>} Map of contact id → URL (null when a lookup fails).
+     */
+    public function profilePictures(string $sessionId, array $ids): array
+    {
+        return $this->http->request(
+            'GET',
+            "/api/sessions/{$this->http->encodeSegment($sessionId)}/contacts/profile-pictures",
+            ['ids' => implode(',', $ids)]
+        );
+    }
+
     /** @return array<string,mixed> */
     public function phone(string $sessionId, string $contactId): array
     {
@@ -57,6 +72,27 @@ class ContactsResource
     public function block(string $sessionId, string $contactId): array
     {
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/contacts/{$this->http->encodeSegment($contactId)}/block");
+    }
+
+    /**
+     * Save a contact to the addressbook, or edit an existing entry. Requires an OPERATOR key.
+     *
+     * @param array<string,mixed> $body firstName and an optional lastName.
+     * @return array<string,mixed>
+     */
+    public function upsert(string $sessionId, string $contactId, array $body): array
+    {
+        return $this->http->request('PUT', "/api/sessions/{$this->http->encodeSegment($sessionId)}/contacts/{$this->http->encodeSegment($contactId)}", [], $body) ?? [];
+    }
+
+    /**
+     * Remove a contact from the addressbook. Requires an OPERATOR key.
+     *
+     * @return array<string,mixed>
+     */
+    public function delete(string $sessionId, string $contactId): array
+    {
+        return $this->http->request('DELETE', "/api/sessions/{$this->http->encodeSegment($sessionId)}/contacts/{$this->http->encodeSegment($contactId)}") ?? [];
     }
 
     /** @return array<string,mixed> */

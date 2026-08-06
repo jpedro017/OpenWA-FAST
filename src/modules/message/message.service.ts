@@ -1,30 +1,54 @@
-import { Injectable, BadRequestException, Optional } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm';
 import { SessionService } from '../session/session.service';
+import { EngineRegistry } from '../../engine/engine-registry.service';
+import { MessageProjector } from '../session/message-projector.service';
 import { SendTextMessageDto, SendMediaMessageDto, SendAudioMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
 import { assertBase64WithinMediaCap, stripBase64DataUri } from './media-cap.util';
 import { MediaInput, IWhatsAppEngine, MessageResult } from '../../engine/interfaces/whatsapp-engine.interface';
 import { Message, MessageDirection, MessageStatus } from './entities/message.entity';
 import { HookManager, applySendingGate } from '../../core/hooks';
+import { SendPacingService, countsTowardSendBreaker } from './send-pacing.service';
 import { TemplateService } from '../template/template.service';
 import { renderTemplate } from '../../common/utils/template-render';
 import { createLogger } from '../../common/services/logger.service';
 import { SsrfBlockedError, SSRF_BLOCKED_CLIENT_MESSAGE } from '../../common/security/ssrf-guard';
-import { userPart } from '../../engine/identity/wa-id';
+import { parseWaId } from '../../engine/identity/wa-id';
 import { resolveFeatureFlags } from '../../config/feature-flags';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
 import { isUniqueConstraintError } from '../../common/utils/unique-constraint.util';
+import { ChatMediaArchiveService } from '../chat-media/chat-media-archive.service';
+import { StorageService, isMissingObjectError } from '../../common/storage/storage.service';
 
 export interface GetMessagesOptions {
   chatId?: string;
-  /** Filter by sender. A phone matches stored `@c.us`/`@s.whatsapp.net` ids AND any lid resolving to it. */
+  /** Filter by sender. A phone matches stored `@c.us`/`@s.whatsapp.net` ids AND any lid resolving to it. Group messages match on `author` (the real sender) as well as `from` (which holds the group JID). */
   from?: string;
   limit?: number;
   offset?: number;
+}
+
+/** Default cap on a rendered template's final text; overridable via TEMPLATE_RENDER_MAX_CHARS. */
+export const DEFAULT_TEMPLATE_RENDER_MAX_CHARS = 64 * 1024;
+
+/** Pin window applied when the caller does not choose one — WhatsApp's own default of 24h. */
+export const DEFAULT_PIN_DURATION_SECONDS = 86400;
+
+/**
+ * Mimetypes an archived chat-media file may be served as. Everything else — documents, and notably
+ * `image/svg+xml`, which is scriptable despite the `image/` prefix — is served as inert
+ * octet-stream so the media endpoint cannot host active content on the API origin.
+ */
+const INERT_MEDIA_MIMETYPE =
+  /^(image\/(jpeg|png|gif|webp|bmp)|video\/(mp4|webm|quicktime|3gpp)|audio\/(mpeg|mp4|ogg|aac|wav|webm))(;|$)/;
+
+/** The declared mimetype when it is safe to echo back, else inert octet-stream. */
+function inertMimetype(mimetype: string): string {
+  return INERT_MEDIA_MIMETYPE.test(mimetype) ? mimetype : 'application/octet-stream';
 }
 
 /**
@@ -50,14 +74,30 @@ export class MessageService {
     @InjectRepository(Message, 'data')
     private readonly messageRepository: Repository<Message>,
     private readonly sessionService: SessionService,
+    private readonly engines: EngineRegistry,
+    private readonly messageProjector: MessageProjector,
     private readonly hookManager: HookManager,
     private readonly templateService: TemplateService,
     private readonly lidMappingStore: LidMappingStoreService,
+    // Required, not @Optional: a missing pacing service would silently mean "no pacing", which is
+    // the one failure mode this feature must not have. The service itself no-ops when disabled.
+    private readonly pacing: SendPacingService,
     @Optional()
     private readonly configService?: ConfigService,
+    // Optional so the existing standalone constructions keep working; absent means the archive
+    // read endpoint reports "nothing archived", which is also what a disabled archive reports.
+    @Optional()
+    private readonly chatMediaArchive?: ChatMediaArchiveService,
+    @Optional()
+    private readonly storageService?: StorageService,
   ) {}
 
   async sendText(sessionId: string, dto: SendTextMessageDto): Promise<MessageResponseDto> {
+    // Asking to suppress the preview AND to attach one is a contradiction, and guessing which half
+    // the caller meant would send a message they did not ask for either way.
+    if (dto.linkPreview === false && dto.customLinkPreview) {
+      throw new BadRequestException('linkPreview: false cannot be combined with customLinkPreview');
+    }
     const finalDto = await this.applySendingGate(sessionId, 'text', dto);
 
     const engine = this.getEngine(sessionId);
@@ -74,18 +114,30 @@ export class MessageService {
 
     let result: MessageResult;
     try {
-      // Keep the 2-arg call shape for plain sends; only pass mentions when the caller supplied any.
-      result = finalDto.mentions?.length
-        ? await engine.sendTextMessage(finalDto.chatId, finalDto.text, finalDto.mentions)
-        : await engine.sendTextMessage(finalDto.chatId, finalDto.text);
+      // The call is widened ONLY as far as the caller actually asked. A send with neither mentions
+      // nor a preview choice keeps its two-argument shape, and one with mentions alone keeps its
+      // three — trailing `undefined`s would be harmless to the engines but would rewrite the call
+      // shape of every existing send for no behavioural gain.
+      const { linkPreview, customLinkPreview } = finalDto;
+      if (linkPreview !== undefined || customLinkPreview) {
+        result = await engine.sendTextMessage(finalDto.chatId, finalDto.text, finalDto.mentions, {
+          ...(linkPreview === undefined ? {} : { linkPreview }),
+          ...(customLinkPreview ? { customPreview: customLinkPreview } : {}),
+        });
+      } else if (finalDto.mentions?.length) {
+        result = await engine.sendTextMessage(finalDto.chatId, finalDto.text, finalDto.mentions);
+      } else {
+        result = await engine.sendTextMessage(finalDto.chatId, finalDto.text);
+      }
     } catch (error) {
       // The SEND itself failed — mark FAILED + fire message:failed (a post-send persistence fault is
       // handled separately by persistSentState and must NOT land here).
       return this.failSend(sessionId, 'text', message, finalDto, error);
     }
 
-    // Note: the `message:sent` hook is emitted solely by SessionService.onMessageCreate (engine
-    // `message_create`) with a consistent IncomingMessage payload for ALL sends (text, media,
+    // Note: the `message:sent` hook is emitted solely by the onMessageCreate wiring in
+    // SessionEngineLifecycle (engine `message_create`, handled by MessageProjector) with a
+    // consistent IncomingMessage payload for ALL sends (text, media,
     // and phone-composed), so it is intentionally not fired here to avoid a double dispatch.
     return this.persistSentState(message, result);
   }
@@ -97,7 +149,18 @@ export class MessageService {
    * reply/forward) and edit — passes through the same moderation chokepoint, instead of only
    * `sendText`. The implementation is shared with StatusService via core/hooks/sending-gate.
    */
-  private applySendingGate<T extends object>(sessionId: string, type: string, input: T): Promise<T> {
+  private async applySendingGate<T extends object>(sessionId: string, type: string, input: T): Promise<T> {
+    // Pacing runs BEFORE the plugin gate, so a send that policy forbids never reaches a plugin at
+    // all — plugins should not be asked to moderate, or given the chance to rewrite, traffic that is
+    // not going to be sent. The consequence is deliberate and documented in the hook contract: a
+    // paced-out send fires no `message:sending`, so a plugin cannot observe it. Refusals are a 429
+    // carrying `code: SEND_PACING_LIMITED`; a plugin veto stays a 400.
+    // Every gated sender's DTO addresses its destination as `chatId` except forward, which uses
+    // `toChatId` — without the fallback a forward skipped the cold-reachout gate entirely, while
+    // its persisted row still drained the cold budget. Edit carries a chatId too; the edited
+    // message's own row already makes that chat warm, so the gate is a no-op there.
+    const target = input as { chatId?: string; toChatId?: string };
+    await this.pacing.assertSendAllowed(sessionId, target.chatId ?? target.toChatId);
     return applySendingGate(this.hookManager, sessionId, type, input, 'MessageService');
   }
 
@@ -115,6 +178,13 @@ export class MessageService {
     input: unknown,
     error: unknown,
   ): Promise<never> {
+    // Only failures that say something about the account's standing feed the breaker: adapters also
+    // raise client-fault and engine-state errors from inside this call (a blocked media URL, an
+    // unsupported capability, a disconnected socket), and counting those let a client sending bad
+    // requests trip the breaker on a healthy session.
+    if (countsTowardSendBreaker(error)) {
+      this.pacing.recordSendFailure(sessionId);
+    }
     await this.saveFailedMessage(message);
     // Sanitize the hook payload: an SSRF block's raw .message names the resolved internal address
     // (a recon/DNS-rebind oracle) — the client-facing throw below already maps it to a generic
@@ -141,6 +211,10 @@ export class MessageService {
    * existing {@link sendText} path so plugin hooks, persistence, and status
    * tracking are reused. Throws NotFoundException when the template cannot be
    * resolved by id or name.
+   *
+   * The FINAL rendered text is capped at template.renderMaxChars (default 64 KiB): caller-supplied
+   * variables can inflate a small template unboundedly, so an over-cap render is rejected with a
+   * 400 naming the limit rather than truncated silently or pushed to the engine/DB as-is.
    */
   async sendTemplate(sessionId: string, dto: SendTemplateMessageDto): Promise<MessageResponseDto> {
     const template = await this.templateService.resolve(sessionId, {
@@ -153,6 +227,15 @@ export class MessageService {
       .filter((segment): segment is string => segment != null && segment.length > 0)
       .map(segment => renderTemplate(segment, vars));
     const text = segments.join('\n\n');
+
+    const maxChars =
+      this.configService?.get<number>('template.renderMaxChars', DEFAULT_TEMPLATE_RENDER_MAX_CHARS) ??
+      DEFAULT_TEMPLATE_RENDER_MAX_CHARS;
+    if (text.length > maxChars) {
+      throw new BadRequestException(
+        `Rendered template is ${text.length} characters, over the ${maxChars}-character limit`,
+      );
+    }
 
     return this.sendText(sessionId, { chatId: dto.chatId, text });
   }
@@ -296,7 +379,17 @@ export class MessageService {
       // Resolve the filter through the lid->phone table so a phone matches not just the stored
       // `<phone>@c.us` id but also any lid that resolves to the same person - turning the prior
       // silent miss (a lid-stored author vs a phone filter) into a hit.
-      query.andWhere('message.from IN (:...froms)', { froms: this.resolveJidCandidates(from) });
+      // A group message stores the real sender in `author` (`from` holds the group JID), so match
+      // BOTH columns against the same candidate set or the filter skips every group message the
+      // person wrote. Query plan: neither `from` nor `author` is indexed - the predicate applies
+      // within the (sessionId, createdAt)-narrowed scan exactly as the from-only filter did, so the
+      // OR costs nothing the old plan didn't already pay. No new index: per-session narrowing
+      // dominates selectivity and a single btree cannot serve an OR across two columns anyway.
+      const froms = this.resolveJidCandidates(from);
+      query.andWhere('(message.from IN (:...froms) OR message.author IN (:...authorFroms))', {
+        froms,
+        authorFroms: froms,
+      });
     }
 
     const [messages, total] = await query.getManyAndCount();
@@ -304,12 +397,32 @@ export class MessageService {
   }
 
   /**
-   * Expand a JID filter into every stored id that refers to the same chat/person: the literal input (so
-   * an exact group/lid filter still matches), the user-part in both user dialects (`@c.us` /
+   * Expand a user JID filter into every stored id that refers to the same person: the literal input
+   * (so an exact lid filter still matches), the user-part in both user dialects (`@c.us` /
    * `@s.whatsapp.net`), and every lid the resolution table maps to that phone.
+   *
+   * Scoped by chat kind. For a non-user kind (group/status/newsletter/broadcast) the stored id can
+   * only ever be the literal JID, so no candidates are generated: expanding a group or channel id's
+   * digits into the user dialects (or probing the lid table with them) could mis-resolve the filter
+   * onto an unrelated entity whose phone digits happen to match — fail closed on the literal id.
+   * A `@lid` input forward-resolves to its phone instead of minting `<lid-digits>@c.us` (the lid's
+   * digits are NOT a phone), so rows stored under the resolved form still match a raw-lid filter.
    */
   private resolveJidCandidates(value: string): string[] {
-    const phone = userPart(value);
+    const parsed = parseWaId(value);
+    if (parsed.kind !== 'user' && parsed.kind !== 'lid' && parsed.kind !== 'unknown') {
+      return [value];
+    }
+    if (parsed.kind === 'lid') {
+      const candidates = new Set<string>([value]);
+      const resolved = this.lidMappingStore.getCached(parsed.userPart);
+      if (resolved) {
+        candidates.add(`${resolved}@c.us`);
+        candidates.add(`${resolved}@s.whatsapp.net`);
+      }
+      return [...candidates];
+    }
+    const phone = parsed.userPart;
     const candidates = new Set<string>([value, `${phone}@c.us`, `${phone}@s.whatsapp.net`]);
     for (const lid of this.lidMappingStore.lidsForPhone(phone)) {
       candidates.add(`${lid}@lid`);
@@ -536,12 +649,20 @@ export class MessageService {
       metadata: data.metadata,
     });
     const saved = await this.messageRepository.save(message);
-    // Fire-and-forget: a plugin handler must never break the send path. The built-in FTS search provider
-    // is DB-synced and does NOT consume this; it exists for plugin providers (Spec 2) + general use.
-    void this.hookManager
-      .execute('message:persisted', { sessionId, message: saved }, { sessionId, source: 'MessageService' })
-      .catch(() => undefined);
+    this.emitPersisted(sessionId, saved);
     return saved;
+  }
+
+  // Fire-and-forget: a plugin handler must never break the send path. The built-in FTS search provider
+  // is DB-synced and does NOT consume this; it exists for plugin providers (Spec 2) + general use.
+  // Emitted for EVERY persisted state of an outbound row — the initial PENDING write AND each later
+  // transition (SENT / FAILED / merge) — so a provider's copy never stays stuck at PENDING (#906).
+  // The payload is a shallow snapshot: the same entity instance is mutated as the send progresses
+  // (PENDING → SENT/FAILED), and fire-and-forget execution must still see the state at emission time.
+  private emitPersisted(sessionId: string, message: Message): void {
+    void this.hookManager
+      .execute('message:persisted', { sessionId, message: { ...message } }, { sessionId, source: 'MessageService' })
+      .catch(() => undefined);
   }
 
   /**
@@ -556,6 +677,8 @@ export class MessageService {
     }
     message.status = MessageStatus.FAILED;
     await this.messageRepository.save(message);
+    // Reconcile the earlier PENDING emission (#906): a provider must see the terminal FAILED state.
+    this.emitPersisted(message.sessionId, message);
   }
 
   /**
@@ -568,11 +691,16 @@ export class MessageService {
     // A send whose engine couldn't read the sent message's id back reports an empty id — a forward that
     // can't recover the copy, or a WhatsApp Web build that renamed the id field out from under the
     // engine. Leave waMessageId unset (NULL) so no ack mis-matches it.
+    // The engine accepted the message, so whatever streak the breaker was tracking is over. Recorded
+    // here rather than at each call site for the same reason failSend is: one funnel, twelve senders.
+    this.pacing.recordSendSuccess(message.sessionId);
     if (result.id) message.waMessageId = result.id;
     message.status = MessageStatus.SENT;
     message.timestamp = result.timestamp;
     try {
       await this.messageRepository.save(message);
+      // Reconcile the earlier PENDING emission with the finalized row (#906).
+      this.emitPersisted(message.sessionId, message);
     } catch (persistError) {
       if (result.id && isUniqueConstraintError(persistError)) {
         // The engine's own-send echo (onMessageCreate) won the race and already persisted a row with
@@ -598,6 +726,19 @@ export class MessageService {
             }),
           );
         await this.messageRepository.delete({ id: message.id }).catch(() => undefined);
+        // Reconcile provider indexes (#906): upsert the surviving echo row (now carrying our SENT
+        // state + media) and drop the ghost PENDING document this redundant row produced earlier.
+        const surviving = await this.messageRepository
+          .findOne({ where: { sessionId: message.sessionId, waMessageId: result.id } })
+          .catch(() => null);
+        if (surviving) this.emitPersisted(message.sessionId, surviving);
+        void this.hookManager
+          .execute(
+            'message:deleted',
+            { sessionId: message.sessionId, message: { ...message } },
+            { sessionId: message.sessionId, source: 'MessageService' },
+          )
+          .catch(() => undefined);
       } else {
         this.logger.warn(`Persisting SENT state failed after a successful send (id=${result.id})`, {
           error: persistError instanceof Error ? persistError.message : String(persistError),
@@ -619,6 +760,36 @@ export class MessageService {
     return engine.getMessageReactions(chatId, messageId);
   }
 
+  /**
+   * Read a message's archived media back out of the file store.
+   *
+   * Unlike status media (only ever an image or video), chat media includes documents a sender chose
+   * the type of — so the declared mimetype is echoed back only when it is inert, and the caller
+   * serves the result as an attachment regardless. Both matter: an allow-list alone would still let
+   * `image/svg+xml` through as active content on the API origin.
+   */
+  async getChatMedia(
+    sessionId: string,
+    chatId: string,
+    messageId: string,
+  ): Promise<{ buffer: Buffer; mimetype: string }> {
+    const media = await this.chatMediaArchive?.getMedia(sessionId, chatId, messageId);
+    if (!media || !this.storageService) {
+      throw new NotFoundException('No archived media for this message');
+    }
+    try {
+      const buffer = await this.storageService.getFile(media.path);
+      return { buffer, mimetype: inertMimetype(media.mimetype) };
+    } catch (error) {
+      // The row outlived its file: the retention purge (or a concurrent delete) removed it between
+      // the DB read and this read. That's "gone", not a server fault — surface a 404.
+      if (isMissingObjectError(error)) {
+        throw new NotFoundException('No archived media for this message');
+      }
+      throw error;
+    }
+  }
+
   /** Maximum messages a single getChatHistory call may request from the engine. */
   private static readonly MAX_CHAT_HISTORY_LIMIT = 100;
 
@@ -634,15 +805,69 @@ export class MessageService {
    * engine to fetch an unbounded number of messages. When `deep` is true the ceiling is raised to 2000
    * (for reaching weeks/months back on whatsapp-web.js, which can load earlier messages on demand) and
    * media is forced off — downloading base64 for up to 2000 messages would be an enormous, slow payload.
+   *
+   * An optional `signal` (HTTP client disconnect) is threaded to the engine, which checks it between
+   * media downloads. Callers without cancellation keep the exact three-argument engine call shape.
    */
-  async getChatHistory(sessionId: string, chatId: string, limit = 50, includeMedia = false, deep = false) {
+  async getChatHistory(
+    sessionId: string,
+    chatId: string,
+    limit = 50,
+    includeMedia = false,
+    deep = false,
+    signal?: AbortSignal,
+  ) {
     const engine = this.getEngine(sessionId);
     const ceiling = deep ? MessageService.MAX_DEEP_CHAT_HISTORY_LIMIT : MessageService.MAX_CHAT_HISTORY_LIMIT;
     const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), ceiling) : 50;
-    return engine.getChatHistory(chatId, safeLimit, deep ? false : includeMedia);
+    const media = deep ? false : includeMedia;
+    return signal
+      ? engine.getChatHistory(chatId, safeLimit, media, undefined, signal)
+      : engine.getChatHistory(chatId, safeLimit, media);
   }
 
   // ========== Delete Message ==========
+
+  /**
+   * Pin a message for a bounded window. Nothing is persisted locally: a pin is chat state owned by
+   * WhatsApp, not a property of our message row, and it expires on WhatsApp's clock — a mirrored
+   * copy here would silently go stale.
+   */
+  async pinMessage(sessionId: string, dto: { chatId: string; messageId: string; durationSeconds?: number }) {
+    const engine = this.getEngine(sessionId);
+    await engine.pinMessage(dto.chatId, dto.messageId, dto.durationSeconds ?? DEFAULT_PIN_DURATION_SECONDS);
+    return { success: true };
+  }
+
+  async unpinMessage(sessionId: string, dto: { chatId: string; messageId: string }) {
+    const engine = this.getEngine(sessionId);
+    await engine.unpinMessage(dto.chatId, dto.messageId);
+    return { success: true };
+  }
+
+  /**
+   * Star or unstar a message. Like a pin, this is WhatsApp-owned state and is not mirrored locally
+   * — but unlike a pin it is private to the account and never expires.
+   *
+   * Best-effort on whatsapp-web.js: its star/unstar resolve void and silently do nothing when
+   * WhatsApp declines the message, so a 200 here means the instruction was delivered, not that the
+   * star is definitely set.
+   */
+  async starMessage(sessionId: string, dto: { chatId: string; messageId: string; star: boolean }) {
+    const engine = this.getEngine(sessionId);
+    await engine.starMessage(dto.chatId, dto.messageId, dto.star);
+    return { success: true };
+  }
+
+  /**
+   * Cast a vote on a poll. Not supported on the Baileys engine, which surfaces as a 501 from the
+   * adapter. `options` are option texts — see the engine interface for why there are no ids.
+   */
+  async votePoll(sessionId: string, dto: { chatId: string; pollMessageId: string; options: string[] }) {
+    const engine = this.getEngine(sessionId);
+    await engine.votePoll(dto.chatId, dto.pollMessageId, dto.options);
+    return { success: true };
+  }
 
   async deleteMessage(
     sessionId: string,
@@ -676,16 +901,15 @@ export class MessageService {
     // Best-effort: reflect the new body in the stored copy (mirrors deleteMessage's revoked flag),
     // serialized with the inbound edit/reaction writers through the session's per-message mutation
     // queue. A missing row must not fail the request — the engine edit already succeeded.
-    await this.sessionService.recordOutboundMessageEdit(sessionId, finalDto.messageId, finalDto.body);
+    await this.messageProjector.recordOutboundMessageEdit(sessionId, finalDto.messageId, finalDto.body);
     return { messageId: result.id, timestamp: result.timestamp };
   }
 
   private getEngine(sessionId: string) {
-    const engine = this.sessionService.getEngine(sessionId);
-    if (!engine) {
-      throw new BadRequestException(`Session '${sessionId}' is not active. Start the session first.`);
-    }
-    return engine;
+    return this.engines.require(
+      sessionId,
+      () => new BadRequestException(`Session '${sessionId}' is not active. Start the session first.`),
+    );
   }
 
   /**

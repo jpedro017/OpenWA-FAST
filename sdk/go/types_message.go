@@ -1,6 +1,9 @@
 package openwa
 
-import "net/url"
+import (
+	"encoding/json"
+	"net/url"
+)
 
 // MessageResponse is the acknowledgement for a sent message.
 type MessageResponse struct {
@@ -12,6 +15,17 @@ type MessageResponse struct {
 type SendTextRequest struct {
 	ChatID string `json:"chatId"`
 	Text   string `json:"text"`
+	// Mentions lists WIDs to @mention (e.g. ["62811@c.us"]). The text must
+	// also contain the @<number> token.
+	Mentions []string `json:"mentions,omitempty"`
+	// LinkPreview controls the URL preview. False suppresses it on both engines. Otherwise the
+	// engines differ: whatsapp-web.js builds one in-page by default, while on Baileys a preview is
+	// OPT-IN — it needs true, because generating one is a blocking outbound fetch per URL.
+	LinkPreview *bool `json:"linkPreview,omitempty"`
+	// CustomLinkPreview attaches a preview you supply instead of one fetched from the URL. Nothing is
+	// fetched, so it works even for a URL the gateway cannot reach. Baileys only — whatsapp-web.js
+	// takes a boolean and answers 501. Cannot be combined with LinkPreview=false.
+	CustomLinkPreview *CustomLinkPreview `json:"customLinkPreview,omitempty"`
 }
 
 // SendMediaRequest sends image/video/document/sticker media. Provide exactly
@@ -60,6 +74,17 @@ type SendTemplateRequest struct {
 	TemplateID   string            `json:"templateId,omitempty"`
 	TemplateName string            `json:"templateName,omitempty"`
 	Vars         map[string]string `json:"vars,omitempty"`
+}
+
+// SendPollRequest sends a native WhatsApp poll. Options holds the choices to
+// vote on (WhatsApp allows between 2 and 12).
+type SendPollRequest struct {
+	ChatID string `json:"chatId"`
+	// Name is the poll question / title (max 255 chars).
+	Name    string   `json:"name"`
+	Options []string `json:"options"`
+	// AllowMultipleAnswers lets voters pick several options (default single choice).
+	AllowMultipleAnswers *bool `json:"allowMultipleAnswers,omitempty"`
 }
 
 // ReplyMessageRequest replies to a quoted message.
@@ -304,4 +329,56 @@ type BatchStatusResponse struct {
 	Results     []BatchMessageResult `json:"results,omitempty"`
 	StartedAt   string               `json:"startedAt,omitempty"`
 	CompletedAt string               `json:"completedAt,omitempty"`
+}
+
+// MessageMedia is a message's archived media: the raw bytes plus the served
+// content type. Non-JSON on the wire, like StatusMedia.
+type MessageMedia struct {
+	Data        []byte
+	ContentType string
+}
+
+// PinMessageRequest pins a message in its chat. DurationSeconds must be 86400
+// (24h), 604800 (7d) or 2592000 (30d); omit it to take the server default of 24h.
+type PinMessageRequest struct {
+	ChatID          string `json:"chatId"`
+	MessageID       string `json:"messageId"`
+	DurationSeconds int    `json:"durationSeconds,omitempty"`
+}
+
+// UnpinMessageRequest removes a message's pin.
+type UnpinMessageRequest struct {
+	ChatID    string `json:"chatId"`
+	MessageID string `json:"messageId"`
+}
+
+// StarMessageRequest stars or unstars a message. Best-effort on whatsapp-web.js,
+// which silently ignores a message it will not star.
+type StarMessageRequest struct {
+	ChatID    string `json:"chatId"`
+	MessageID string `json:"messageId"`
+	Star      bool   `json:"star"`
+}
+
+// VotePollRequest casts a vote on a poll. Options are option TEXTS, not ids —
+// no engine surfaces stable per-option ids. An empty (or nil) slice clears the vote.
+type VotePollRequest struct {
+	ChatID        string   `json:"chatId"`
+	PollMessageID string   `json:"pollMessageId"`
+	Options       []string `json:"options"`
+}
+
+// MarshalJSON encodes a nil Options as `[]` rather than `null`.
+//
+// Clearing a vote is exactly the zero-value case, and the API requires the field to be an array:
+// `null` fails validation with a 400, so the one thing the zero value should express was the one
+// thing it could not. Omitting the field would fail the same way, which is why there is no
+// `omitempty` here.
+func (r VotePollRequest) MarshalJSON() ([]byte, error) {
+	type alias VotePollRequest
+	out := alias(r)
+	if out.Options == nil {
+		out.Options = []string{}
+	}
+	return json.Marshal(out)
 }

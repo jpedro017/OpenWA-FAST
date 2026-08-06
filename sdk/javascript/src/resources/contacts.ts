@@ -8,10 +8,12 @@
 import { encodeSegment } from '../http.js';
 import type { OpenWAClient } from '../client.js';
 import type {
+  UpsertContactRequest,
   CheckNumberResponse,
   ContactPhoneResponse,
   ContactRecord,
   ProfilePictureResponse,
+  ProfilePicturesResponse,
   SuccessResult,
 } from '../types.js';
 
@@ -56,6 +58,18 @@ export class ContactsResource {
     });
   }
 
+  /**
+   * Batch-resolve profile picture URLs for up to 50 contacts in one request.
+   * Returns a map of contact id → URL (null when a lookup fails).
+   */
+  profilePictures(sessionId: string, ids: string[]): Promise<ProfilePicturesResponse> {
+    return this.client.request<ProfilePicturesResponse>({
+      method: 'GET',
+      path: `/api/sessions/${encodeSegment(sessionId)}/contacts/profile-pictures`,
+      query: { ids: ids.join(',') },
+    });
+  }
+
   /** Resolve a contact id (e.g. a `@lid`) to a phone number. */
   phone(sessionId: string, contactId: string): Promise<ContactPhoneResponse> {
     return this.client.request<ContactPhoneResponse>({
@@ -69,6 +83,26 @@ export class ContactsResource {
     return this.client.request<SuccessResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/contacts/${encodeSegment(contactId)}/block`,
+    });
+  }
+
+  /**
+   * Save a contact to the account's addressbook, or edit an existing entry.
+   * Requires an OPERATOR-level key.
+   */
+  upsert(sessionId: string, contactId: string, body: UpsertContactRequest): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'PUT',
+      path: `/api/sessions/${encodeSegment(sessionId)}/contacts/${encodeSegment(contactId)}`,
+      body,
+    });
+  }
+
+  /** Remove a contact from the account's addressbook. Requires an OPERATOR-level key. */
+  delete(sessionId: string, contactId: string): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'DELETE',
+      path: `/api/sessions/${encodeSegment(sessionId)}/contacts/${encodeSegment(contactId)}`,
     });
   }
 

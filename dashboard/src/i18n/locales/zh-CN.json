@@ -85,6 +85,7 @@
     "empty": "没有聊天",
     "noMessageYet": "暂无消息",
     "unreadBadge": "{{count}} 条未读消息",
+    "unreadBadge_other": "{{count}} 条未读消息",
     "loadingMessages": "正在加载消息...",
     "noMessagesInChat": "暂无消息。发送第一条消息即可开始！",
     "downloadDocument": "下载文档",
@@ -123,14 +124,32 @@
       "status": "状态"
     },
     "status": {
-      "placeholderTitle": "状态",
-      "placeholderDesc": "单个联系人的状态更新将在未来版本中推出。"
+      "itemCount": "{{count}} 条更新",
+      "itemCount_other": "{{count}} 条更新",
+      "empty": "没有联系人有活跃的状态。",
+      "loadError": "无法加载状态。",
+      "mediaUnavailable": "媒体不可用",
+      "compose": "发布状态",
+      "composeText": "文字",
+      "composeImage": "图片",
+      "recipients": "谁可以看到",
+      "recipientsHint": "Baileys 需要收件人列表；whatsapp-web.js 使用您的状态隐私受众。",
+      "noContacts": "未找到联系人",
+      "caption": "说明文字",
+      "backgroundColor": "背景颜色",
+      "font": "字体",
+      "fontDefault": "默认",
+      "orLabel": "或",
+      "post": "发布",
+      "posted": "状态已发布",
+      "postFailed": "无法发布状态"
     },
     "channels": {
       "notSupported": "Baileys 引擎不支持频道。",
       "empty": "你尚未订阅任何频道。",
       "notReady": "会话尚未就绪。",
-      "subscribers": "{{count}} 位订阅者"
+      "subscribers": "{{count}} 位订阅者",
+      "subscribers_other": "{{count}} 位订阅者"
     },
     "errors": {
       "loadSessions": "加载会话失败",
@@ -208,7 +227,10 @@
     "connecting": "正在连接...",
     "qr_ready": "扫描 QR",
     "ready": "已连接",
-    "disconnected": "已断开"
+    "disconnected": "已断开",
+    "action_required": "需要操作",
+    "failed": "失败",
+    "authenticating": "正在验证..."
   },
   "sessions": {
     "title": "会话",
@@ -275,6 +297,7 @@
       "start": "启动",
       "stop": "停止",
       "reconnect": "重新连接",
+      "unlink": "取消关联",
       "delete": "删除",
       "killStuck": "终止卡死会话"
     },
@@ -283,6 +306,8 @@
       "readyDesc": "WhatsApp 会话现已连接",
       "disconnectedTitle": "会话已断开",
       "disconnectedDesc": "WhatsApp 会话已断开连接",
+      "actionRequiredTitle": "需要操作",
+      "actionRequiredDesc": "此会话需要您的关注。打开会话以查看需要做什么。",
       "failedTitle": "会话失败",
       "failedDesc": "WhatsApp 会话启动失败。打开该会话以查看原因。"
     },
@@ -290,7 +315,8 @@
       "phone": "电话",
       "sessionId": "会话 ID",
       "lastActive": "上次活跃",
-      "error": "错误"
+      "error": "错误",
+      "restriction": "限制"
     },
     "forceKill": {
       "title": "终止卡死的会话",
@@ -301,6 +327,18 @@
       "success": "会话已被强制终止。您现在可以重新启动它。",
       "failedTitle": "强制终止失败",
       "failed": "强制终止会话失败。"
+    },
+    "unlink": {
+      "title": "取消关联设备",
+      "message": "要将会话 <strong>\"{{name}}\"</strong> 从 WhatsApp 账号取消关联吗？",
+      "warning": "WhatsApp 会将此设备从账号的已关联设备列表中移除，会话将停止。重新连接需要重新扫描二维码或使用配对码。如需同时清除所有本地数据，请随后删除该会话。",
+      "confirm": "取消关联",
+      "successTitle": "设备已取消关联",
+      "success": "取消关联已完成：设备已登出，本地会话凭据已清除。重新连接需要新的二维码扫描或配对码。",
+      "failedTitle": "取消关联失败",
+      "failed": "无法取消关联该会话。",
+      "incompleteTitle": "取消关联未完成",
+      "incomplete": "会话已在本地停止，但登出操作未完成——设备可能仍处于关联状态。请启动会话后重新尝试取消关联。"
     },
     "pairing": {
       "tabQr": "QR 码",
@@ -319,6 +357,16 @@
       "step3": "<strong>3.</strong> 点击<strong>关联设备</strong>，然后点击<strong>改用电话号码关联</strong>",
       "step4": "<strong>4.</strong> 在手机上输入上方显示的 8 位字符配对码",
       "waitingConnection": "正在等待您的手机完成关联…"
+    },
+    "start": {
+      "teardownPendingTitle": "会话启动中",
+      "teardownPending": "此会话的凭据拆除仍在处理中。请稍候再试。"
+    },
+    "restriction": {
+      "reachout_timelock": "新会话被阻止",
+      "tos_block": "被 WhatsApp 封禁",
+      "proxy_block": "连接被阻止",
+      "until": "至 {{date}}"
     }
   },
   "webhooks": {
@@ -338,6 +386,7 @@
       "title": "筛选条件（可选）",
       "hint": "仅当所有条件都匹配时才触发。适用于消息事件。",
       "badge": "{{count}} 个筛选条件",
+      "badge_other": "{{count}} 个筛选条件",
       "addCondition": "添加条件",
       "removeCondition": "移除条件",
       "caseSensitive": "区分大小写",
@@ -718,7 +767,8 @@
     "toasts": {
       "saveFailed": "保存失败"
     },
-    "envPinNote": "已由环境变量锁定 —— 此为当前运行值；在取消该变量之前，仪表盘的更改不会生效。",
+    "envPinNote": "已由环境变量 {{name}} 锁定 —— 此为当前运行值；在取消该变量之前，仪表盘的更改不会生效。",
+    "pendingRestartNote": "已保存，但尚未生效 —— 请重启服务器以应用此更改。",
     "migration": {
       "title": "请注意 —— 此操作将更改数据后端",
       "dbWarning": "新数据库将从空白状态开始。请立即（在仍使用旧数据库时）下载当前数据的备份，然后在重启后恢复。",
@@ -773,7 +823,12 @@
       "title": "安装插件",
       "hint": "上传打包为 .zip 的插件（包含 manifest.json）。启用后将在沙箱中运行。",
       "choose": "选择 .zip 文件…",
-      "tooLarge": "文件超过 5 MB 限制。"
+      "tooLarge": "文件超过 5 MB 限制。",
+      "catalogHint": "直接从 OpenWA 插件目录安装。.zip 文件由服务器通过 SSRF 防护获取，然后经过验证并在沙箱中运行。",
+      "catalogTeaser": "在找插件吗？",
+      "catalogTeaserSuffix": "浏览官方市场。",
+      "tabCatalog": "目录",
+      "tabUpload": "上传 .zip"
     },
     "toasts": {
       "errorTitle": "插件错误",
@@ -791,7 +846,8 @@
       "enableFailedTitle": "启用失败",
       "disableFailedTitle": "停用失败",
       "configRequiredTitle": "需要配置",
-      "configRequiredDesc": "启用前请填写必填项：{{fields}}"
+      "configRequiredDesc": "启用前请填写必填项：{{fields}}",
+      "updateFailed": "更新失败"
     },
     "sessions": {
       "activationTitle": "运行范围",
@@ -870,6 +926,17 @@
         "secretRegenerated": "密钥已重新生成",
         "actionFailed": "操作失败"
       }
+    },
+    "catalog": {
+      "empty": "目录中暂无插件。",
+      "install": "安装",
+      "installed": "已安装",
+      "noDownload": "该目录条目没有下载地址。",
+      "noMatch": "没有符合搜索条件的插件。",
+      "searchPlaceholder": "搜索插件…",
+      "update": "更新",
+      "updateAvailable": "有可用更新",
+      "updated": "插件已更新"
     }
   },
   "search": {

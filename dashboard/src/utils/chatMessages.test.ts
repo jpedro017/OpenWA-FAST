@@ -95,6 +95,7 @@ import {
   removeMessageById,
   findRevokedIndex,
   applyMessageEdit,
+  senderKey,
   type ChatMessageView,
 } from './chatMessages.ts';
 
@@ -281,4 +282,108 @@ test('applyMessageEdit is a referential no-op for an empty or unknown target id'
   const before = [msg({ id: 'm-1', body: 'old' })];
   assert.equal(applyMessageEdit(before, { messageId: '', body: 'new' }), before);
   assert.equal(applyMessageEdit(before, { messageId: 'missing', body: 'new' }), before);
+});
+
+test('mapEngineHistoryMessage: carries the group participant JID as author', () => {
+  const m = mapEngineHistoryMessage(hist({ author: '628111@c.us' }));
+  assert.equal(m.author, '628111@c.us');
+});
+
+test('mergeChatMessages: salvages author from the engine copy when the DB row predates the column', () => {
+  // A legacy DB row (no stable sender id) merged over an engine-history copy that has one must not
+  // lose it — that id is what keeps same-named participants in separate attribution runs.
+  const history = [mapEngineHistoryMessage(hist({ id: 'WA_S1', author: '628111@c.us' }))];
+  const rows = [db({ waMessageId: 'WA_S1', author: undefined })];
+  const merged = mergeChatMessages(rows, history);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].author, '628111@c.us');
+  // …while the rest of the winning DB row (authoritative status) is untouched.
+  assert.equal(merged[0].status, 'delivered');
+});
+
+test('mergeChatMessages: a DB-persisted author wins over the engine copy', () => {
+  const history = [mapEngineHistoryMessage(hist({ id: 'WA_S2', author: '628111@c.us' }))];
+  const rows = [db({ waMessageId: 'WA_S2', author: '628222@c.us' })];
+  assert.equal(mergeChatMessages(rows, history)[0].author, '628222@c.us');
+});
+
+test('mergeOrAppend: an author-less echo keeps the cached author', () => {
+  const list = [msg({ id: 'WA_E1', waMessageId: 'WA_E1', author: '628111@c.us' })];
+  const echo = msg({ id: 'WA_E1', waMessageId: 'WA_E1', author: undefined, body: 'echo' });
+  const out = mergeOrAppend(list, echo);
+  assert.equal(out[0].author, '628111@c.us');
+});
+
+test('senderKey prefers the participant JID and falls back to the display name', () => {
+  assert.equal(senderKey({ author: '628111@c.us', chatName: 'Alice' }), '628111@c.us');
+  assert.equal(senderKey({ chatName: 'Alice' }), 'Alice');
+  assert.equal(senderKey({}), undefined);
+});
+
+import { capMediaPayloads, MEDIA_PAYLOAD_CACHE_LIMIT } from './chatMessages.ts';
+
+const mediaMsg = (id: string, data?: string): ChatMessageView =>
+  msg({ id, type: 'image', metadata: { media: { mimetype: 'image/jpeg', filename: `${id}.jpg`, data } } });
+
+test('capMediaPayloads: under the limit the list is returned untouched (stable reference)', () => {
+  const list = [mediaMsg('m-1', 'AAA'), mediaMsg('m-2', 'BBB'), msg({ id: 'm-3' })];
+  assert.equal(capMediaPayloads(list), list);
+});
+
+test('the media cap covers the whole fetch window (no dead-end placeholder inside it)', () => {
+  // useChatMessages fetches a 100-message slice WITH media and caches it at staleTime: Infinity.
+  // A cap below the window strips payloads the user can scroll to, with no refetch path — the
+  // stripped rows render the 📎 placeholder forever even though the payload was fetched.
+  assert.ok(MEDIA_PAYLOAD_CACHE_LIMIT >= 100);
+});
+
+test('capMediaPayloads: past the limit the OLDEST payloads strip to the omitted marker, newest stay', () => {
+  // One over the cap, so exactly the oldest payload must go.
+  const list = Array.from({ length: MEDIA_PAYLOAD_CACHE_LIMIT + 1 }, (_, i) => mediaMsg(`m-${i}`, `PAYLOAD_${i}`));
+  const capped = capMediaPayloads(list);
+  const stripped = capped[0].metadata?.media;
+  assert.equal(stripped?.data, undefined);
+  assert.equal(stripped?.omitted, true); // renders the 📎 placeholder, not an empty bubble
+  assert.equal(stripped?.mimetype, 'image/jpeg'); // type/filename survive the strip
+  assert.equal(capped[1].metadata?.media?.data, 'PAYLOAD_1');
+  assert.equal(capped[MEDIA_PAYLOAD_CACHE_LIMIT].metadata?.media?.data, `PAYLOAD_${MEDIA_PAYLOAD_CACHE_LIMIT}`);
+  // The retained payload count is exactly the cap.
+  assert.equal(capped.filter(m => m.metadata?.media?.data).length, MEDIA_PAYLOAD_CACHE_LIMIT);
+  // Input is not mutated.
+  assert.equal(list[0].metadata?.media?.data, 'PAYLOAD_0');
+});
+
+test('capMediaPayloads: rows already carrying only the omitted marker are not counted as payloads', () => {
+  const omitted = mediaMsg('m-0', undefined);
+  omitted.metadata = { media: { mimetype: '', omitted: true } };
+  const list = [omitted, ...Array.from({ length: MEDIA_PAYLOAD_CACHE_LIMIT }, (_, i) => mediaMsg(`m-${i}`, 'X'))];
+  const capped = capMediaPayloads(list);
+  assert.equal(capped.filter(m => m.metadata?.media?.data).length, MEDIA_PAYLOAD_CACHE_LIMIT);
+  assert.equal(capped[0].metadata?.media?.omitted, true);
+});
+
+test('mergeOrAppend enforces the payload cap on a live media append', () => {
+  const list = Array.from({ length: MEDIA_PAYLOAD_CACHE_LIMIT }, (_, i) => mediaMsg(`m-${i}`, `PAYLOAD_${i}`));
+  const after = mergeOrAppend(list, mediaMsg('m-new', 'NEW'));
+  assert.equal(after.filter(m => m.metadata?.media?.data).length, MEDIA_PAYLOAD_CACHE_LIMIT);
+  assert.equal(after[0].metadata?.media?.data, undefined); // oldest stripped
+  assert.equal(after[0].metadata?.media?.omitted, true);
+  assert.equal(after[after.length - 1].metadata?.media?.data, 'NEW'); // fresh append keeps its payload
+});
+
+test('mergeChatMessages enforces the payload cap on the initial load', () => {
+  const rows = Array.from({ length: MEDIA_PAYLOAD_CACHE_LIMIT + 2 }, (_, i) =>
+    db({
+      id: `row-${i}`,
+      waMessageId: `WA_${i}`,
+      type: 'image',
+      timestamp: 1782053999 + i,
+      metadata: { media: { mimetype: 'image/jpeg', data: `DB_${i}` } },
+    }),
+  );
+  const merged = mergeChatMessages(rows, []);
+  assert.equal(merged.filter(m => m.metadata?.media?.data).length, MEDIA_PAYLOAD_CACHE_LIMIT);
+  assert.equal(merged[0].metadata?.media?.omitted, true);
+  assert.equal(merged[1].metadata?.media?.omitted, true);
+  assert.equal(merged[2].metadata?.media?.data, 'DB_2'); // newest MEDIA_PAYLOAD_CACHE_LIMIT survive
 });

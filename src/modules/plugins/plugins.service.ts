@@ -1,20 +1,14 @@
-import {
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-  ConflictException,
-  ForbiddenException,
-  HttpException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ConflictException, HttpException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PluginLoaderService, PluginStatus, resolvePluginMainPath } from '../../core/plugins';
+import { pluginUpdateBackupDirName, pluginUpdateStagingDirName } from '../../core/plugins';
 import type { PluginConfigSchema } from '../../core/plugins';
 import { PluginDto } from './dto/plugin.dto';
 import { redactSecretConfig, restoreSecretConfig } from './redact-config';
 import { parsePluginPackage } from './plugin-installer';
-import { fetchSafeBuffer } from './plugin-download';
+import { assertDownloadSha256, fetchSafeBuffer } from './plugin-download';
 import { annotateCatalog, CatalogEntry, CatalogPlugin } from './catalog';
 import { redactSsrfError } from '../../common/security/ssrf-guard';
 import { createLogger } from '../../common/services/logger.service';
@@ -157,7 +151,18 @@ export class PluginsService {
     const plugin = this.pluginLoader.getPlugin(id);
 
     if (!plugin) {
-      throw new NotFoundException(`Plugin ${id} not found`);
+      // Not loaded, but the registry may still hold its entry — and with it `enabledByOperator`, the
+      // standing instruction to enable it on every boot. A plugin whose code went missing (an
+      // interrupted update, a package directory outside the data volume) is exactly that case: there is
+      // no runtime to tear down, so `disablePlugin` can never run, and until now the operator had no way
+      // to withdraw the decision at all. `disable` expresses intent rather than performing a runtime
+      // operation, so honour it against the registry; reinstalling the code must not silently resurrect
+      // a plugin the operator switched off. A 404 now means only what it should: an id nobody knows.
+      if (!this.pluginLoader.getRegistryEntry(id)) {
+        throw new NotFoundException(`Plugin ${id} not found`);
+      }
+      this.pluginLoader.setOperatorEnabled(id, false);
+      return { success: true, message: `Plugin ${id} is not loaded; it will not be enabled on boot` };
     }
 
     if (plugin.status !== PluginStatus.ENABLED) {
@@ -179,20 +184,14 @@ export class PluginsService {
     }
   }
 
-  updateSessions(id: string, sessions: string[], allowedSessions?: string[] | null): PluginDto {
+  updateSessions(id: string, sessions: string[]): PluginDto {
     const plugin = this.pluginLoader.getPlugin(id);
     if (!plugin) {
       throw new NotFoundException(`Plugin ${id} not found`);
     }
-    // A session-restricted key (non-empty allowedSessions) may only activate the plugin for sessions
-    // in its own scope — never '*' (all) or another tenant's session. An unrestricted key (null/empty)
-    // is the normal dashboard/admin path and may activate for any session, including '*'.
-    if (allowedSessions && allowedSessions.length > 0) {
-      const outOfScope = sessions.filter(s => s === '*' || !allowedSessions.includes(s));
-      if (outOfScope.length > 0) {
-        throw new ForbiddenException(`API key not authorized for session(s): ${outOfScope.join(', ')}`);
-      }
-    }
+    // Full-replacement PUT: setPluginSessions overwrites the ENTIRE activeSessions array. The route
+    // is fenced with @RequireUnscopedKey, so only an unrestricted key can reach this — a scoped key
+    // must never be allowed to delete another tenant's activation by sending [] or its own session.
     try {
       this.pluginLoader.setPluginSessions(id, sessions);
     } catch (error) {
@@ -340,9 +339,13 @@ export class PluginsService {
   }
 
   /**
-   * Install a plugin from an HTTP(S) URL: download the .zip through the SSRF guard (host validated,
-   * connection pinned, redirects refused, size-capped), then run the exact same validate-write-load
-   * pipeline as an uploaded package. The downloaded buffer is treated as untrusted, identical to an upload.
+   * Install a plugin from an HTTPS URL: download the .zip through the SSRF guard (host validated,
+   * connection pinned, redirects followed with every hop re-validated through the guard and the
+   * chain capped at 5 hops, size-capped), then run the exact same validate-write-load
+   * pipeline as an uploaded package. The downloaded buffer is treated as untrusted, identical to an
+   * upload. When the URL pins a digest (`#sha256=<hex>` fragment — the only honored marker; query
+   * params are deliberately ignored, see plugin-download.ts), the bytes MUST match it: a mismatch
+   * means the package was substituted in transit and the install fails closed.
    */
   async installFromUrl(url: string): Promise<PluginDto> {
     const maxBytes = this.configService.get<number>('plugins.downloadMaxBytes') ?? 5 * 1024 * 1024;
@@ -352,6 +355,13 @@ export class PluginsService {
     } catch (error) {
       throw new BadRequestException(
         `Failed to download plugin from URL: ${redactSsrfError(error, logger, 'plugin download')}`,
+      );
+    }
+    try {
+      assertDownloadSha256(url, buffer);
+    } catch (error) {
+      throw new BadRequestException(
+        `Plugin download integrity check failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     // Peek the id (the SSRF download stays outside the lock) so the install — which writes the plugin
@@ -395,8 +405,14 @@ export class PluginsService {
   /**
    * Update an installed plugin in place from a validated package buffer, preserving operator config and
    * the enabled state. The package id must match the installed id. Config survives because `unloadPlugin`
-   * drops the plugin from memory but keeps its registry entry (config); `loadPlugin` re-reads it. The old
-   * directory is backed up and restored if the swap or reload of the new version fails, so a bad update
+   * drops the plugin from memory but keeps its registry entry (config); `loadPlugin` re-reads it.
+   *
+   * Crash-safety: the new tree is written to a staging sibling and validated BEFORE the running
+   * plugin is stopped, so a staging failure leaves the current install completely untouched. The
+   * swap itself is two renames (live → backup, staging → live); a process crash between them is
+   * reconciled at boot by the loader's interrupted-update recovery, which restores the backup when
+   * the live dir is missing — an interrupted update can no longer make the plugin silently vanish.
+   * If loading/enabling the new version fails, the backup is restored and reloaded, so a bad update
    * never leaves the plugin broken.
    */
   updatePackage(id: string, buffer: Buffer): Promise<PluginDto> {
@@ -419,23 +435,74 @@ export class PluginsService {
     }
 
     const wasEnabled = plugin.status === PluginStatus.ENABLED;
-    const dir = path.join(this.pluginLoader.getPluginsDir(), id);
-    // Dot-prefixed sibling inside pluginsDir: same filesystem (so the rename stays EXDEV-safe) but
-    // skipped by the loader's directory scan, so a crash mid-update can't leave it loaded as a duplicate.
-    const backup = path.join(this.pluginLoader.getPluginsDir(), `.${id}.bak`);
+    const pluginsDir = this.pluginLoader.getPluginsDir();
+    const dir = path.join(pluginsDir, id);
+    // Dot-prefixed siblings inside pluginsDir: same filesystem (so the renames stay EXDEV-safe) but
+    // skipped by the loader's directory scan, so a crash mid-update can't leave them loaded as a
+    // duplicate. The loader's boot-time recovery keys off these exact names.
+    const backup = path.join(pluginsDir, pluginUpdateBackupDirName(id));
+    const staging = path.join(pluginsDir, pluginUpdateStagingDirName(id));
 
-    // Stop the running plugin (terminates its sandbox worker) but keep its registry entry so config survives.
-    await this.pluginLoader.unloadPlugin(id);
-
-    fs.rmSync(backup, { recursive: true, force: true });
-    fs.renameSync(dir, backup);
-
+    // Stage the new tree BEFORE stopping the running plugin: any failure here (validation above,
+    // disk error below) leaves the current install completely untouched.
+    fs.rmSync(staging, { recursive: true, force: true });
     try {
       for (const entry of entries) {
-        const dest = path.join(dir, entry.relPath);
+        const dest = path.join(staging, entry.relPath);
         fs.mkdirSync(path.dirname(dest), { recursive: true });
         fs.writeFileSync(dest, entry.data);
       }
+    } catch (error) {
+      fs.rmSync(staging, { recursive: true, force: true });
+      throw new BadRequestException(
+        `Failed to stage plugin update: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    logger.log(`Plugin update staged: ${id} → v${manifest.version}`, {
+      pluginId: id,
+      version: manifest.version,
+      action: 'plugin_update_staged',
+    });
+
+    // Stop the running plugin (terminates its sandbox worker) but keep its registry entry so config
+    // survives, then swap the directories. Self-heal first: a previously interrupted swap may have
+    // left the live dir missing with only the backup remaining (normally reconciled at boot — do it
+    // here too so this update proceeds from the restored previous version).
+    await this.pluginLoader.unloadPlugin(id);
+    try {
+      if (!fs.existsSync(dir) && fs.existsSync(backup)) {
+        fs.renameSync(backup, dir);
+        logger.warn(`Restored plugin ${id} from its update backup before applying a new update`, {
+          pluginId: id,
+          action: 'plugin_update_backup_restored',
+        });
+      }
+      fs.rmSync(backup, { recursive: true, force: true });
+      fs.renameSync(dir, backup);
+      fs.renameSync(staging, dir);
+    } catch (error) {
+      // A swap-step failure must leave a loadable install behind: put the backup back when the live
+      // dir is missing, drop the staging tree, and bring the previous version back up (best-effort).
+      if (!fs.existsSync(dir) && fs.existsSync(backup)) {
+        fs.renameSync(backup, dir);
+      }
+      fs.rmSync(staging, { recursive: true, force: true });
+      try {
+        this.pluginLoader.loadPlugin(dir);
+        if (wasEnabled) await this.pluginLoader.enablePlugin(id);
+      } catch {
+        /* best-effort restore; surface the original failure below */
+      }
+      throw new BadRequestException(
+        `Failed to update plugin: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    logger.log(`Plugin update swapped in: ${id} → v${manifest.version}`, {
+      pluginId: id,
+      action: 'plugin_update_swapped',
+    });
+
+    try {
       // ctx.storage files share the package directory under shipped defaults. Restore service-owned
       // state from the backup unless the new package explicitly supplied that exact path. Copy (rather
       // than move) so the rollback below still has a complete original directory.
@@ -453,6 +520,11 @@ export class PluginsService {
         await this.pluginLoader.enablePlugin(id);
       }
       fs.rmSync(backup, { recursive: true, force: true });
+      logger.log(`Plugin updated: ${id} → v${manifest.version}`, {
+        pluginId: id,
+        version: manifest.version,
+        action: 'plugin_update_applied',
+      });
     } catch (error) {
       // Roll back to the previous version: restore the backed-up directory and reload it.
       // The failed forward path may have left the NEW version in the loader map (loadPlugin
@@ -460,6 +532,11 @@ export class PluginsService {
       // otherwise the restore's loadPlugin() hits the "already loaded" guard and the runtime stays
       // desynced from disk (new manifest in memory, old files on disk). unloadPlugin throws when
       // nothing is loaded (the loadPlugin-itself-failed case), hence the catch.
+      logger.warn(`Plugin update failed for ${id}; rolling back to the previous version`, {
+        pluginId: id,
+        action: 'plugin_update_rollback',
+        error: error instanceof Error ? error.message : String(error),
+      });
       await this.pluginLoader.unloadPlugin(id).catch(() => undefined);
       fs.rmSync(dir, { recursive: true, force: true });
       fs.renameSync(backup, dir);
@@ -487,6 +564,13 @@ export class PluginsService {
     } catch (error) {
       throw new BadRequestException(
         `Failed to download plugin from URL: ${redactSsrfError(error, logger, 'plugin download')}`,
+      );
+    }
+    try {
+      assertDownloadSha256(url, buffer);
+    } catch (error) {
+      throw new BadRequestException(
+        `Plugin download integrity check failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     return this.updatePackage(id, buffer);

@@ -61,11 +61,11 @@ curl -X POST http://localhost:2785/api/sessions/{sessionId}/pairing-code \
 
 Example values:
 
-| Country | Example |
-| ------- | ------- |
-| Indonesia | `628123456789` |
-| Spain | `34612345678` |
-| United States | `14155552671` |
+| Country       | Example        |
+| ------------- | -------------- |
+| Indonesia     | `628123456789` |
+| Spain         | `34612345678`  |
+| United States | `14155552671`  |
 
 ## Response
 

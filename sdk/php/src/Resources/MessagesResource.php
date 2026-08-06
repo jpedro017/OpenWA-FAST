@@ -101,6 +101,17 @@ class MessagesResource
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-template", [], $body);
     }
 
+    /**
+     * Send a native WhatsApp poll (2–12 options).
+     *
+     * @param array<string,mixed> $body {chatId, name, options, allowMultipleAnswers?}
+     * @return array<string,mixed>
+     */
+    public function sendPoll(string $sessionId, array $body): array
+    {
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-poll", [], $body);
+    }
+
     /** @return array<string,mixed> */
     public function reply(string $sessionId, array $body): array
     {
@@ -150,6 +161,60 @@ class MessagesResource
     public function reactions(string $sessionId, string $chatId, string $messageId): array
     {
         return $this->http->request('GET', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/{$this->http->encodeSegment($chatId)}/{$this->http->encodeSegment($messageId)}/reactions") ?? [];
+    }
+
+    /**
+     * Pin a message in its chat.
+     *
+     * @param array<string,mixed> $body chatId, messageId and an optional durationSeconds of
+     *                                   86400 (24h), 604800 (7d) or 2592000 (30d); defaults to 24h.
+     * @return array<string,mixed>
+     */
+    public function pin(string $sessionId, array $body): array
+    {
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/pin", [], $body) ?? [];
+    }
+
+    /**
+     * Cast a vote on a poll. Not supported on the Baileys engine (501).
+     *
+     * @param array<string,mixed> $body chatId, pollMessageId and options (option TEXTS; [] clears).
+     * @return array<string,mixed>
+     */
+    public function votePoll(string $sessionId, array $body): array
+    {
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/vote-poll", [], $body) ?? [];
+    }
+
+    /**
+     * Star or unstar a message. Best-effort on whatsapp-web.js, which silently ignores a message
+     * it will not star.
+     *
+     * @param array<string,mixed> $body chatId, messageId and star (bool).
+     * @return array<string,mixed>
+     */
+    public function star(string $sessionId, array $body): array
+    {
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/star", [], $body) ?? [];
+    }
+
+    /**
+     * @param array<string,mixed> $body
+     * @return array<string,mixed>
+     */
+    public function unpin(string $sessionId, array $body): array
+    {
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/unpin", [], $body) ?? [];
+    }
+
+    /**
+     * Fetch a message's archived media bytes (404 when nothing is archived for it).
+     *
+     * @return array{data: string, contentType: ?string}
+     */
+    public function media(string $sessionId, string $chatId, string $messageId): array
+    {
+        return $this->http->requestBinary('GET', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/{$this->http->encodeSegment($chatId)}/{$this->http->encodeSegment($messageId)}/media");
     }
 
     /** @return array<string,mixed> */

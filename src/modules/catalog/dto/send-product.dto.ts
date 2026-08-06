@@ -5,11 +5,11 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 export class SendProductDto {
   @ApiProperty({ description: 'Chat to send the product card to (@c.us or @g.us).', example: '628123456789@c.us' })
   @IsString()
-  chatId: string;
+  chatId!: string;
 
   @ApiProperty({ description: 'Catalog product id to send.', example: 'product-42' })
   @IsString()
-  productId: string;
+  productId!: string;
 
   @ApiPropertyOptional({ description: 'Optional body text accompanying the product card.', example: 'Back in stock!' })
   @IsOptional()
@@ -20,7 +20,7 @@ export class SendProductDto {
 export class SendCatalogDto {
   @ApiProperty({ description: 'Chat to send the catalog to (@c.us or @g.us).', example: '628123456789@c.us' })
   @IsString()
-  chatId: string;
+  chatId!: string;
 
   @ApiPropertyOptional({
     description: 'Optional body text accompanying the catalog.',

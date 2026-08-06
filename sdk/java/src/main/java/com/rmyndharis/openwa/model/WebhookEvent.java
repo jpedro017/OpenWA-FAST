@@ -32,6 +32,16 @@ public enum WebhookEvent {
     SESSION_DISCONNECTED,
     @SerializedName("session.reconnect_loop")
     SESSION_RECONNECT_LOOP,
+    @SerializedName("session.restriction")
+    SESSION_RESTRICTION,
+    @SerializedName("presence.update")
+    PRESENCE_UPDATE,
+    @SerializedName("call.accepted")
+    CALL_ACCEPTED,
+    @SerializedName("call.rejected")
+    CALL_REJECTED,
+    @SerializedName("call.missed")
+    CALL_MISSED,
     @SerializedName("group.join")
     GROUP_JOIN,
     @SerializedName("group.leave")
@@ -40,6 +50,8 @@ public enum WebhookEvent {
     GROUP_UPDATE,
     @SerializedName("call.received")
     CALL_RECEIVED,
+    @SerializedName("status.received")
+    STATUS_RECEIVED,
     @SerializedName("*")
     ALL
 }

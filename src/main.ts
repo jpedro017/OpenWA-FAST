@@ -3,7 +3,7 @@
 // webhook Worker's @Processor connection) see the configured values rather than pre-dotenv defaults.
 import './config/load-env';
 import { NestFactory } from '@nestjs/core';
-import { ShutdownSignal } from '@nestjs/common';
+import { INestApplication, ShutdownSignal } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
@@ -11,8 +11,11 @@ import { AppModule, DASHBOARD_DIST, dashboardServingEnabled, dashboardBuildPrese
 import { ShutdownService } from './common/services/shutdown.service';
 import { LoggerService, LogLevel, createLogger } from './common/services/logger.service';
 import { createSwaggerConfig, exemptPublicOperations } from './config/swagger.config';
-import { registerUncaughtExceptionMonitor } from './config/process-error-monitor';
+import { registerUncaughtExceptionMonitor, registerUnhandledRejectionHandler } from './config/process-error-monitor';
+import { runBootstrapOrExit } from './config/bootstrap-fatal';
+import { resolveStorageRoot } from './config/storage-root';
 import { applyHttpTimeouts, HttpTimeoutConfig, HttpTimeoutSink } from './config/http-timeouts';
+import { createInflightBodyBudget, resolveInflightBodyBudgetBytes } from './config/inflight-body-budget';
 import { applyGlobalValidation } from './config/app-validation';
 import { requestContextMiddleware } from './common/middleware/request-context.middleware';
 import { injectDashboardCspNonce } from './config/dashboard-csp';
@@ -27,10 +30,17 @@ import {
 } from './config/bootstrap-security';
 import { BullBoardAuthMiddleware } from './common/security/bull-board-auth.middleware';
 import { AuthService } from './modules/auth/auth.service';
+import { AuditService } from './modules/audit/audit.service';
 import { Request, Response, NextFunction, json, urlencoded } from 'express';
 import { randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 import { extname, join } from 'path';
+import { RedisIoAdapter } from './modules/events/redis-io.adapter';
+
+// The created app, exposed at module scope so the fatal handler below can run a best-effort teardown
+// (engine sessions, Redis/pg) when bootstrap fails AFTER NestFactory.create succeeded — notably a
+// listen() bind failure (EADDRINUSE), where full init already ran.
+let appInstance: INestApplication | undefined;
 
 async function bootstrap() {
   // Apply the operator-configured log verbosity (LOG_LEVEL) before anything logs. Unset/invalid → INFO.
@@ -40,12 +50,9 @@ async function bootstrap() {
   }
 
   // Backstop for promise rejections that escaped a local handler (e.g. a fire-and-forget engine-event
-  // dispatch). Node terminates the process on an unhandled rejection by default; for a long-running
-  // self-hosted gateway we'd rather log it and stay up than let one stray rejection kill all sessions.
+  // dispatch), including the expected engine-teardown case it downgrades to a warning (see the helper).
   const bootstrapLogger = createLogger('Bootstrap');
-  process.on('unhandledRejection', (reason: unknown) => {
-    bootstrapLogger.error('Unhandled promise rejection', reason instanceof Error ? reason.stack : String(reason));
-  });
+  registerUnhandledRejectionHandler(bootstrapLogger);
 
   // A synchronous throw from a non-promise context (e.g. a sync timer callback) is fatal — Node prints a
   // raw stack to stderr, bypassing the structured log pipeline, and exits(1). Route the stack through the
@@ -80,18 +87,53 @@ async function bootstrap() {
     );
   }
 
+  // Fail fast on a media storage root the app cannot write to, BEFORE Nest builds the module graph:
+  // StorageService only checks that the root EXISTS, so a root owned by another user passes boot and
+  // fails later on the first media write instead (#1065). Runs ahead of NestFactory.create so
+  // configuration.ts reads the resolved value.
+  process.env.STORAGE_LOCAL_PATH = resolveStorageRoot({
+    configured: process.env.STORAGE_LOCAL_PATH,
+    logger: bootstrapLogger,
+  });
+
   // Disable Nest's default body parser so we can set an explicit size cap below.
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+  appInstance = app;
+
+  // Cross-replica WebSocket fan-out: when Redis is enabled, broadcasts reach clients on every
+  // replica, not just this process. Set before the gateway's namespace is created so it inherits
+  // the adapter. Inert (plain in-memory adapter) without REDIS_ENABLED, so single-node pays nothing.
+  app.useWebSocketAdapter(new RedisIoAdapter(app));
+
+  // Aggregate in-flight body budget (DoS hardening): once too many body bytes are being buffered
+  // across ALL connections, new requests get 503 + Retry-After without their body being read.
+  // This is a deliberate PRE-GUARD: the throttler/auth guards run at the Nest routing layer —
+  // AFTER middleware and body buffering — so they can never stop slow-body memory pinning, and
+  // this must run BEFORE the body parser so a rejected connection never buffers a byte. The
+  // per-request BODY_SIZE_LIMIT below is a separate, unchanged cap on each admitted request.
+  const inflightBudgetBytes = resolveInflightBodyBudgetBytes(
+    process.env.INFLIGHT_BODY_BUDGET_BYTES,
+    process.env.BODY_SIZE_LIMIT,
+  );
+  app.use(createInflightBodyBudget(inflightBudgetBytes).middleware);
 
   // Cap request body size (DoS hardening). Media sends carry base64 in the JSON body,
   // so the default is generous; tune with BODY_SIZE_LIMIT.
   const bodyLimit = resolveBodyLimit(process.env.BODY_SIZE_LIMIT);
+  bootstrapLogger.log(`Request body caps: ${bodyLimit} per request, ${inflightBudgetBytes} bytes aggregate in flight`);
   // The `verify` callback stashes the EXACT bytes json() received on req.rawBody, byte-identical to
   // what a provider signed, so the @Public ingress controller can HMAC-verify over the raw body
   // (JSON.stringify(req.body) is NOT byte-identical). Cheap for every route; non-ingress routes ignore it.
+  // `inflate: false` is a backstop, not the guard: the budget middleware above already refuses a
+  // compressed body with 415 before a byte is read. It sits here so a future reordering of these
+  // parsers relative to that middleware cannot silently reopen the gap — an inflated body is
+  // charged to the budget at its compressed size and bounded by nothing. Every other parser in the
+  // process must carry the same flag for that argument to hold; the MCP route-level fallback
+  // (src/modules/mcp/mcp.server.ts) does.
   app.use(
     json({
       limit: bodyLimit,
+      inflate: false,
       verify: (req: Request & { rawBody?: Buffer }, _res, buf) => {
         req.rawBody = buf;
       },
@@ -101,6 +143,7 @@ async function bootstrap() {
     urlencoded({
       extended: true,
       limit: bodyLimit,
+      inflate: false,
       // Form-encoded webhook providers also sign the exact wire bytes. Use the same capture contract
       // as json(); other content types remain unsupported rather than installing a global catch-all.
       verify: (req: Request & { rawBody?: Buffer }, _res, buf) => {
@@ -247,7 +290,27 @@ async function bootstrap() {
     credentials: corsPolicy.credentials,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'X-API-Key', 'Authorization', 'X-Request-ID'],
-    exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+    // The throttlers are named (short/medium/long, plus instance on ingress), so @nestjs/throttler
+    // suffixes every rate-limit header with the throttler name — the unsuffixed variants are never
+    // sent. Expose the suffixed names so browser clients can actually read them.
+    exposedHeaders: [
+      'X-RateLimit-Limit-short',
+      'X-RateLimit-Remaining-short',
+      'X-RateLimit-Reset-short',
+      'X-RateLimit-Limit-medium',
+      'X-RateLimit-Remaining-medium',
+      'X-RateLimit-Reset-medium',
+      'X-RateLimit-Limit-long',
+      'X-RateLimit-Remaining-long',
+      'X-RateLimit-Reset-long',
+      'X-RateLimit-Limit-instance',
+      'X-RateLimit-Remaining-instance',
+      'X-RateLimit-Reset-instance',
+      'Retry-After-short',
+      'Retry-After-medium',
+      'Retry-After-long',
+      'Retry-After-instance',
+    ],
     maxAge: 86400, // 24 hours
   });
 
@@ -267,8 +330,13 @@ async function bootstrap() {
   // Protect the Bull Board queue UI (/api/admin/queues). It is mounted by
   // @bull-board/nestjs as raw Express middleware that the global ApiKeyGuard
   // does not cover; registering this before app.listen() ensures it runs ahead
-  // of the Bull Board router. Requires a valid ADMIN API key.
-  const bullBoardAuth = new BullBoardAuthMiddleware(app.get(AuthService), app.get(ConfigService));
+  // of the Bull Board router. Requires a valid ADMIN API key. The middleware also
+  // writes the audit trail for this mount (auth failures + queue mutations).
+  const bullBoardAuth = new BullBoardAuthMiddleware(
+    app.get(AuthService),
+    app.get(ConfigService),
+    app.get(AuditService),
+  );
   app.use('/api/admin/queues', (req: Request, res: Response, next: NextFunction) => {
     void bullBoardAuth.use(req, res, next);
   });
@@ -334,7 +402,13 @@ async function bootstrap() {
   }
 }
 
-bootstrap().catch((err: unknown) => {
-  createLogger('Bootstrap').error('Fatal error during bootstrap', err instanceof Error ? err.stack : String(err));
-  process.exitCode = 1;
+// A failed bootstrap MUST terminate the process with a non-zero code, not just set `process.exitCode`:
+// listen() runs the FULL init (sessions, Redis, pg, Chromium) before binding the port, so a bind failure
+// (EADDRINUSE) would otherwise leave a zombie process — no HTTP port, yet still holding the event loop
+// open and running WhatsApp sessions, invisible to Docker's restart policy. runBootstrapOrExit logs the
+// failure, runs a bounded best-effort app.close() teardown, then exits(1); a successful boot returns
+// without touching exit. Puppeteer's own `exit` handlers kill any browser children still up.
+void runBootstrapOrExit(bootstrap, {
+  logger: createLogger('Bootstrap'),
+  closeApp: () => (appInstance ? appInstance.close() : Promise.resolve()),
 });

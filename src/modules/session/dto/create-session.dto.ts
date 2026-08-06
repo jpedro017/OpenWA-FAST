@@ -14,7 +14,7 @@ export class CreateSessionDto {
   @Matches(/^[a-zA-Z0-9-]+$/, {
     message: 'Session name can only contain letters, numbers, and hyphens',
   })
-  name: string;
+  name!: string;
 
   @ApiPropertyOptional({
     description:

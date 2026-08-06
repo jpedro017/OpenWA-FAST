@@ -29,6 +29,12 @@ type DeleteChatRequest struct {
 	ChatID string `json:"chatId"`
 }
 
+// ArchiveChatRequest archives or unarchives a chat.
+type ArchiveChatRequest struct {
+	ChatID  string `json:"chatId"`
+	Archive bool   `json:"archive"`
+}
+
 // ListChatsQuery paginates the chat list.
 type ListChatsQuery struct {
 	Limit  *int

@@ -1,5 +1,5 @@
-import { Controller, Get, Post, Put, Delete, Param, Body, HttpCode, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBody } from '@nestjs/swagger';
+import { Controller, Get, Post, Put, Delete, Param, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { GroupService } from './group.service';
 import {
   CreateGroupDto,
@@ -8,6 +8,7 @@ import {
   GroupDescriptionDto,
   JoinGroupDto,
   GroupSettingsDto,
+  SetGroupPictureDto,
 } from './dto/group.dto';
 import { RequireRole } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
@@ -20,6 +21,27 @@ import { ApiKeyRole } from '../auth/entities/api-key.entity';
 @Controller('sessions/:sessionId/groups')
 export class GroupController {
   constructor(private readonly groupService: GroupService) {}
+
+  // MUST stay above @Get(':groupId'): Nest matches in declaration order, and a literal segment
+  // declared after a parameter route is shadowed by it — `join-info` would arrive as a group id.
+  @Get('join-info')
+  @ApiOperation({
+    summary: 'Preview a group from its invite code, without joining',
+    description:
+      'Read-only: nothing about the account changes, which is what makes it safe to call on a code ' +
+      'from an untrusted source. Supported on both engines.\n\n' +
+      'There is no participant LIST — the account is not a member — only a count, and only when ' +
+      'WhatsApp discloses one. Fields the engine does not report are omitted rather than defaulted, ' +
+      'because whatsapp-web.js returns an untyped object with no guaranteed shape.',
+  })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiQuery({ name: 'code', description: 'Group invite code (the part after the invite link)' })
+  @ApiResponse({ status: 200, description: 'What the invite discloses about the group' })
+  @ApiResponse({ status: 400, description: 'Session not started, or no code supplied' })
+  @ApiResponse({ status: 404, description: 'No such invite — invalid, expired or revoked' })
+  async joinInfo(@Param('sessionId') sessionId: string, @Query('code') code: string) {
+    return this.groupService.getGroupJoinInfo(sessionId, code);
+  }
 
   @Get(':groupId')
   @ApiOperation({ summary: 'Get detailed group info' })
@@ -90,15 +112,19 @@ export class GroupController {
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'groupId', description: 'Group ID' })
   @ApiBody({ type: ParticipantsDto })
-  @ApiResponse({ status: 200, description: 'Participants added' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Participants processed — `results` carries the per-participant outcome (a partial refusal does not fail the batch; a total refusal is an error)',
+  })
   @HttpCode(HttpStatus.OK)
   async addParticipants(
     @Param('sessionId') sessionId: string,
     @Param('groupId') groupId: string,
     @Body() dto: ParticipantsDto,
   ) {
-    await this.groupService.addParticipants(sessionId, groupId, dto.participants);
-    return { success: true, message: 'Participants added' };
+    const results = await this.groupService.addParticipants(sessionId, groupId, dto.participants);
+    return { success: true, message: 'Participants added', results };
   }
 
   @Delete(':groupId/participants')
@@ -107,14 +133,18 @@ export class GroupController {
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'groupId', description: 'Group ID' })
   @ApiBody({ type: ParticipantsDto })
-  @ApiResponse({ status: 200, description: 'Participants removed' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Participants processed — `results` carries the per-participant outcome (a partial refusal does not fail the batch; a total refusal is an error)',
+  })
   async removeParticipants(
     @Param('sessionId') sessionId: string,
     @Param('groupId') groupId: string,
     @Body() dto: ParticipantsDto,
   ) {
-    await this.groupService.removeParticipants(sessionId, groupId, dto.participants);
-    return { success: true, message: 'Participants removed' };
+    const results = await this.groupService.removeParticipants(sessionId, groupId, dto.participants);
+    return { success: true, message: 'Participants removed', results };
   }
 
   @Post(':groupId/participants/promote')
@@ -123,15 +153,19 @@ export class GroupController {
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'groupId', description: 'Group ID' })
   @ApiBody({ type: ParticipantsDto })
-  @ApiResponse({ status: 200, description: 'Participants promoted' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Participants processed — `results` carries the per-participant outcome (a partial refusal does not fail the batch; a total refusal is an error)',
+  })
   @HttpCode(HttpStatus.OK)
   async promoteParticipants(
     @Param('sessionId') sessionId: string,
     @Param('groupId') groupId: string,
     @Body() dto: ParticipantsDto,
   ) {
-    await this.groupService.promoteParticipants(sessionId, groupId, dto.participants);
-    return { success: true, message: 'Participants promoted to admin' };
+    const results = await this.groupService.promoteParticipants(sessionId, groupId, dto.participants);
+    return { success: true, message: 'Participants promoted to admin', results };
   }
 
   @Post(':groupId/participants/demote')
@@ -140,15 +174,19 @@ export class GroupController {
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'groupId', description: 'Group ID' })
   @ApiBody({ type: ParticipantsDto })
-  @ApiResponse({ status: 200, description: 'Participants demoted' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Participants processed — `results` carries the per-participant outcome (a partial refusal does not fail the batch; a total refusal is an error)',
+  })
   @HttpCode(HttpStatus.OK)
   async demoteParticipants(
     @Param('sessionId') sessionId: string,
     @Param('groupId') groupId: string,
     @Body() dto: ParticipantsDto,
   ) {
-    await this.groupService.demoteParticipants(sessionId, groupId, dto.participants);
-    return { success: true, message: 'Participants demoted from admin' };
+    const results = await this.groupService.demoteParticipants(sessionId, groupId, dto.participants);
+    return { success: true, message: 'Participants demoted from admin', results };
   }
 
   @Put(':groupId/subject')
@@ -158,6 +196,7 @@ export class GroupController {
   @ApiParam({ name: 'groupId', description: 'Group ID' })
   @ApiBody({ type: GroupSubjectDto })
   @ApiResponse({ status: 200, description: 'Subject updated' })
+  @ApiResponse({ status: 403, description: 'The engine refused the change — admin rights are required' })
   async setSubject(
     @Param('sessionId') sessionId: string,
     @Param('groupId') groupId: string,
@@ -174,6 +213,7 @@ export class GroupController {
   @ApiParam({ name: 'groupId', description: 'Group ID' })
   @ApiBody({ type: GroupDescriptionDto })
   @ApiResponse({ status: 200, description: 'Description updated' })
+  @ApiResponse({ status: 403, description: 'The engine refused the change — admin rights are required' })
   async setDescription(
     @Param('sessionId') sessionId: string,
     @Param('groupId') groupId: string,
@@ -196,6 +236,46 @@ export class GroupController {
   }
 
   // ========== Gap Quick Wins: Invite Link ==========
+
+  @Get(':groupId/picture')
+  @ApiOperation({ summary: "Get the group's picture URL" })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'groupId', description: 'Group ID' })
+  @ApiResponse({ status: 200, description: 'Picture URL, or null when the group has none' })
+  async getPicture(@Param('sessionId') sessionId: string, @Param('groupId') groupId: string) {
+    return { url: await this.groupService.getGroupPicture(sessionId, groupId) };
+  }
+
+  @Put(':groupId/picture')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Set the group's picture" })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'groupId', description: 'Group ID' })
+  @ApiResponse({ status: 200, description: 'Group picture updated' })
+  @ApiResponse({ status: 400, description: 'Session not active, or neither url nor base64 supplied' })
+  @ApiResponse({ status: 403, description: 'The engine refused the change — admin rights required' })
+  async setPicture(
+    @Param('sessionId') sessionId: string,
+    @Param('groupId') groupId: string,
+    @Body() dto: SetGroupPictureDto,
+  ) {
+    await this.groupService.setGroupPicture(sessionId, groupId, dto);
+    return { success: true, message: 'Group picture updated' };
+  }
+
+  @Delete(':groupId/picture')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Remove the group's picture" })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'groupId', description: 'Group ID' })
+  @ApiResponse({ status: 200, description: 'Group picture removed' })
+  @ApiResponse({ status: 403, description: 'The engine refused the change — admin rights required' })
+  async deletePicture(@Param('sessionId') sessionId: string, @Param('groupId') groupId: string) {
+    await this.groupService.deleteGroupPicture(sessionId, groupId);
+    return { success: true, message: 'Group picture removed' };
+  }
 
   @Get(':groupId/invite-code')
   @ApiOperation({ summary: 'Get group invite code/link' })

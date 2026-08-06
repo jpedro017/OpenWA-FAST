@@ -49,6 +49,22 @@ export class SessionsResource {
     return this.client.request<SessionResponse>({ method: 'POST', path: `/api/sessions/${encodeSegment(id)}/stop` });
   }
 
+  /**
+   * Attempt an engine-native unlink of this device, then stop the session. A `200` means the
+   * unlink operation AND the required local credential cleanup completed — it is not an
+   * independent observation that the handset UI no longer shows the linked device. Because a
+   * completed unlink wipes the stored credentials, a later `start` requires a fresh QR scan or
+   * pairing code. Requires a running session. Rejects with HTTP `502` and
+   * `code: 'SESSION_LOGOUT_INCOMPLETE'` when the session was stopped locally but the logout
+   * operation did not complete (no send, no acknowledgement, timeout/transport error, or local
+   * cleanup failure); `phone` is cleared and no success audit is written. Start the session again
+   * and retry the logout; do not assume the retry reconnects automatically or lands in a
+   * guaranteed QR state.
+   */
+  logout(id: string): Promise<SessionResponse> {
+    return this.client.request<SessionResponse>({ method: 'POST', path: `/api/sessions/${encodeSegment(id)}/logout` });
+  }
+
   /** Force-kill a stuck session (SIGKILL + teardown). */
   forceKill(id: string): Promise<SessionResponse> {
     return this.client.request<SessionResponse>({ method: 'POST', path: `/api/sessions/${encodeSegment(id)}/force-kill` });

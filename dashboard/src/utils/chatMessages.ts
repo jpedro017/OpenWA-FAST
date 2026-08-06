@@ -15,6 +15,8 @@ export function mapEngineHistoryMessage(h: EngineHistoryMessage): ChatMessage {
     id: h.id,
     waMessageId: h.id,
     chatId: h.chatId,
+    chatName: h.contact?.pushName ?? h.contact?.name,
+    author: h.author,
     from: h.from,
     to: h.to,
     body: h.body ?? '',
@@ -41,13 +43,83 @@ const msgTime = (m: ChatMessage): number =>
 export function mergeChatMessages(db: ChatMessage[], history: ChatMessage[]): ChatMessage[] {
   const byId = new Map<string, ChatMessage>();
   for (const m of history) byId.set(msgKey(m), m);
-  for (const m of db) byId.set(msgKey(m), m); // DB overwrites the engine copy (authoritative status)
-  return [...byId.values()].sort((a, b) => msgTime(a) - msgTime(b) || a.createdAt.localeCompare(b.createdAt));
+  for (const m of db) {
+    const key = msgKey(m);
+    const hist = byId.get(key);
+    // The DB copy wins (authoritative status) — but a legacy row has no stable sender id, so
+    // salvage the engine-history copy's author or two same-named participants collapse into one
+    // attribution run in the chat view.
+    byId.set(key, hist?.author && !m.author ? { ...m, author: hist.author } : m);
+  }
+  const sorted = [...byId.values()].sort((a, b) => msgTime(a) - msgTime(b) || a.createdAt.localeCompare(b.createdAt));
+  return capMediaPayloads(sorted);
 }
+
+/**
+ * Upper bound on base64 media payloads held in ONE chat slice at a time. A slice lives in the
+ * React Query cache with staleTime: Infinity, so every image/video/voice note that arrives while
+ * the chat is open would otherwise pin its full base64 string in heap for the whole session —
+ * scrolling through a media-rich chat grows the tab unboundedly. Past the cap the OLDEST
+ * payloads are stripped to the omitted marker ({data: undefined, omitted: true}), which renders
+ * the same 📎 placeholder as a history row fetched without media; the newest `keep` stay
+ * renderable (thread + lightbox). Count-based (not byte-based): payloads are bounded upstream
+ * by the backend's media size cap.
+ *
+ * The cap must cover the fetch window: useChatMessages loads a 100-message slice with media, so a
+ * smaller cap strips payloads INSIDE the window the user can scroll to — and with staleTime:
+ * Infinity there is no refetch path, leaving a dead-end 📎 placeholder for media that was fetched.
+ */
+export const MEDIA_PAYLOAD_CACHE_LIMIT = 100;
+
+/**
+ * Enforce MEDIA_PAYLOAD_CACHE_LIMIT on an ascending message list, stripping the oldest payloads
+ * first. Returns the input array untouched when already under the cap (stable reference — no
+ * downstream re-render), otherwise a new array; entries are copied, never mutated.
+ */
+export function capMediaPayloads(list: ChatMessageView[], keep = MEDIA_PAYLOAD_CACHE_LIMIT): ChatMessageView[] {
+  let payloadCount = 0;
+  for (const m of list) if (m.metadata?.media?.data) payloadCount++;
+  if (payloadCount <= keep) return list;
+
+  const next = list.slice();
+  let toStrip = payloadCount - keep;
+  for (let i = 0; i < next.length && toStrip > 0; i++) {
+    const media = next[i].metadata?.media;
+    if (!media?.data) continue;
+    next[i] = {
+      ...next[i],
+      metadata: { ...next[i].metadata, media: { ...media, data: undefined, omitted: true } },
+    };
+    toStrip--;
+  }
+  return next;
+}
+
+/**
+ * Stable identity of a group message's sender, for attribution runs and sender colors: the
+ * participant JID (`author`) when present, falling back to the display name on legacy rows. Keying
+ * on this — not the name alone — keeps two participants who share a pushName from collapsing into
+ * one run with one color.
+ */
+export const senderKey = (m: Pick<ChatMessage, 'author' | 'chatName'>): string | undefined => m.author ?? m.chatName;
 
 // ChatMessageView extends ChatMessage with the view-only fields the chat page renders.
 // Lifted from Chats.tsx so hooks/utils can share the same shape.
-type MessageMedia = { mimetype: string; filename?: string; data?: string; omitted?: boolean; sizeBytes?: number };
+export type MessageMedia = {
+  mimetype: string;
+  filename?: string;
+  data?: string;
+  omitted?: boolean;
+  sizeBytes?: number;
+};
+
+export const getMediaSrc = (media?: MessageMedia): string => {
+  if (!media || !media.data) return '';
+  if (media.data.startsWith('data:') || media.data.startsWith('http://') || media.data.startsWith('https://')) {
+    return media.data;
+  }
+  return `data:${media.mimetype};base64,${media.data}`;
+};
 
 export interface ChatMessageView extends ChatMessage {
   metadata?: {
@@ -114,20 +186,23 @@ function mergeMessageMetadata(
  * waMessageId=WA id) and a live WS message (id=WA id) for the same WhatsApp message must dedupe,
  * not double-add. On replace, the delivery status only advances (a replayed lower `sent` echo can't
  * downgrade a delivered/read row) and metadata is merged per field (a payload-less echo can't erase
- * the existing media/quote — see mergeMessageMetadata).
+ * the existing media/quote — see mergeMessageMetadata). The result is run through capMediaPayloads
+ * so a long session of incoming media can't grow the cached slice's base64 heap without bound.
  * Returns a new array — does not mutate the input.
  */
 export function mergeOrAppend(list: ChatMessageView[], incoming: ChatMessageView): ChatMessageView[] {
   const idx = list.findIndex(m => msgKey(m) === msgKey(incoming));
-  if (idx === -1) return [...list, incoming];
+  if (idx === -1) return capMediaPayloads([...list, incoming]);
   const existing = list[idx];
   const next = list.slice();
   next[idx] = {
     ...incoming,
+    // An echo that lacks the stable sender id must not erase the one already cached.
+    author: incoming.author ?? existing.author,
     status: mergeDeliveryStatus(existing.status, incoming.status) ?? incoming.status,
     metadata: mergeMessageMetadata(existing.metadata, incoming.metadata),
   };
-  return next;
+  return capMediaPayloads(next);
 }
 
 /**

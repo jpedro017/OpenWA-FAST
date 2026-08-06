@@ -14,6 +14,14 @@ import { HookManager } from './hook-manager.service';
  * cannot express. If you change the gate's semantics here, change it there too
  * (`bulk-message.service.ts`, the `blockedByPlugin` branch).
  *
+ * CONTRACT NOTE — the gate does NOT see every attempted send. When send pacing is enabled
+ * (`SEND_PACING_ENABLED`), the pacing governor runs BEFORE this gate at every call site, so a send
+ * it refuses fires no `message:sending` at all: a plugin cannot observe, moderate or rewrite traffic
+ * that policy already forbids. A plugin treating this hook as a complete record of send ATTEMPTS
+ * will therefore miss paced-out ones; it remains a complete record of sends that were actually
+ * attempted against WhatsApp. Refusals surface to the client as `429` with `code:
+ * SEND_PACING_LIMITED`, distinct from a plugin veto's `400`.
+ *
  * `source` names the caller in the hook context so a plugin can tell a chat send from a status
  * post without inspecting the payload shape — which matters because the shapes differ: a
  * MessageService `input` is a send DTO carrying `chatId`, a StatusService `input` is not.

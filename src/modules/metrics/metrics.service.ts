@@ -1,12 +1,14 @@
 import { Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { timingSafeEqual } from 'crypto';
+import { constantTimeEqual } from '../../common/security/constantTimeEqual';
 import { StatsService } from '../stats/stats.service';
 import { getWebhookDeliveryFailuresTotal } from '../../common/metrics/webhook-delivery-metrics';
 import {
   getSessionReconnectAttemptsTotal,
   getSessionReconnectLoopAlertsTotal,
 } from '../../common/metrics/session-reconnect-metrics';
+import { getRestrictedSessionCount } from '../../common/metrics/session-restriction-metrics';
+import { getSendPacingRefusals } from '../../common/metrics/send-pacing-metrics';
 import { renderHttpRequestMetrics } from '../../common/metrics/request-metrics';
 
 /**
@@ -54,12 +56,10 @@ export class MetricsService {
   }
 
   private safeEqual(a: string, b: string): boolean {
-    const ab = Buffer.from(a);
-    const bb = Buffer.from(b);
-    // timingSafeEqual requires equal lengths; compare to a fixed digest of `b` to avoid
-    // leaking the expected length through an early return.
-    if (ab.length !== bb.length) return false;
-    return timingSafeEqual(ab, bb);
+    // Length-hiding constant-time compare: hash both inputs with a per-process key (fixed-length
+    // digests) then timingSafeEqual, so the expected token's byte-length is not leaked through a
+    // fast length-mismatch return. This `/api/metrics` endpoint is @Public and timed by callers.
+    return constantTimeEqual(a, b);
   }
 
   /** Render the current metrics in Prometheus text exposition format (memoized for a short TTL). */
@@ -118,6 +118,21 @@ export class MetricsService {
     lines.push('# HELP openwa_session_reconnect_loop_alerts_total Reconnect-loop alerts emitted since process start.');
     lines.push('# TYPE openwa_session_reconnect_loop_alerts_total counter');
     lines.push(`openwa_session_reconnect_loop_alerts_total ${getSessionReconnectLoopAlertsTotal()}`);
+
+    lines.push('# HELP openwa_sessions_restricted Sessions whose account WhatsApp is currently restricting.');
+    lines.push('# TYPE openwa_sessions_restricted gauge');
+    lines.push(`openwa_sessions_restricted ${getRestrictedSessionCount()}`);
+
+    // Emitted only once a refusal has actually happened, like the HTTP series: a family that appears
+    // at its first occurrence is easier to alert on than one pinned at zero for every reason.
+    const refusals = getSendPacingRefusals();
+    if (refusals.size > 0) {
+      lines.push('# HELP openwa_send_pacing_refusals_total Sends refused by the pacing governor since process start.');
+      lines.push('# TYPE openwa_send_pacing_refusals_total counter');
+      for (const [reason, count] of refusals) {
+        lines.push(`openwa_send_pacing_refusals_total{reason="${this.escapeLabel(reason)}"} ${count}`);
+      }
+    }
 
     // HTTP RED metrics (request rate + duration per route), recorded by RequestMetricsInterceptor.
     // Included in the same cached render — a few seconds of staleness is fine for Prometheus.

@@ -57,6 +57,14 @@ export function mapBaileysGroupInfo(metadata: GroupMetadata, normalizeJid: Norma
     announce: metadata.announce,
     locked: metadata.restrict,
     ephemeralSeconds: metadata.ephemeralDuration,
+    // Baileys decodes member_add_mode to a boolean where TRUE means all_member_add — the opposite
+    // sense to the boolean whatsapp-web.js's types describe, hence the explicit mapping here.
+    memberAddMode:
+      metadata.memberAddMode === undefined
+        ? undefined
+        : metadata.memberAddMode
+          ? ('all' as const)
+          : ('admins' as const),
     linkedParentJID: metadata.linkedParent ?? null,
   };
 }

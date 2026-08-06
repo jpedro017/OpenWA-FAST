@@ -67,9 +67,10 @@ services:
       - SESSION_DATA_PATH=${SESSION_DATA_PATH:-/app/data/sessions}
       - PUPPETEER_HEADLESS=${PUPPETEER_HEADLESS:-true}
       - PUPPETEER_ARGS=${PUPPETEER_ARGS:---no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu}
-      # Optional WhatsApp Web version override. Leave empty for whatsapp-web.js auto-selection.
-      # If a session hangs at "authenticating", set WWEBJS_WEB_VERSION to a known-good cached build
-      # from wppconnect-team/wa-version; latest|auto|off also forces auto-selection.
+      # Optional WhatsApp Web version override. DEFAULT (empty, "latest", or "auto"): OpenWA auto-resolves a
+      # settled build from the third-party wppconnect-team/wa-version registry and pins its remote HTML
+      # (fetched into the web.whatsapp.com origin without an integrity check). Set "off" to disable pinning
+      # and use the first-party build served by WhatsApp, or an exact version to pin a specific build.
       - WWEBJS_WEB_VERSION=${WWEBJS_WEB_VERSION:-}
       - WWEBJS_WEB_VERSION_REMOTE_PATH=${WWEBJS_WEB_VERSION_REMOTE_PATH:-}
       # Raise whatsapp-web.js's first-boot init wait (default 30000ms) on slow boots. Empty = default.
@@ -79,8 +80,11 @@ services:
       - STORAGE_TYPE=${STORAGE_TYPE:-local}
       - STORAGE_LOCAL_PATH=${STORAGE_LOCAL_PATH:-/app/data/media}
       # Install plugins into the writable, persistent data volume (the root FS is read-only). Matches
-      # docker-compose.yml; without this it falls back to ./plugins on the read-only root and install fails.
+      # docker-compose.yml and the application default; set explicitly so the path stays correct even
+      # if the volume moves.
       - PLUGINS_DIR=${PLUGINS_DIR:-/app/data/plugins}
+      # Plugin install-from-URL redirect policy (ssrf-guard): off unless the exact string 'true'.
+      - PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS=${PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS:-false}
       - WEBHOOK_TIMEOUT=${WEBHOOK_TIMEOUT:-10000}
       - WEBHOOK_RETRY_DELAY=${WEBHOOK_RETRY_DELAY:-5000}
       - WEBHOOK_DISPATCH_CONCURRENCY=${WEBHOOK_DISPATCH_CONCURRENCY:-16}
@@ -96,6 +100,30 @@ services:
       - BODY_SIZE_LIMIT=${BODY_SIZE_LIMIT:-}
       - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
       - QUEUE_ENABLED=${QUEUE_ENABLED:-false}
+      # Opt-in feature flags. Forwarded explicitly for the same reason as docker-compose.yml: this
+      # file has no env_file, so a variable absent from this list never reaches the container and
+      # the feature it gates stays off however the operator's .env is written.
+      - CHAT_MEDIA_ARCHIVE_ENABLED=${CHAT_MEDIA_ARCHIVE_ENABLED:-}
+      - CHAT_MEDIA_ARCHIVE_MAX_BYTES=${CHAT_MEDIA_ARCHIVE_MAX_BYTES:-}
+      - CHAT_MEDIA_ARCHIVE_TTL_DAYS=${CHAT_MEDIA_ARCHIVE_TTL_DAYS:-}
+      - CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS=${CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS:-}
+      - CHAT_MEDIA_ORPHAN_GRACE_MS=${CHAT_MEDIA_ORPHAN_GRACE_MS:-}
+      - SEND_PACING_ENABLED=${SEND_PACING_ENABLED:-}
+      - SEND_PACING_WARMUP_SCHEDULE=${SEND_PACING_WARMUP_SCHEDULE:-}
+      - SEND_PACING_COLD_DAILY_CAP=${SEND_PACING_COLD_DAILY_CAP:-}
+      - SEND_PACING_BREAKER_THRESHOLD=${SEND_PACING_BREAKER_THRESHOLD:-}
+      - SEND_PACING_BREAKER_COOLDOWN_MS=${SEND_PACING_BREAKER_COOLDOWN_MS:-}
+      - MEDIA_CONVERSION_ENABLED=${MEDIA_CONVERSION_ENABLED:-}
+      - FFMPEG_PATH=${FFMPEG_PATH:-}
+      - MEDIA_CONVERSION_TIMEOUT_MS=${MEDIA_CONVERSION_TIMEOUT_MS:-}
+      - MEDIA_CONVERSION_MAX_OUTPUT_BYTES=${MEDIA_CONVERSION_MAX_OUTPUT_BYTES:-}
+      - MEDIA_CONVERSION_CONCURRENCY=${MEDIA_CONVERSION_CONCURRENCY:-}
+      - NODE_ID=${NODE_ID:-}
+      - NODE_URL=${NODE_URL:-}
+      - SESSION_LEASE_TTL_MS=${SESSION_LEASE_TTL_MS:-}
+      - SESSION_LEASE_HEARTBEAT_MS=${SESSION_LEASE_HEARTBEAT_MS:-}
+      - SESSION_TAKEOVER_SWEEP_MS=${SESSION_TAKEOVER_SWEEP_MS:-}
+      - SESSION_PROXY_TIMEOUT_MS=${SESSION_PROXY_TIMEOUT_MS:-}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

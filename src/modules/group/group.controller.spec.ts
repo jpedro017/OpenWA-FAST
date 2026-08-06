@@ -48,4 +48,56 @@ describe('GroupController join + settings', () => {
     });
     await expect(controller.updateSettings('s1', 'g1', {})).rejects.toThrow(/At least one/);
   });
+
+  it('POST :groupId/participants returns the per-participant results as an additive field', async () => {
+    const results = [
+      { id: '628111@c.us', success: true, status: 200 },
+      { id: '628222@c.us', success: false, status: 403 },
+    ];
+    const { controller, service } = build({ addParticipants: jest.fn().mockResolvedValue(results) });
+    await expect(
+      controller.addParticipants('s1', 'g1', { participants: ['628111@c.us', '628222@c.us'] }),
+    ).resolves.toEqual({
+      success: true,
+      message: 'Participants added',
+      results,
+    });
+    expect(service.addParticipants).toHaveBeenCalledWith('s1', 'g1', ['628111@c.us', '628222@c.us']);
+  });
+
+  it.each([
+    ['removeParticipants', 'Participants removed'],
+    ['promoteParticipants', 'Participants promoted to admin'],
+    ['demoteParticipants', 'Participants demoted from admin'],
+  ] as const)('%s returns the per-participant results as an additive field', async (method, message) => {
+    const results = [{ id: '628111@c.us', success: true, status: 200 }];
+    const { controller } = build({ [method]: jest.fn().mockResolvedValue(results) });
+    await expect(
+      (controller as unknown as Record<string, (s: string, g: string, dto: unknown) => Promise<unknown>>)[method](
+        's1',
+        'g1',
+        { participants: ['628111@c.us'] },
+      ),
+    ).resolves.toEqual({ success: true, message, results });
+  });
+});
+
+// Nest matches routes in DECLARATION order, so a literal segment declared after a parameter route on
+// the same path shape is unreachable — `GET /groups/join-info` would arrive at `GET /groups/:groupId`
+// with groupId='join-info' and be looked up as a group. Reading the decorators back off the class is
+// the only way to catch a reordering, since both routes keep working in isolation either way.
+describe('GroupController route ordering', () => {
+  it('declares the literal join-info route before the :groupId parameter route', () => {
+    const proto = GroupController.prototype as object;
+    const order = Object.getOwnPropertyNames(proto).filter(name => name === 'joinInfo' || name === 'findOne');
+
+    expect(order).toEqual(['joinInfo', 'findOne']);
+  });
+
+  it('keeps join-info a literal path, not a parameter', () => {
+    const handler = Object.getOwnPropertyDescriptor(GroupController.prototype, 'joinInfo')?.value as object;
+    const path: unknown = Reflect.getMetadata('path', handler);
+
+    expect(path).toBe('join-info');
+  });
 });

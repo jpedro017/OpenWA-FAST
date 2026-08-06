@@ -84,7 +84,8 @@
     "loadingChats": "Cargando chats...",
     "empty": "Sin chats",
     "noMessageYet": "Aún sin mensajes",
-    "unreadBadge": "{{count}} mensajes sin leer",
+    "unreadBadge": "{{count}} mensaje sin leer",
+    "unreadBadge_other": "{{count}} mensajes sin leer",
     "loadingMessages": "Cargando mensajes...",
     "noMessagesInChat": "Aún no hay mensajes. ¡Envía el primero para empezar!",
     "downloadDocument": "Descargar documento",
@@ -123,14 +124,32 @@
       "status": "Estado"
     },
     "status": {
-      "placeholderTitle": "Estado",
-      "placeholderDesc": "Las actualizaciones de estado por contacto llegarán en una futura actualización."
+      "itemCount": "{{count}} actualización",
+      "itemCount_other": "{{count}} actualizaciones",
+      "empty": "Ningún contacto tiene un estado activo.",
+      "loadError": "No se pudieron cargar los estados.",
+      "mediaUnavailable": "Contenido multimedia no disponible",
+      "compose": "Publicar un estado",
+      "composeText": "Texto",
+      "composeImage": "Imagen",
+      "recipients": "Quién puede ver esto",
+      "recipientsHint": "Baileys requiere una lista de destinatarios; whatsapp-web.js usa tu audiencia de privacidad de estado.",
+      "noContacts": "No se encontraron contactos",
+      "caption": "Leyenda",
+      "backgroundColor": "Color de fondo",
+      "font": "Fuente",
+      "fontDefault": "Predeterminada",
+      "orLabel": "o",
+      "post": "Publicar",
+      "posted": "Estado publicado",
+      "postFailed": "No se pudo publicar el estado"
     },
     "channels": {
       "notSupported": "Los canales no son compatibles con el motor Baileys.",
       "empty": "Aún no estás suscrito a ningún canal.",
       "notReady": "La sesión aún no está lista.",
-      "subscribers": "{{count}} suscriptores"
+      "subscribers": "{{count}} suscriptor",
+      "subscribers_other": "{{count}} suscriptores"
     },
     "errors": {
       "loadSessions": "Error al cargar las sesiones",
@@ -208,7 +227,10 @@
     "connecting": "Conectando...",
     "qr_ready": "Escanear QR",
     "ready": "Conectada",
-    "disconnected": "Desconectada"
+    "disconnected": "Desconectada",
+    "action_required": "Acción requerida",
+    "failed": "Fallida",
+    "authenticating": "Autenticando..."
   },
   "sessions": {
     "title": "Sesiones",
@@ -275,6 +297,7 @@
       "start": "Iniciar",
       "stop": "Detener",
       "reconnect": "Reconectar",
+      "unlink": "Desvincular",
       "delete": "Eliminar",
       "killStuck": "Cerrar bloqueada"
     },
@@ -283,6 +306,8 @@
       "readyDesc": "La sesión de WhatsApp está conectada",
       "disconnectedTitle": "Sesión desconectada",
       "disconnectedDesc": "La sesión de WhatsApp se ha desconectado",
+      "actionRequiredTitle": "Acción requerida",
+      "actionRequiredDesc": "Esta sesión necesita tu atención. Abre la sesión para ver qué hacer.",
       "failedTitle": "Sesión fallida",
       "failedDesc": "La sesión de WhatsApp no pudo iniciarse. Abre la sesión para ver el motivo."
     },
@@ -290,7 +315,8 @@
       "phone": "Teléfono",
       "sessionId": "ID de sesión",
       "lastActive": "Última actividad",
-      "error": "Error"
+      "error": "Error",
+      "restriction": "Restricción"
     },
     "forceKill": {
       "title": "Cerrar sesión bloqueada",
@@ -301,6 +327,18 @@
       "success": "La sesión se cerró de forma forzada. Ya puedes reiniciarla.",
       "failedTitle": "Error al forzar el cierre",
       "failed": "No se pudo forzar el cierre de la sesión."
+    },
+    "unlink": {
+      "title": "Desvincular dispositivo",
+      "message": "¿Desvincular la sesión <strong>\"{{name}}\"</strong> de la cuenta de WhatsApp?",
+      "warning": "WhatsApp elimina este dispositivo de los Dispositivos vinculados de la cuenta y la sesión se detiene. Para reconectar se requiere un nuevo código QR o código de emparejamiento. Para borrar también todos los datos locales, elimine la sesión después.",
+      "confirm": "Desvincular",
+      "successTitle": "Dispositivo desvinculado",
+      "success": "Desvinculación completada: se cerró la sesión del dispositivo y se borraron las credenciales locales. Para reconectar se requiere un nuevo código QR o código de emparejamiento.",
+      "failedTitle": "Error al desvincular",
+      "failed": "No se pudo desvincular la sesión.",
+      "incompleteTitle": "Desvinculación incompleta",
+      "incomplete": "La sesión se detuvo localmente, pero la operación de cierre de sesión está incompleta — es posible que el dispositivo siga vinculado. Inicie la sesión y vuelva a intentar la desvinculación."
     },
     "pairing": {
       "tabQr": "Código QR",
@@ -319,6 +357,16 @@
       "step3": "<strong>3.</strong> Toca <strong>Vincular dispositivo</strong> y luego toca <strong>Vincular con número de teléfono</strong>",
       "step4": "<strong>4.</strong> Introduce en tu teléfono el código de 8 caracteres que se muestra arriba",
       "waitingConnection": "Esperando a que tu teléfono se vincule…"
+    },
+    "start": {
+      "teardownPendingTitle": "Iniciando sesión",
+      "teardownPending": "El borrado de credenciales de esta sesión aún está en curso. Espere un momento e inténtelo de nuevo."
+    },
+    "restriction": {
+      "reachout_timelock": "Chats nuevos bloqueados",
+      "tos_block": "Bloqueado por WhatsApp",
+      "proxy_block": "Conexión bloqueada",
+      "until": "hasta {{date}}"
     }
   },
   "webhooks": {
@@ -338,6 +386,7 @@
       "title": "Filtros (opcional)",
       "hint": "Activar solo cuando se cumplan todas las condiciones. Se aplica a eventos de mensajes.",
       "badge": "{{count}} filtro",
+      "badge_other": "{{count}} filtros",
       "addCondition": "Añadir condición",
       "removeCondition": "Eliminar condición",
       "caseSensitive": "Distinguir mayúsculas",
@@ -718,7 +767,8 @@
     "toasts": {
       "saveFailed": "Error al guardar"
     },
-    "envPinNote": "Fijado por una variable de entorno: este es el valor en ejecución; los cambios del panel no se aplicarán hasta que esa variable se elimine.",
+    "envPinNote": "Fijado por la variable de entorno {{name}}: este es el valor en ejecución; los cambios del panel no se aplicarán hasta que esa variable se elimine.",
+    "pendingRestartNote": "Guardado, pero aún no aplicado: reinicia el servidor para que este cambio surta efecto.",
     "migration": {
       "title": "Atención: esto cambia el backend de datos",
       "dbWarning": "La nueva base de datos comienza vacía. Descarga ahora una copia de seguridad de tus datos actuales (mientras sigues en la base de datos anterior) y luego restáurala después del reinicio.",
@@ -773,7 +823,12 @@
       "title": "Instalar un plugin",
       "hint": "Sube un plugin empaquetado como un .zip (con un manifest.json). Se ejecuta en modo aislado una vez habilitado.",
       "choose": "Elige un archivo .zip…",
-      "tooLarge": "El archivo supera el límite de 5 MB."
+      "tooLarge": "El archivo supera el límite de 5 MB.",
+      "catalogHint": "Instala directamente desde el catálogo de plugins de OpenWA. El .zip se obtiene en el servidor a través de la protección SSRF, luego se valida y se ejecuta en sandbox.",
+      "catalogTeaser": "¿Buscas plugins?",
+      "catalogTeaserSuffix": "explora el marketplace oficial.",
+      "tabCatalog": "Catálogo",
+      "tabUpload": "Subir .zip"
     },
     "toasts": {
       "errorTitle": "Error de plugin",
@@ -791,7 +846,8 @@
       "enableFailedTitle": "Error al activar",
       "disableFailedTitle": "Error al desactivar",
       "configRequiredTitle": "Configuración requerida",
-      "configRequiredDesc": "Completa los campos obligatorios antes de activar: {{fields}}"
+      "configRequiredDesc": "Completa los campos obligatorios antes de activar: {{fields}}",
+      "updateFailed": "Error al actualizar"
     },
     "sessions": {
       "activationTitle": "Ejecutar para",
@@ -870,6 +926,17 @@
         "secretRegenerated": "Secreto regenerado",
         "actionFailed": "La acción falló"
       }
+    },
+    "catalog": {
+      "empty": "No hay plugins en el catálogo.",
+      "install": "Instalar",
+      "installed": "Instalado",
+      "noDownload": "Esta entrada del catálogo no tiene URL de descarga.",
+      "noMatch": "Ningún plugin coincide con tu búsqueda.",
+      "searchPlaceholder": "Buscar plugins…",
+      "update": "Actualizar",
+      "updateAvailable": "Actualización disponible",
+      "updated": "Plugin actualizado"
     }
   },
   "search": {

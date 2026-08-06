@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.rmyndharis.openwa.ClientConfig;
 import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.HttpMethod;
+import com.rmyndharis.openwa.model.SetGroupPictureRequest;
 import com.rmyndharis.openwa.model.CreateGroupRequest;
 import com.rmyndharis.openwa.model.GroupSettings;
 import com.rmyndharis.openwa.model.ListGroupsQuery;
@@ -117,6 +118,18 @@ class GroupsResourceTest {
         assertTrue(tx.lastRequest().body().contains("AbCdEfGhIjKl"));
     }
 
+    // The record gained a fourth component (memberAddMode); callers written against the previous
+    // three-component constructor must keep compiling, and omitting the new setting must mean
+    // "leave it alone" rather than sending a null.
+    @Test
+    void threeComponentConstructorStillWorksAndOmitsMemberAddMode() {
+        tx.respond(200, "{\"success\":true}");
+        GroupSettings legacy = new GroupSettings(true, false, 604800);
+        assertEquals(null, legacy.memberAddMode());
+        client.groups.updateGroupSettings("s", "g@g.us", legacy);
+        assertEquals(false, tx.lastRequest().body().contains("memberAddMode"));
+    }
+
     @Test
     void getGroupSettingsHitsSettingsPath() {
         tx.respond(200, "{\"announce\":true,\"locked\":false,\"ephemeralSeconds\":604800}");
@@ -176,5 +189,20 @@ class GroupsResourceTest {
         client.groups.revokeInviteCode("s", "g@g.us");
         assertEquals("http://h/api/sessions/s/groups/g@g.us/invite-code/revoke", tx.lastRequest().url());
         assertEquals(HttpMethod.POST, tx.lastRequest().method());
+    }
+
+    @Test
+    void pictureGetSetDelete() {
+        tx.respond(200, "{\"url\":\"https://x/p.jpg\"}");
+        client.groups.getPicture("s", "120363@g.us");
+        assertEquals("http://h/api/sessions/s/groups/120363@g.us/picture", tx.lastRequest().url());
+
+        tx.respond(200, "{\"success\":true}");
+        client.groups.setPicture("s", "120363@g.us", SetGroupPictureRequest.builder().url("https://x/n.jpg").build());
+        assertEquals(HttpMethod.PUT, tx.lastRequest().method());
+
+        tx.respond(200, "{\"success\":true}");
+        client.groups.deletePicture("s", "120363@g.us");
+        assertEquals(HttpMethod.DELETE, tx.lastRequest().method());
     }
 }

@@ -2,8 +2,40 @@ import { resolve } from 'path';
 
 type EnvConfig = Record<string, unknown>;
 
-// The 'main' (auth/audit) connection is always this fixed SQLite file (not env-overridable).
-const MAIN_DB_PATH = './data/main.sqlite';
+// Default SQLite file of the 'main' (auth/audit) connection. The runtime path is env-overridable via
+// MAIN_DATABASE_NAME (configuration.ts), so the collision guard below must resolve the EFFECTIVE
+// path — comparing against this constant alone would false-negative when MAIN_DATABASE_NAME moves
+// the main DB and DATABASE_NAME follows it, and false-positive when the main DB moved away but
+// DATABASE_NAME still points at the (now unused) default file.
+const MAIN_DB_DEFAULT_PATH = './data/main.sqlite';
+
+/**
+ * Collision guard shared by boot validation (validateEnv below) and the migration CLI
+ * (src/database/data-source.ts / data-source-main.ts — the TypeORM CLI never runs ConfigModule's
+ * validate(), so both entry points apply this guard themselves). When the 'data' connection is
+ * SQLite (explicit or defaulted), its file must not BE the 'main' connection's file: two TypeORM
+ * connections on one SQLite file run separate migration ledgers + synchronize policies against the
+ * same tables. Both paths are resolved exactly like the runtime (MAIN_DATABASE_NAME / DATABASE_NAME
+ * overriding the defaults in configuration.ts) and normalized to absolute, so a relative spelling
+ * ('./data/../data/main.sqlite') or an absolute path naming the same file is caught. Returns the
+ * error message on collision, null otherwise.
+ */
+export function sqliteDataMainPathCollision(config: EnvConfig): string | null {
+  const read = (key: string): string | undefined => {
+    const value = config[key];
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+  };
+  // Postgres uses a bare database NAME, never a file path — no collision is possible there.
+  const dbType = read('DATABASE_TYPE');
+  if (dbType !== undefined && dbType !== 'sqlite') return null;
+  const dataDbName = read('DATABASE_NAME');
+  if (!dataDbName) return null;
+  const mainDbPath = read('MAIN_DATABASE_NAME') || MAIN_DB_DEFAULT_PATH;
+  if (resolve(dataDbName) === resolve(mainDbPath)) {
+    return `DATABASE_NAME must not point at the main database file (${mainDbPath}); use a separate file`;
+  }
+  return null;
+}
 
 /**
  * Fail-fast environment validation. Wired as ConfigModule's `validate`
@@ -74,11 +106,14 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // SQLite (explicit or default): DATABASE_NAME is a file path for the 'data' connection. It must
     // not resolve to the 'main' DB file — two TypeORM connections on one SQLite file run separate
     // migration ledgers + synchronize policies against the same tables, risking schema divergence and
-    // lock contention. (Postgres DATABASE_NAME is a bare db name, so this never applies there.)
-    const dataDbName = str('DATABASE_NAME');
-    if (dataDbName && resolve(dataDbName) === resolve(MAIN_DB_PATH)) {
-      errors.push(`DATABASE_NAME must not point at the main database file (${MAIN_DB_PATH}); use a separate file`);
+    // lock contention. The main path is resolved like the runtime (MAIN_DATABASE_NAME || default),
+    // not assumed to be the default file. (Postgres DATABASE_NAME is a bare db name, so this never
+    // applies there.)
+    const collision = sqliteDataMainPathCollision(config);
+    if (collision) {
+      errors.push(collision);
     }
+    const dataDbName = str('DATABASE_NAME');
     // Reject a bare name with no path separator and no .sqlite/.db suffix — the exact signature of a
     // PostgreSQL DATABASE_NAME (e.g. 'openwa') leaking into a SQLite run (#677). That bare name becomes
     // the SQLite file PATH, opening a file named 'openwa' under the read-only app rootfs →
@@ -92,10 +127,16 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     }
   }
 
+  // Plain decimal digits only: these numeric knobs are read downstream with parseInt(raw, 10),
+  // which silently truncates spellings Number() would accept (`1e6` → 1, `0x100` → 0) — the boot
+  // would validate one value and then configure another. Requiring digits keeps the validated
+  // value identical to the parsed one.
+  const DECIMAL_INTEGER = /^\d+$/;
+
   const checkPort = (key: string): void => {
     const raw = str(key);
     if (raw === undefined) return;
-    const n = Number(raw);
+    const n = DECIMAL_INTEGER.test(raw) ? Number(raw) : NaN;
     if (!Number.isInteger(n) || n < 1 || n > 65535) {
       errors.push(`${key} must be an integer port in [1, 65535] (got "${raw}")`);
     }
@@ -109,7 +150,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   const checkNonNegativeInt = (key: string): void => {
     const raw = str(key);
     if (raw === undefined) return;
-    const n = Number(raw);
+    const n = DECIMAL_INTEGER.test(raw) ? Number(raw) : NaN;
     if (!Number.isInteger(n) || n < 0) {
       errors.push(`${key} must be a non-negative integer (got "${raw}")`);
     }
@@ -127,6 +168,10 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'MAX_CONCURRENT_SESSIONS', // 0 = unlimited
     'INGRESS_INSTANCE_TTL',
     'WEBHOOK_DISPATCH_MAX_QUEUED',
+    'STATS_CACHE_TTL_MS', // 0 = memo disabled
+    'WEBHOOK_MAX_PER_SESSION', // 0 = unlimited
+    'AUTOMATION_MAX_PER_SESSION', // 0 = unlimited
+    'WEBHOOK_MEDIA_INLINE_MAX_BYTES', // 0 = never inline media
   ]) {
     checkNonNegativeInt(key);
   }
@@ -137,7 +182,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   const checkPositiveInt = (key: string): void => {
     const raw = str(key);
     if (raw === undefined) return;
-    const n = Number(raw);
+    const n = DECIMAL_INTEGER.test(raw) ? Number(raw) : NaN;
     if (!Number.isInteger(n) || n < 1) {
       errors.push(`${key} must be a positive integer (got "${raw}")`);
     }
@@ -146,14 +191,71 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'RATE_LIMIT_SHORT_LIMIT',
     'RATE_LIMIT_MEDIUM_LIMIT',
     'RATE_LIMIT_LONG_LIMIT',
+    // WebSocket (/events) limits: 0 would disable a tier entirely (a self-DoS on the WS surface).
+    'WS_RATE_LIMIT_FRAME_PER_SECOND',
+    'WS_RATE_LIMIT_FRAME_BURST',
+    'WS_RATE_LIMIT_HANDSHAKE_MAX',
+    'WS_RATE_LIMIT_HANDSHAKE_WINDOW_MS',
+    'WS_MAX_SOCKETS_PER_KEY',
     'WEBHOOK_TIMEOUT',
     'INGRESS_INSTANCE_LIMIT',
     'REQUEST_TIMEOUT_MS',
     'HEADERS_TIMEOUT_MS',
     'KEEPALIVE_TIMEOUT_MS',
     'WEBHOOK_DISPATCH_CONCURRENCY',
+    // 0 would reject every webhook dispatch (a total, silent webhook outage).
+    'WEBHOOK_MAX_PAYLOAD_BYTES',
+    // 0 would refuse every request carrying a body (a self-DoS), so the budget is positive-only.
+    'INFLIGHT_BODY_BUDGET_BYTES',
+    // Media conversion: each is read with a `> 0` guard that silently falls back to the default,
+    // so a typo or a 0 quietly means "the default" instead of what the operator wrote.
+    'MEDIA_CONVERSION_TIMEOUT_MS',
+    'MEDIA_CONVERSION_MAX_OUTPUT_BYTES',
+    'MEDIA_CONVERSION_CONCURRENCY',
+    // Session ownership leases, same fall-back-silently reasoning.
+    'SESSION_LEASE_TTL_MS',
+    'SESSION_LEASE_HEARTBEAT_MS',
+    'SESSION_TAKEOVER_SWEEP_MS',
+    'SESSION_PROXY_TIMEOUT_MS',
   ]) {
     checkPositiveInt(key);
+  }
+
+  // A heartbeat that does not fit inside the lease renews too late to matter: the claim lapses
+  // between ticks, peers adopt sessions from a perfectly healthy node, and nothing in the logs says
+  // why. The defaults must be substituted for whatever is unset — validating only the key the
+  // operator happened to set would let a lone oversized heartbeat through.
+  const leaseTtlMs = Number(str('SESSION_LEASE_TTL_MS') ?? '60000');
+  const heartbeatMs = Number(str('SESSION_LEASE_HEARTBEAT_MS') ?? '20000');
+  // Strictly LESS than half: at exactly half, two renewals span the whole TTL, so a single missed
+  // renewal lands on the expiry instant — a tie that any scheduling jitter turns into a lapse. A
+  // margin below half is what lets one late or failed renewal still land inside the lease.
+  if (Number.isInteger(leaseTtlMs) && Number.isInteger(heartbeatMs) && heartbeatMs * 2 >= leaseTtlMs) {
+    errors.push(
+      `SESSION_LEASE_HEARTBEAT_MS (${heartbeatMs}) must be less than half of SESSION_LEASE_TTL_MS (${leaseTtlMs}) ` +
+        'so a renewal that is late or fails once still lands inside the lease',
+    );
+  }
+
+  // The forwarder builds an absolute URL from this; a value without a scheme parses as something
+  // unusable (`localhost:2785` reads as the scheme `localhost:`) and only fails at the first
+  // forward, as a 500 on a request that had nothing wrong with it. Embedded credentials
+  // (`http://user:pw@host`) parse fine here but undici's fetch rejects them outright — every
+  // forward would 503 permanently, with the credentials sitting in sessions.nodeUrl — so refuse
+  // those at boot too rather than let them reach the DB and the first forward.
+  const nodeUrl = str('NODE_URL');
+  if (nodeUrl) {
+    let parsed: URL | undefined;
+    try {
+      parsed = new URL(nodeUrl);
+    } catch {
+      parsed = undefined;
+    }
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+      errors.push(`NODE_URL must be an absolute http(s) URL (got "${nodeUrl}")`);
+    } else if (parsed.username || parsed.password) {
+      errors.push('NODE_URL must not embed credentials — the forwarder cannot send a URL with a userinfo component');
+    }
   }
 
   // Boolean feature flags read at module-eval time (app.module.ts) with a bare `=== 'true'` /
@@ -179,10 +281,24 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'MCP_ENABLED',
     'SERVE_DASHBOARD',
     'AUTO_START_SESSIONS',
+    'STATUS_SEED_ON_READY',
     'STORE_EPHEMERAL_MESSAGES',
     'RESOLVE_LID_TO_PHONE',
     'SIMULATE_TYPING',
     'SEARCH_ENABLED',
+    // Read at boot by the throttler factory (app.module.ts) and CacheService with `=== 'true'`: a
+    // typo like `ture` silently downgrades rate-limit storage + cache to per-process in-memory.
+    'REDIS_ENABLED',
+    // Read by the SSRF guard's redirect loop with `=== 'true'`: a typo silently keeps the secure
+    // default, but an accidental 'true'-ish string is not the flag the operator meant to audit.
+    'PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS',
+    // Read with `=== 'true'`, so a typo leaves sends unpaced — the silent failure this whole
+    // feature exists to avoid, and invisible without this check.
+    'SEND_PACING_ENABLED',
+    // Opt-in feature flags read with `=== 'true'`: a typo silently leaves the feature OFF, so the
+    // conversion/archive endpoints answer as if nothing was configured. Same class as the above.
+    'MEDIA_CONVERSION_ENABLED',
+    'CHAT_MEDIA_ARCHIVE_ENABLED',
   ]) {
     checkBool(key);
   }

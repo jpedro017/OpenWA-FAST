@@ -84,7 +84,8 @@
     "loadingChats": "Loading chats...",
     "empty": "No chats",
     "noMessageYet": "No messages yet",
-    "unreadBadge": "{{count}} unread messages",
+    "unreadBadge": "{{count}} unread message",
+    "unreadBadge_other": "{{count}} unread messages",
     "loadingMessages": "Loading messages...",
     "noMessagesInChat": "No messages yet. Send the first message to get started!",
     "downloadDocument": "Download document",
@@ -123,14 +124,32 @@
       "status": "Status"
     },
     "status": {
-      "placeholderTitle": "Status",
-      "placeholderDesc": "Per-contact status updates arrive in a future update."
+      "itemCount": "{{count}} update",
+      "itemCount_other": "{{count}} updates",
+      "empty": "No contacts have an active status.",
+      "loadError": "Failed to load statuses.",
+      "mediaUnavailable": "Media unavailable",
+      "compose": "Post a status",
+      "composeText": "Text",
+      "composeImage": "Image",
+      "recipients": "Who can see this",
+      "recipientsHint": "Baileys requires a recipient list; whatsapp-web.js uses your status-privacy audience.",
+      "noContacts": "No contacts found",
+      "caption": "Caption",
+      "backgroundColor": "Background color",
+      "font": "Font",
+      "fontDefault": "Default",
+      "orLabel": "or",
+      "post": "Post",
+      "posted": "Status posted",
+      "postFailed": "Could not post the status"
     },
     "channels": {
       "notSupported": "Channels are not supported on the Baileys engine.",
       "empty": "You are not subscribed to any channels yet.",
       "notReady": "Session is not ready yet.",
-      "subscribers": "{{count}} subscribers"
+      "subscribers": "{{count}} subscriber",
+      "subscribers_other": "{{count}} subscribers"
     },
     "errors": {
       "loadSessions": "Failed to load sessions",
@@ -208,7 +227,10 @@
     "connecting": "Connecting...",
     "qr_ready": "Scan QR",
     "ready": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "action_required": "Action required",
+    "failed": "Failed",
+    "authenticating": "Authenticating..."
   },
   "sessions": {
     "title": "Sessions",
@@ -248,6 +270,10 @@
       "errorTitle": "Delete Failed",
       "errorDefault": "Failed to delete session"
     },
+    "start": {
+      "teardownPendingTitle": "Session Starting",
+      "teardownPending": "A credential teardown for this session is still settling. Wait a moment and try again."
+    },
     "qr": {
       "title": "Scan QR Code",
       "step1": "<strong>1.</strong> Open WhatsApp on your phone",
@@ -275,6 +301,7 @@
       "start": "Start",
       "stop": "Stop",
       "reconnect": "Reconnect",
+      "unlink": "Unlink",
       "delete": "Delete",
       "killStuck": "Kill Stuck"
     },
@@ -283,6 +310,8 @@
       "readyDesc": "WhatsApp session is now connected",
       "disconnectedTitle": "Session Disconnected",
       "disconnectedDesc": "WhatsApp session was disconnected",
+      "actionRequiredTitle": "Action required",
+      "actionRequiredDesc": "This session needs your attention. Open the session to see what to do.",
       "failedTitle": "Session Failed",
       "failedDesc": "The WhatsApp session failed to start. Open the session to see the reason."
     },
@@ -290,7 +319,8 @@
       "phone": "Phone",
       "sessionId": "Session ID",
       "lastActive": "Last Active",
-      "error": "Error"
+      "error": "Error",
+      "restriction": "Restriction"
     },
     "forceKill": {
       "title": "Kill Stuck Session",
@@ -301,6 +331,18 @@
       "success": "Session has been force-killed. You can restart it now.",
       "failedTitle": "Force-Kill Failed",
       "failed": "Failed to force-kill the session."
+    },
+    "unlink": {
+      "title": "Unlink Device",
+      "message": "Unlink session <strong>\"{{name}}\"</strong> from the WhatsApp account?",
+      "warning": "WhatsApp removes this device from the account's Linked Devices and the session stops. Reconnecting requires a fresh QR scan or pairing code. To also erase all local data, delete the session afterwards.",
+      "confirm": "Unlink",
+      "successTitle": "Device Unlinked",
+      "success": "Unlink completed: the device was logged out and the local session credentials were cleared. Reconnecting requires a fresh QR scan or pairing code.",
+      "incompleteTitle": "Unlink Incomplete",
+      "incomplete": "The session stopped locally, but the logout operation is incomplete — the device may still be linked. Start the session and retry the logout.",
+      "failedTitle": "Unlink Failed",
+      "failed": "Failed to unlink the session."
     },
     "pairing": {
       "tabQr": "QR Code",
@@ -319,6 +361,12 @@
       "step3": "<strong>3.</strong> Tap <strong>Link a Device</strong>, then tap <strong>Link with phone number instead</strong>",
       "step4": "<strong>4.</strong> Enter the 8-character code shown above on your phone",
       "waitingConnection": "Waiting for your phone to link…"
+    },
+    "restriction": {
+      "reachout_timelock": "New chats blocked",
+      "tos_block": "Blocked by WhatsApp",
+      "proxy_block": "Connection blocked",
+      "until": "until {{date}}"
     }
   },
   "webhooks": {
@@ -338,6 +386,7 @@
       "title": "Filters (optional)",
       "hint": "Only fire when all conditions match. Applies to message events.",
       "badge": "{{count}} filter",
+      "badge_other": "{{count}} filters",
       "addCondition": "Add condition",
       "removeCondition": "Remove condition",
       "caseSensitive": "Case sensitive",
@@ -699,7 +748,8 @@
       "disconnected": "Disconnected",
       "disabled": "Disabled"
     },
-    "envPinNote": "Pinned by an environment variable — this is the running value; dashboard changes won't apply until that variable is unset.",
+    "envPinNote": "Pinned by the environment variable {{name}} — this is the running value; dashboard changes won't apply until that variable is unset.",
+    "pendingRestartNote": "Saved, but not applied yet — restart the server for this change to take effect.",
     "migration": {
       "title": "Heads up — this changes the data backend",
       "dbWarning": "The new database starts empty. Download a backup of your current data now (while still on the old database), then restore it after the restart.",
@@ -773,7 +823,12 @@
       "title": "Install a plugin",
       "hint": "Upload a plugin packaged as a .zip (with a manifest.json). It runs sandboxed once enabled.",
       "choose": "Choose a .zip file…",
-      "tooLarge": "The file exceeds the 5 MB limit."
+      "tooLarge": "The file exceeds the 5 MB limit.",
+      "catalogHint": "Install directly from the OpenWA plugin catalog. The .zip is fetched server-side through the SSRF guard, then validated and sandboxed.",
+      "catalogTeaser": "Looking for plugins?",
+      "catalogTeaserSuffix": "browses the official marketplace.",
+      "tabCatalog": "Catalog",
+      "tabUpload": "Upload .zip"
     },
     "toasts": {
       "errorTitle": "Plugin Error",
@@ -791,7 +846,8 @@
       "enableFailedTitle": "Enable failed",
       "disableFailedTitle": "Disable failed",
       "configRequiredTitle": "Configuration required",
-      "configRequiredDesc": "Fill in the required field(s) before enabling: {{fields}}"
+      "configRequiredDesc": "Fill in the required field(s) before enabling: {{fields}}",
+      "updateFailed": "Update failed"
     },
     "sessions": {
       "activationTitle": "Run for",
@@ -870,6 +926,17 @@
         "secretRegenerated": "Secret regenerated",
         "actionFailed": "Action failed"
       }
+    },
+    "catalog": {
+      "empty": "No plugins in the catalog.",
+      "install": "Install",
+      "installed": "Installed",
+      "noDownload": "This catalog entry has no download URL.",
+      "noMatch": "No plugins match your search.",
+      "searchPlaceholder": "Search plugins…",
+      "update": "Update",
+      "updateAvailable": "Update available",
+      "updated": "Plugin updated"
     }
   },
   "search": {

@@ -84,7 +84,10 @@
     "loadingChats": "טוען שיחות...",
     "empty": "אין שיחות",
     "noMessageYet": "אין הודעות עדיין",
-    "unreadBadge": "{{count}} הודעות שלא נקראו",
+    "unreadBadge": "{{count}} הודעה שלא נקראה",
+    "unreadBadge_other": "{{count}} הודעות שלא נקראו",
+    "unreadBadge_two": "שתי הודעות שלא נקראו",
+    "unreadBadge_many": "{{count}} הודעות שלא נקראו",
     "loadingMessages": "טוען הודעות...",
     "noMessagesInChat": "אין הודעות עדיין. שלח את ההודעה הראשונה כדי להתחיל!",
     "downloadDocument": "הורדת מסמך",
@@ -123,14 +126,37 @@
       "status": "סטטוס"
     },
     "status": {
-      "placeholderTitle": "סטטוס",
-      "placeholderDesc": "עדכוני סטטוס לפי איש קשר יגיעו בעדכון עתידי."
+      "itemCount": "עדכון {{count}}",
+      "itemCount_one": "עדכון {{count}}",
+      "itemCount_two": "{{count}} עדכונים",
+      "itemCount_many": "{{count}} עדכונים",
+      "itemCount_other": "{{count}} עדכונים",
+      "empty": "לאף איש קשר אין סטטוס פעיל.",
+      "loadError": "טעינת הסטטוסים נכשלה.",
+      "mediaUnavailable": "המדיה אינה זמינה",
+      "compose": "פרסם סטטוס",
+      "composeText": "טקסט",
+      "composeImage": "תמונה",
+      "recipients": "מי יכול לראות את זה",
+      "recipientsHint": "Baileys דורש רשימת נמענים; whatsapp-web.js משתמש בקהל פרטיות הסטטוס שלך.",
+      "noContacts": "לא נמצאו אנשי קשר",
+      "caption": "כיתוב",
+      "backgroundColor": "צבע רקע",
+      "font": "גופן",
+      "fontDefault": "ברירת מחדל",
+      "orLabel": "או",
+      "post": "פרסם",
+      "posted": "הסטטוס פורסם",
+      "postFailed": "לא ניתן היה לפרסם את הסטטוס"
     },
     "channels": {
       "notSupported": "ערוצים אינם נתמכים במנוע Baileys.",
       "empty": "עדיין אינך רשום/ה לאף ערוץ.",
       "notReady": "הסשן עדיין אינו מוכן.",
-      "subscribers": "{{count}} מנויים"
+      "subscribers": "{{count}} מנוי",
+      "subscribers_other": "{{count}} מנויים",
+      "subscribers_two": "שני מנויים",
+      "subscribers_many": "{{count}} מנויים"
     },
     "errors": {
       "loadSessions": "טעינת הסשנים נכשלה",
@@ -208,7 +234,10 @@
     "connecting": "מתחבר...",
     "qr_ready": "סריקת QR",
     "ready": "מחובר",
-    "disconnected": "מנותק"
+    "disconnected": "מנותק",
+    "action_required": "נדרשת פעולה",
+    "failed": "נכשל",
+    "authenticating": "מאמת..."
   },
   "sessions": {
     "title": "Sessions",
@@ -275,6 +304,7 @@
       "start": "הפעלה",
       "stop": "עצירה",
       "reconnect": "התחברות מחדש",
+      "unlink": "ביטול קישור",
       "delete": "מחיקה",
       "killStuck": "סגור תקוע"
     },
@@ -283,6 +313,8 @@
       "readyDesc": "ה-Session של WhatsApp מחובר",
       "disconnectedTitle": "ה-Session נותק",
       "disconnectedDesc": "ה-Session של WhatsApp נותק",
+      "actionRequiredTitle": "נדרשת פעולה",
+      "actionRequiredDesc": "ה-Session הזה דורש את תשומת לבך. פתחו את ה-Session כדי לראות מה לעשות.",
       "failedTitle": "ה-Session נכשל",
       "failedDesc": "ה-Session של WhatsApp נכשל באתחול. פתחו את ה-Session כדי לראות את הסיבה."
     },
@@ -290,7 +322,8 @@
       "phone": "טלפון",
       "sessionId": "מזהה Session",
       "lastActive": "פעילות אחרונה",
-      "error": "שגיאה"
+      "error": "שגיאה",
+      "restriction": "הגבלה"
     },
     "forceKill": {
       "title": "סגירת סשן תקוע",
@@ -301,6 +334,18 @@
       "success": "הסשן נסגר בכוח. ניתן להפעיל אותו מחדש כעת.",
       "failedTitle": "הסגירה בכוח נכשלה",
       "failed": "סגירת הסשן בכוח נכשלה."
+    },
+    "unlink": {
+      "title": "ביטול קישור המכשיר",
+      "message": "לבטל את קישור הסשן <strong>\"{{name}}\"</strong> מחשבון הוואטסאפ?",
+      "warning": "וואטסאפ תסיר מכשיר זה מרשימת המכשירים המקושרים של החשבון והסשן ייעצר. ההתחברות מחדש דורשת סריקת QR חדשה או קוד התאמה. כדי למחוק גם את כל הנתונים המקומיים, מחק את הסשן לאחר מכן.",
+      "confirm": "ביטול קישור",
+      "successTitle": "המכשיר נותק",
+      "success": "ביטול הקישור הושלם: המכשיר נותק ואישורי הסשן המקומיים נמחקו. חיבור מחדש דורש סריקת QR חדשה או קוד הוראה.",
+      "failedTitle": "ביטול הקישור נכשל",
+      "failed": "לא ניתן לבטל את קישור הסשן.",
+      "incompleteTitle": "ביטול קישור חלקי",
+      "incomplete": "הסשן נעצר מקומית, אך פעולת ההתנתקות אינה מושלמת — ייתכן שהמכשיר עדיין מקושר. הפעל את הסשן ונסה שוב את ביטול הקישור."
     },
     "pairing": {
       "tabQr": "קוד QR",
@@ -319,6 +364,16 @@
       "step3": "<strong>3.</strong> יש להקיש על <strong>קישור מכשיר</strong>, ולאחר מכן על <strong>קישור עם מספר טלפון במקום זאת</strong>",
       "step4": "<strong>4.</strong> יש להזין במכשיר את הקוד בן 8 התווים המוצג למעלה",
       "waitingConnection": "ממתין לקישור המכשיר שלך…"
+    },
+    "start": {
+      "teardownPendingTitle": "הפעלת סשן",
+      "teardownPending": "פירוק אישורים לסשן זה עדיין מתבצע. המתן רגע ונסה שוב."
+    },
+    "restriction": {
+      "reachout_timelock": "צ׳אטים חדשים חסומים",
+      "tos_block": "נחסם על ידי WhatsApp",
+      "proxy_block": "החיבור חסום",
+      "until": "עד {{date}}"
     }
   },
   "webhooks": {
@@ -336,6 +391,8 @@
     "saveChanges": "שמירת שינויים",
     "filters": {
       "badge": "{{count}} מסנן",
+      "badge_other": "{{count}} מסננים",
+      "badge_many": "{{count}} מסננים",
       "badge_two": "שני מסננים",
       "title": "מסננים (אופציונלי)",
       "hint": "הפעלה רק כאשר כל התנאים מתקיימים. חל על אירועי הודעות.",
@@ -719,7 +776,8 @@
     "toasts": {
       "saveFailed": "השמירה נכשלה"
     },
-    "envPinNote": "מקובע על ידי משתנה סביבה — זהו הערך הפעיל; שינויים בלוח הבקרה לא ייכנסו לתוקף עד שמשתנה זה יבוטל.",
+    "envPinNote": "מקובע על ידי משתנה הסביבה {{name}} — זהו הערך הפעיל; שינויים בלוח הבקרה לא ייכנסו לתוקף עד שמשתנה זה יבוטל.",
+    "pendingRestartNote": "נשמר, אך טרם הוחל — הפעילו מחדש את השרת כדי שהשינוי ייכנס לתוקף.",
     "migration": {
       "title": "שימו לב — פעולה זו משנה את מנגנון אחסון הנתונים",
       "dbWarning": "מסד הנתונים החדש מתחיל ריק. הורידו עכשיו גיבוי של הנתונים הנוכחיים (בעודכם עדיין על מסד הנתונים הישן), ולאחר מכן שחזרו אותו לאחר ההפעלה מחדש.",
@@ -774,7 +832,12 @@
       "title": "התקנת תוסף",
       "hint": "ניתן להעלות תוסף ארוז כקובץ .zip (הכולל manifest.json). הוא פועל בארגז חול לאחר ההפעלה.",
       "choose": "בחירת קובץ ‎.zip‎…",
-      "tooLarge": "הקובץ חורג מהמגבלה של ‎5 MB‎."
+      "tooLarge": "הקובץ חורג מהמגבלה של ‎5 MB‎.",
+      "catalogHint": "התקינו ישירות מקטלוג התוספים של OpenWA. קובץ ה-.zip נשלף מהשרת דרך מגן ה-SSRF, מאומת ומורץ בארגז חול.",
+      "catalogTeaser": "מחפשים תוספים?",
+      "catalogTeaserSuffix": "סוקר את החנות הרשמית.",
+      "tabCatalog": "קטלוג",
+      "tabUpload": "העלאת .zip"
     },
     "toasts": {
       "errorTitle": "שגיאת תוסף",
@@ -792,7 +855,8 @@
       "enableFailedTitle": "ההפעלה נכשלה",
       "disableFailedTitle": "ההשבתה נכשלה",
       "configRequiredTitle": "נדרשת הגדרה",
-      "configRequiredDesc": "מלא את שדות החובה לפני ההפעלה: {{fields}}"
+      "configRequiredDesc": "מלא את שדות החובה לפני ההפעלה: {{fields}}",
+      "updateFailed": "העדכון נכשל"
     },
     "sessions": {
       "activationTitle": "הפעלה עבור",
@@ -871,6 +935,17 @@
         "secretRegenerated": "הסוד נוצר מחדש",
         "actionFailed": "הפעולה נכשלה"
       }
+    },
+    "catalog": {
+      "empty": "אין תוספים בקטלוג.",
+      "install": "התקנה",
+      "installed": "מותקן",
+      "noDownload": "לערך קטלוג זה אין כתובת הורדה.",
+      "noMatch": "אין תוספים התואמים את החיפוש.",
+      "searchPlaceholder": "חיפוש תוספים…",
+      "update": "עדכון",
+      "updateAvailable": "עדכון זמין",
+      "updated": "התוסף עודכן"
     }
   },
   "search": {

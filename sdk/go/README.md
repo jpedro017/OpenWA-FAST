@@ -64,17 +64,17 @@ func main() {
 
 ## Configuration
 
-| Option | Purpose |
-| ------ | ------- |
-| `WithTimeout(d)` | Per-request timeout (default 30s). |
-| `WithHTTPClient(hc)` | Inject a preconfigured `*http.Client` (pool, jar, timeout). |
-| `WithTransport(rt)` | Inject the base `http.RoundTripper` (proxy, TLS, test double). |
-| `WithLogger(l)` | Inject a `Logger` (default: no-op). |
-| `WithRetry(p)` | Enable automatic retries (off by default). |
-| `WithMiddleware(mw...)` | Add transport middleware (tracing, metrics, auth). |
-| `WithUserAgent(ua)` | Override the `User-Agent`. |
-| `WithHeader(k, v)` | Add a default header on every request. |
-| `WithInsecureHTTP()` | Suppress the plaintext-`http://` warning. |
+| Option                  | Purpose                                                        |
+| ----------------------- | -------------------------------------------------------------- |
+| `WithTimeout(d)`        | Per-request timeout (default 30s).                             |
+| `WithHTTPClient(hc)`    | Inject a preconfigured `*http.Client` (pool, jar, timeout).    |
+| `WithTransport(rt)`     | Inject the base `http.RoundTripper` (proxy, TLS, test double). |
+| `WithLogger(l)`         | Inject a `Logger` (default: no-op).                            |
+| `WithRetry(p)`          | Enable automatic retries (off by default).                     |
+| `WithMiddleware(mw...)` | Add transport middleware (tracing, metrics, auth).             |
+| `WithUserAgent(ua)`     | Override the `User-Agent`.                                     |
+| `WithHeader(k, v)`      | Add a default header on every request.                         |
+| `WithInsecureHTTP()`    | Suppress the plaintext-`http://` warning.                      |
 
 ## Typed errors
 
@@ -172,3 +172,34 @@ go vet ./...
 The `TestRouting` table asserts the exact method and path of every service call,
 so a wrong path (the historical `/messages/text` vs `/messages/send-text`) fails
 at test time.
+
+## Releasing
+
+There is no publish workflow, and none is possible: Go has no registry to push
+to. The module proxy serves whatever a repository tag points at, so **tagging
+is the release**.
+
+The tag must carry the module's directory prefix, because the module lives in a
+subdirectory rather than at the repository root:
+
+```bash
+# Correct — `sdk/go/` prefix, matching `module github.com/rmyndharis/OpenWA/sdk/go`
+git tag sdk/go/v0.2.0 && git push origin sdk/go/v0.2.0
+```
+
+A bare `v0.2.0` tag is the _app_ version and does nothing for this module.
+Without a prefixed tag, `go get` resolves a pseudo-version
+(`v0.0.0-<date>-<commit>`) — usable, but callers cannot pin a release.
+
+Cutting a release:
+
+1. Bump `DefaultUserAgent` in `options.go` (it carries the SDK version and is
+   sent on every request, so it drifts silently if only the tag moves).
+2. Land that on `main`.
+3. Tag that commit `sdk/go/v<version>` and push the tag.
+
+> **A published version is immutable.** Once the module proxy has served
+> `sdk/go/vX.Y.Z` it caches it permanently — deleting or moving the tag does not
+> take it back, and the only remedy is to publish a higher version (and, if the
+> bad one must be discouraged, a `retract` directive in `go.mod`). Tag a commit
+> that is already green on `main`.

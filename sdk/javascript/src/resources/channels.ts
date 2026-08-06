@@ -8,6 +8,8 @@
 import { encodeSegment } from '../http.js';
 import type { OpenWAClient } from '../client.js';
 import type {
+  CreateChannelRequest,
+  MuteChannelRequest,
   ChannelMessageQuery,
   ChannelMessageRecord,
   ChannelRecord,
@@ -40,6 +42,37 @@ export class ChannelsResource {
       method: 'GET',
       path: `/api/sessions/${encodeSegment(sessionId)}/channels/${encodeSegment(channelId)}/messages`,
       query,
+    });
+  }
+
+  /** Create a channel. The account owns it, which is what makes `delete` possible later. */
+  create(sessionId: string, body: CreateChannelRequest): Promise<ChannelRecord> {
+    return this.client.request<ChannelRecord>({
+      method: 'POST',
+      path: `/api/sessions/${encodeSegment(sessionId)}/channels`,
+      body,
+    });
+  }
+
+  /**
+   * Delete a channel this account owns. Irreversible, and every subscriber loses it.
+   *
+   * Note the path: `unsubscribe` is the `DELETE` route, and these two are deliberately not reachable
+   * by the same request — leaving a channel and destroying it are very different acts.
+   */
+  delete(sessionId: string, channelId: string): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'POST',
+      path: `/api/sessions/${encodeSegment(sessionId)}/channels/${encodeSegment(channelId)}/delete`,
+    });
+  }
+
+  /** Mute or unmute a channel's notifications. The subscription is untouched either way. */
+  mute(sessionId: string, channelId: string, body: MuteChannelRequest): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'POST',
+      path: `/api/sessions/${encodeSegment(sessionId)}/channels/${encodeSegment(channelId)}/mute`,
+      body,
     });
   }
 

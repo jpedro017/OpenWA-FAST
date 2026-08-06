@@ -1,7 +1,8 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
-import { SessionService } from '../session/session.service';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { EngineRegistry } from '../../engine/engine-registry.service';
 import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 import { paginate, ListOptions } from '../../common/utils/paginate';
+import { parseWaId } from '../../engine/identity/wa-id';
 
 /**
  * Owns engine access for contact operations so the "session not started" guard and
@@ -9,14 +10,11 @@ import { paginate, ListOptions } from '../../common/utils/paginate';
  */
 @Injectable()
 export class ContactService {
-  constructor(private readonly sessionService: SessionService) {}
+  constructor(private readonly engines: EngineRegistry) {}
 
   private getEngine(sessionId: string): IWhatsAppEngine {
-    const engine = this.sessionService.getEngine(sessionId);
-    if (!engine) {
-      throw new BadRequestException('Session is not started');
-    }
-    return engine;
+    // EngineRegistry.require()'s default is this exact 400 "Session is not started".
+    return this.engines.require(sessionId);
   }
 
   getContacts(sessionId: string, opts: ListOptions = {}) {
@@ -102,6 +100,59 @@ export class ContactService {
 
   blockContact(sessionId: string, contactId: string) {
     return this.getEngine(sessionId).blockContact(contactId);
+  }
+
+  /**
+   * An addressbook entry is keyed by a PHONE NUMBER, so a privacy-id (`@lid`) contact cannot be
+   * saved or removed: the lid's digits are not a phone number, and whatsapp-web.js — which takes a
+   * bare number rather than a JID — would happily store them as one, silently creating an
+   * addressbook entry for a number that does not exist.
+   *
+   * Refused rather than forward-resolved through the lid mapping: the mapping is best-effort, and a
+   * write that lands under the wrong number is worse than one the caller is told to redo with a
+   * phone-based id.
+   */
+  private assertAddressable(contactId: string): void {
+    const kind = parseWaId(contactId).kind;
+    // Allow-list rather than deny-list: only a user id (or a bare number, which parses as
+    // `unknown`) names a phone. A group/newsletter/broadcast/status id also carries digits that
+    // whatsapp-web.js would happily store as a phone number for a contact that does not exist.
+    if (kind === 'user' || this.isBareNumber(contactId)) return;
+    if (kind === 'lid') {
+      throw new BadRequestException(
+        `Contact ${contactId} is a privacy id (@lid) with no known phone number; the addressbook is keyed by phone number, so pass a phone-based contact id instead`,
+      );
+    }
+    throw new BadRequestException(
+      `Contact ${contactId} does not name a person; the addressbook is keyed by phone number, so pass a phone-based contact id instead`,
+    );
+  }
+
+  /** A digits-only id, e.g. `628123456789` — accepted for convenience and qualified below. */
+  private isBareNumber(contactId: string): boolean {
+    return parseWaId(contactId).kind === 'unknown' && /^\d{5,}$/.test(contactId.trim());
+  }
+
+  /**
+   * Qualify a bare number to the neutral `@c.us` dialect before it reaches an engine.
+   *
+   * Baileys keys the addressbook app-state patch by the id it is handed and only folds a recognised
+   * user JID to the engine dialect, so an unqualified number would be written under a key WhatsApp
+   * never reads — reported as success. whatsapp-web.js takes the user-part either way, so the
+   * qualification is a no-op there.
+   */
+  private toAddressableId(contactId: string): string {
+    return this.isBareNumber(contactId) ? `${contactId.trim()}@c.us` : contactId;
+  }
+
+  upsertContact(sessionId: string, contactId: string, firstName: string, lastName?: string) {
+    this.assertAddressable(contactId);
+    return this.getEngine(sessionId).upsertContact(this.toAddressableId(contactId), firstName, lastName);
+  }
+
+  deleteContact(sessionId: string, contactId: string) {
+    this.assertAddressable(contactId);
+    return this.getEngine(sessionId).deleteContact(this.toAddressableId(contactId));
   }
 
   unblockContact(sessionId: string, contactId: string) {
