@@ -180,10 +180,3 @@ export interface WwjsChannelMessage {
   hasMedia?: boolean;
   mediaUrl?: string;
 }
-
-/**
- * Group creation result.
- */
-export interface GroupCreateResult {
-  gid: { _serialized: string };
-}

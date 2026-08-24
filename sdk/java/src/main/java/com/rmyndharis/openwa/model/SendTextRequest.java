@@ -4,15 +4,16 @@ import java.util.List;
 
 /** Request body for sending a text message. */
 public record SendTextRequest(
-    String chatId, String text, List<String> mentions, Boolean linkPreview, CustomLinkPreview customLinkPreview) {
+    String chatId, String text, List<String> mentions, Boolean linkPreview, CustomLinkPreview customLinkPreview,
+    String quotedMessageId) {
     /** Back-compatible constructor without mentions. */
     public SendTextRequest(String chatId, String text) {
-        this(chatId, text, null, null, null);
+        this(chatId, text, null, null, null, null);
     }
 
     /** Back-compatible constructor without a link-preview choice. */
     public SendTextRequest(String chatId, String text, List<String> mentions) {
-        this(chatId, text, mentions, null, null);
+        this(chatId, text, mentions, null, null, null);
     }
 
     public static Builder builder() {
@@ -25,6 +26,7 @@ public record SendTextRequest(
         private List<String> mentions;
         private Boolean linkPreview;
         private CustomLinkPreview customLinkPreview;
+        private String quotedMessageId;
 
         public Builder chatId(String v) {
             this.chatId = v;
@@ -62,8 +64,18 @@ public record SendTextRequest(
             return this;
         }
 
+        /**
+         * Quote an earlier message, turning this send into a reply. Engine-specific:
+         * whatsapp-web.js matches the serialized message id, Baileys the raw key id of a message
+         * it has already stored.
+         */
+        public Builder quotedMessageId(String v) {
+            this.quotedMessageId = v;
+            return this;
+        }
+
         public SendTextRequest build() {
-            return new SendTextRequest(chatId, text, mentions, linkPreview, customLinkPreview);
+            return new SendTextRequest(chatId, text, mentions, linkPreview, customLinkPreview, quotedMessageId);
         }
     }
 }

@@ -9,6 +9,7 @@ import { RedisThrottlerStorage } from './common/throttler/redis-throttler.storag
 import { createThrottlerRedisClient } from './common/throttler/throttler-redis.client';
 import configuration from './config/configuration';
 import { validateEnv } from './config/env.validation';
+import { createBootDataSource } from './database/pg-boot-migrations';
 import { SessionModule } from './modules/session/session.module';
 import { MessageModule } from './modules/message/message.module';
 import { TemplateModule } from './modules/template/template.module';
@@ -44,6 +45,7 @@ import { PluginsApiModule } from './modules/plugins/plugins.module';
 import { AgentToolsModule } from './core/agent-tools/agent-tools.module';
 import { IntegrationModule } from './modules/integration/integration.module';
 import { SearchModule } from './modules/search/search.module';
+import { SqlitePermissionsBoot } from './database/sqlite-file-permissions';
 
 // Only import QueueModule if explicitly enabled to avoid Redis connection errors
 const queueModules: Array<Type | DynamicModule> = [];
@@ -155,6 +157,10 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
       name: 'data',
       imports: [ConfigModule],
       inject: [ConfigService],
+      // The postgres branch runs its boot migrations under a cross-replica advisory lock inside
+      // this factory (see pg-boot-migrations.ts) instead of TypeORM's unsynchronized built-in
+      // migrationsRun; the sqlite branches keep the library's default construction + initialize.
+      dataSourceFactory: createBootDataSource,
       useFactory: (configService: ConfigService) => {
         const dbType = configService.get<'sqlite' | 'postgres'>('dataDatabase.type', 'sqlite');
         const baseConfig = {
@@ -198,7 +204,11 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
                 }
               : false,
 
-            // Never auto-sync Postgres in production; rely on migrations.
+            // Never auto-sync Postgres in production; rely on migrations. Boot migrations execute
+            // inside createBootDataSource (dataSourceFactory above) under the advisory lock — this
+            // flag states the intent and remains the built-in fallback if that factory is ever
+            // bypassed (the factory constructs the DataSource with migrationsRun:false and calls
+            // runMigrations() itself while holding the lock).
             synchronize: configService.get<boolean>('dataDatabase.synchronize', false),
             migrationsRun: true,
             retryAttempts: 10,
@@ -207,7 +217,7 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
               max: configService.get<number>('dataDatabase.poolSize', 10),
               // Runtime query/pool timeouts so a stuck query or saturated pool fails fast instead of
               // hanging requests. statement_timeout bounds live runtime queries; the boot migrations
-              // (migrationsRun above) reset it to 0 per-transaction via SET LOCAL, so a long
+              // reset it to 0 per-transaction via SET LOCAL, so a long
               // CREATE INDEX / backfill at boot is never aborted by it.
               statement_timeout: configService.get<number>('dataDatabase.statementTimeoutMs', 30000),
               idleTimeoutMillis: configService.get<number>('dataDatabase.idleTimeoutMs', 30000),
@@ -310,5 +320,9 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
     ...mcpModules, // MCP Streamable-HTTP server (opt-in via MCP_ENABLED=true)
     ...serveStaticModules, // Bundled dashboard SPA (production single-port setup)
   ],
+  // Runs after every DataSource has initialized (they initialize eagerly in their provider
+  // factories, and onApplicationBootstrap fires after every onModuleInit), tightening the SQLite
+  // files that better-sqlite3 created with umask permissions back to owner-only.
+  providers: [SqlitePermissionsBoot],
 })
 export class AppModule {}

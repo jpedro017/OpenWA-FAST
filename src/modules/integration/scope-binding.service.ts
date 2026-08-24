@@ -1,8 +1,10 @@
-import { Injectable, NotFoundException, OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { AuditService } from '../audit/audit.service';
 import { PluginLoaderService } from '../../core/plugins/plugin-loader.service';
-import { SessionService } from '../session/session.service';
+import { Session } from '../session/entities/session.entity';
 import { PluginInstanceService } from './plugin-instance.service';
 import { PluginInstance } from './entities/plugin-instance.entity';
 import { createLogger } from '../../common/services/logger.service';
@@ -22,7 +24,8 @@ export class ScopeBindingService implements OnApplicationBootstrap {
     private readonly instances: PluginInstanceService,
     private readonly loader: PluginLoaderService,
     private readonly audit: AuditService,
-    private readonly sessions: SessionService,
+    @InjectRepository(Session, 'data')
+    private readonly sessions: Repository<Session>,
   ) {}
 
   /**
@@ -92,12 +95,12 @@ export class ScopeBindingService implements OnApplicationBootstrap {
   private async warnIfScopeHasNoSession(inst: PluginInstance): Promise<void> {
     if (!inst.sessionScope || inst.sessionScope === '*') return;
     try {
-      await this.sessions.findOne(inst.sessionScope);
-    } catch (err) {
-      // findOne throws NotFoundException only for a genuinely missing row. Any other failure (a DB
-      // hiccup mid-boot) is not evidence the session is gone, and reporting it as gone would send an
-      // operator hunting a binding that is in fact fine — so stay quiet rather than cry wolf.
-      if (!(err instanceof NotFoundException)) return;
+      // The same row read SessionService.findOne performs ({ where: { id } }), straight through the
+      // repository: a missing row resolves to null instead of throwing NotFoundException, and the
+      // service's runtime-state projection is more than this existence check needs.
+      const session = await this.sessions.findOne({ where: { id: inst.sessionScope } });
+      // A null row (and only a null row) means the session is genuinely missing.
+      if (session) return;
       this.logger.warn(
         `Plugin instance ${inst.pluginId}:${inst.instanceId} is bound to session '${inst.sessionScope}', which does not exist — it will receive no events until that session is restored or the instance is re-scoped`,
         {
@@ -107,6 +110,10 @@ export class ScopeBindingService implements OnApplicationBootstrap {
           sessionScope: inst.sessionScope,
         },
       );
+    } catch {
+      // A failure that throws (a DB hiccup mid-boot) is not evidence the session is gone, and
+      // reporting it as gone would send an operator hunting a binding that is in fact fine — so
+      // stay quiet rather than cry wolf.
     }
   }
 
@@ -167,8 +174,23 @@ export class ScopeBindingService implements OnApplicationBootstrap {
       // instance being torn down.
       const siblings = await this.instances.list(pluginId);
       if (!activate && siblings.some(i => i.enabled && i.sessionScope === scope)) {
-        // A sibling still binds this scope: leave the session active and its sessionConfig intact —
-        // stripping either would silence the sibling until the next boot-time reconciliation.
+        // A sibling still binds this scope, so the SESSION stays active: dropping it would silence
+        // that sibling until the next boot-time reconciliation.
+        //
+        // The config slice does NOT survive with it. It is keyed by scope, so it holds whichever
+        // instance was projected last — usually the one being retired here — and once this teardown
+        // leaves a single enabled instance on the scope, dispatch re-declares the slice attributable
+        // to that survivor (PluginSandboxBridge.scopeHasAtMostOneInstance) and merges it beneath the
+        // survivor's own row. A survivor relying on a plugin default for a key it does not define
+        // was handed the retired tenant's endpoint and credentials for it — the cross-tenant collapse
+        // per-instance resolution exists to prevent, reachable by disabling or deleting one of two
+        // instances. Clearing costs the survivor nothing it owns: resolveInstanceConfig layers its
+        // own row on top either way, and boot reconciliation re-projects it.
+        //
+        // An operator's per-session override (PUT /plugins/:id/config/:sessionId) shares this slice
+        // and is cleared with it. That is the safe direction — provisioning already overwrites such
+        // an override, and a missing default beats another tenant's credential.
+        this.loader.setPluginSessionConfig(pluginId, scope, {});
         return;
       }
       this.loader.setPluginSessionConfig(pluginId, scope, activate ? config : {});

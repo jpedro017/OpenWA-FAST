@@ -5,11 +5,8 @@ import { PluginLoaderService } from './plugin-loader.service';
 import { PluginStorageService } from './plugin-storage.service';
 import { HookManager } from '../hooks';
 import { PluginContext, PluginInstance, PluginManifest, PluginStatus, PluginType } from './plugin.interfaces';
-import { SessionService } from '../../modules/session/session.service';
-import {
-  ConversationMappingConflict,
-  ConversationMappingService,
-} from '../../modules/integration/conversation-mapping.service';
+import { ConversationMappingConflict } from '../../modules/integration/conversation-mapping.service';
+import { PLUGIN_CONVERSATION_MAPPING_PORT, PLUGIN_SESSION_PORT } from './plugin-host-ports';
 
 /**
  * Stale-mapping repair after a session is deleted and re-paired under a new id. The cross-session
@@ -37,8 +34,8 @@ describe('PluginLoaderService — stale conversation-mapping repair', () => {
     sessionService = { findOne: jest.fn() };
     const moduleRef = {
       get: jest.fn().mockImplementation((token: unknown) => {
-        if (token === ConversationMappingService) return mappingService;
-        if (token === SessionService) return sessionService;
+        if (token === PLUGIN_CONVERSATION_MAPPING_PORT) return mappingService;
+        if (token === PLUGIN_SESSION_PORT) return sessionService;
         return messageService;
       }),
     };

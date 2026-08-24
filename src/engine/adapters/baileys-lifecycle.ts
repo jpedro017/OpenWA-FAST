@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as fs from 'fs';
 import type { Agent } from 'https';
 import * as qrcode from 'qrcode';
@@ -11,6 +12,7 @@ import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error'
 import { type createLogger } from '../../common/services/logger.service';
 import { BaileysAdapterConfig } from '../types/baileys.types';
 import { createBaileysLogger } from './baileys-logger';
+import { BaileysVersionResolver } from './baileys-version-resolver';
 import type { BaileysEvents } from './baileys-events';
 import type { BaileysHistory } from './baileys-history';
 import type { BaileysSessionStore } from './baileys-session-store';
@@ -81,6 +83,7 @@ export interface BaileysLifecycleHost {
   logContactEvent: BaileysEvents['logContactEvent'];
   handleGroupParticipantsUpdate: BaileysEvents['handleGroupParticipantsUpdate'];
   handleGroupsUpdate: BaileysEvents['handleGroupsUpdate'];
+  handleGroupJoinRequest: BaileysEvents['handleGroupJoinRequest'];
   handleCallEvents: BaileysEvents['handleCallEvents'];
   handlePresenceUpdate: BaileysEvents['handlePresenceUpdate'];
   captureHistoryMessages: BaileysHistory['captureHistoryMessages'];
@@ -119,6 +122,7 @@ export class BaileysLifecycle {
   private phoneNumber: string | null = null;
   private pushName: string | null = null;
   private intentionalClose = false;
+  private readonly versionResolver: BaileysVersionResolver;
   private connecting = false;
   private reconnectAttempts = 0;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
@@ -127,7 +131,13 @@ export class BaileysLifecycle {
   /** Lazily loaded @whiskeysockets/baileys module (ESM-only; loaded on first connect, not at boot). */
   private lib?: typeof BaileysLib;
 
-  constructor(private readonly host: BaileysLifecycleHost) {}
+  constructor(private readonly host: BaileysLifecycleHost) {
+    this.versionResolver = new BaileysVersionResolver({
+      authDir: this.host.config.authDir || path.dirname(this.host.authPath),
+      sessionId: this.host.config.sessionId,
+      logger: this.host.logger,
+    });
+  }
 
   /** Lazily loaded @whiskeysockets/baileys module (ESM-only; loaded on first connect, not at boot). */
   async loadLib(): Promise<typeof BaileysLib> {
@@ -179,7 +189,7 @@ export class BaileysLifecycle {
     }
     const b = await this.loadLib();
     const { state, saveCreds } = await b.useMultiFileAuthState(this.host.authPath);
-    const { version } = await b.fetchLatestBaileysVersion();
+    const version = await this.versionResolver.resolve(b, { dispatcher: proxyAgent });
     // BaileysLogger matches ILogger exactly; cast needed because the module resolves the type
     // through a deep import path that TypeScript does not auto-unify here. Shared by the key
     // store wrapper below and the socket itself, rather than constructing two instances.
@@ -203,7 +213,7 @@ export class BaileysLifecycle {
     }
 
     // An internal reconnect (transient drop) overwrites this.sock WITHOUT going through
-    // disconnect/logout/destroy, so the previous socket's WebSocket and the 13 ev listeners we
+    // disconnect/logout/destroy, so the previous socket's WebSocket and the 15 ev listeners we
     // register below would leak on every reconnect. Tear the prior socket down first. Detach OUR
     // connection.update listener BEFORE end(): Baileys' own end() synchronously emits a synthetic
     // connection.update {connection:'close'}, which — if still wired — would re-enter
@@ -223,6 +233,7 @@ export class BaileysLifecycle {
         previous.ev.removeAllListeners('lid-mapping.update');
         previous.ev.removeAllListeners('group-participants.update');
         previous.ev.removeAllListeners('groups.update');
+        previous.ev.removeAllListeners('group.join-request');
         previous.ev.removeAllListeners('call');
         previous.ev.removeAllListeners('presence.update');
         void previous.end(undefined);
@@ -270,7 +281,16 @@ export class BaileysLifecycle {
     });
     this.sock = sock;
 
-    sock.ev.on('creds.update', () => void saveCreds());
+    sock.ev.on(
+      'creds.update',
+      () =>
+        void saveCreds().catch(err => {
+          this.host.logger.warn('Baileys creds.update save failed', {
+            sessionId: this.host.config.sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }),
+    );
     sock.ev.on('connection.update', update => this.handleConnectionUpdate(update));
     sock.ev.on('messages.upsert', event => this.host.handleMessagesUpsert(event));
     sock.ev.on('messages.update', updates => this.host.handleMessagesUpdate(updates));
@@ -300,6 +320,7 @@ export class BaileysLifecycle {
     });
     sock.ev.on('group-participants.update', event => this.host.handleGroupParticipantsUpdate(event));
     sock.ev.on('groups.update', updates => this.host.handleGroupsUpdate(updates));
+    sock.ev.on('group.join-request', event => this.host.handleGroupJoinRequest(event));
     sock.ev.on('messaging-history.set', history => {
       this.host.upsertContacts(history.contacts);
       this.host.upsertChats(history.chats);
@@ -329,10 +350,11 @@ export class BaileysLifecycle {
   private handleConnectionUpdate(update: {
     connection?: string;
     qr?: string;
+    isNewLogin?: boolean;
     lastDisconnect?: { error?: unknown };
     reachoutTimeLock?: { isActive?: boolean; timeEnforcementEnds?: Date; enforcementType?: string };
   }): void {
-    const { connection, qr, lastDisconnect, reachoutTimeLock } = update;
+    const { connection, qr, isNewLogin, lastDisconnect, reachoutTimeLock } = update;
 
     // Arrives on its own update (no `connection` key) both when WhatsApp pushes a change and when
     // probeAccountRestriction() pulls the current state — Baileys routes its own query result back
@@ -341,10 +363,21 @@ export class BaileysLifecycle {
       this.reportReachoutTimelock(reachoutTimeLock);
     }
 
-    if (qr) {
+    // Baileys keeps rotating the QR (every 20-60 s) until the socket ends, including after the link
+    // was accepted; a refresh in that window must not put the session back at QR_READY.
+    if (qr && this.status !== EngineStatus.AUTHENTICATING) {
       // Baileys hands us the raw QR ref string; render it to a PNG data URL so the stored
       // value matches the whatsapp-web.js engine's contract (the dashboard does <img src={qrCode}>).
       void this.handleQrCode(qr);
+    }
+
+    if (isNewLogin) {
+      // WhatsApp accepted the QR scan or pairing code. It asks for a restart next (a 515 close, which
+      // the branch below turns into INITIALIZING) and the reconnect opens READY. Left at QR_READY, a
+      // repeat pairing request in that window would pass the guard and overwrite the just-linked
+      // creds.me. AUTHENTICATING is what whatsapp-web.js reports at the same point.
+      this.qrCode = null;
+      this.setStatus(EngineStatus.AUTHENTICATING);
     }
 
     if (connection === 'connecting') {
@@ -516,8 +549,8 @@ export class BaileysLifecycle {
         return; // stopped while waiting — abort
       }
       void this.connect().catch(err => {
-        // A failed attempt (e.g. fetchLatestBaileysVersion offline mid-outage) is NOT terminal —
-        // the outage may outlast any fixed attempt budget, so schedule the following attempt.
+        // A failed attempt is NOT terminal: the outage may outlast any fixed attempt budget, so
+        // schedule the following attempt.
         this.host.logger.warn('Baileys reconnect attempt failed; will retry', {
           attempt: this.reconnectAttempts,
           error: err instanceof Error ? err.message : String(err),
@@ -529,8 +562,16 @@ export class BaileysLifecycle {
 
   /** Render the raw Baileys QR ref to a PNG data URL, then publish it (mirrors the whatsapp-web.js engine). */
   private async handleQrCode(qr: string): Promise<void> {
+    const sock = this.sock;
     try {
-      this.qrCode = await qrcode.toDataURL(qr);
+      const rendered = await qrcode.toDataURL(qr);
+      // The socket can drop, or the link be accepted, while the QR renders. The handler has already
+      // moved the status on, and publishing now would stamp QR_READY on a dead socket until the
+      // backoff reconnect, or reopen the pairing guard on a socket that is committed to a restart.
+      if (this.sock !== sock || !sock?.ws.isOpen || this.status === EngineStatus.AUTHENTICATING) {
+        return;
+      }
+      this.qrCode = rendered;
       this.setStatus(EngineStatus.QR_READY);
       this.host.getOnQRCode()?.(this.qrCode);
     } catch (error) {
@@ -729,8 +770,12 @@ export class BaileysLifecycle {
   /**
    * Cheap local liveness check for the session watchdog. Genuine dead-connection detection is owned
    * by Baileys' built-in keepalive, which surfaces a close event (408) within ~35 s of a silent
-   * drop — and the close handler above drops the status to INITIALIZING for the whole reconnect
-   * backoff, so READY + a live socket is sufficient here.
+   * drop — and the close handler above then drops the status to INITIALIZING for the whole reconnect
+   * backoff, so READY + a live socket is sufficient here. Note the status trails the dead transport:
+   * Baileys emits that close only after `await ws.close()` resolves, which on a black-holed socket
+   * waits out ws's 30 s close timeout, so this reports live for that window too. Acceptable for the
+   * watchdog, whose next interval catches it; NOT sufficient for a request guard, which is why
+   * requestPairingCode below also tests `ws.isOpen`.
    */
   // eslint-disable-next-line @typescript-eslint/require-await
   async probeLiveness(): Promise<boolean> {
@@ -741,9 +786,24 @@ export class BaileysLifecycle {
     return this.qrCode;
   }
 
+  /**
+   * Gated on QR_READY AND a live WebSocket, not on the socket merely existing: `this.sock` is assigned the
+   * moment makeWASocket returns, before the WebSocket is open, and Baileys' sendNode throws a raw Boom 428
+   * until it is. QR_READY is set from the post-handshake `connection.update { qr }` event, so it opens the
+   * window; it does not close it promptly, which is why the status alone is not enough. Baileys emits its
+   * `connection.update { connection: 'close' }` only after `await ws.close()` resolves, and `ws` leaves a
+   * black-holed socket in CLOSING for its 30 s close timeout, so the status keeps reading QR_READY for up to
+   * half a minute after the connection stopped carrying anything. `ws.isOpen` is the same predicate Baileys'
+   * own sendRawMessage tests and the same liveness check handleQrCode makes before publishing. It matters
+   * beyond the status code here: requestPairingCode writes `creds.me` and emits `creds.update`, which we
+   * persist, BEFORE it sends, so a request in that window leaves the next connect trying to log in as a
+   * device that was never registered. The whatsapp-web.js engine needs no equivalent operand: its page and
+   * browser death listeners fire handlePuppeteerDeath, which drops the status in the same tick, so there
+   * the status is not the stale value it is here.
+   */
   async requestPairingCode(phoneNumber: string): Promise<string> {
-    if (!this.sock) {
-      throw new EngineNotReadyError('Cannot request a pairing code before the engine is initialized.');
+    if (!this.sock?.ws.isOpen || this.status !== EngineStatus.QR_READY) {
+      throw new EngineNotReadyError('Session is not waiting to be linked. Start it and wait for the QR stage.');
     }
     return this.sock.requestPairingCode(phoneNumber);
   }
@@ -765,6 +825,15 @@ export class BaileysLifecycle {
   private setStatus(status: EngineStatus): void {
     if (this.status === status) {
       return;
+    }
+    // The cached QR belongs to the socket that produced it, so it dies with the QR_READY window.
+    // Enforced in the funnel rather than at each exit: every close sub-branch (intentional, 401, 440,
+    // 403, transient), the accepted link and every teardown route through here, and the exits that
+    // did not clear it by hand kept serving a dead QR over GET /qr for the whole reconnect backoff.
+    // Safe after the no-op guard above: a non-null qrCode implies QR_READY, so an unchanged status
+    // that is not QR_READY already has a null cache.
+    if (status !== EngineStatus.QR_READY) {
+      this.qrCode = null;
     }
     this.status = status;
     this.host.getOnStateChanged()?.(status);

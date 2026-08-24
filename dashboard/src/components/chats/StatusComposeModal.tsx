@@ -185,8 +185,9 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
       {composeType === 'text' ? (
         <>
           <div className="compose-field">
-            <label>{t('chats.status.composeText')}</label>
+            <label htmlFor="scm-1">{t('chats.status.composeText')}</label>
             <textarea
+              id="scm-1"
               value={composeText}
               onChange={e => setComposeText(e.target.value)}
               maxLength={4096}
@@ -195,16 +196,17 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
           </div>
           <div className="compose-row">
             <div className="compose-field">
-              <label>{t('chats.status.backgroundColor')}</label>
+              <label htmlFor="scm-2">{t('chats.status.backgroundColor')}</label>
               <input
+                id="scm-2"
                 type="color"
                 value={composeBgColor || '#000000'}
                 onChange={e => setComposeBgColor(e.target.value)}
               />
             </div>
             <div className="compose-field">
-              <label>{t('chats.status.font')}</label>
-              <select value={composeFont} onChange={e => setComposeFont(e.target.value)}>
+              <label htmlFor="scm-3">{t('chats.status.font')}</label>
+              <select id="scm-3" value={composeFont} onChange={e => setComposeFont(e.target.value)}>
                 <option value="">{t('chats.status.fontDefault')}</option>
                 {/* The WhatsApp status font enum: 6 is the bold system face; 3–5 don't exist on
                     the wire and the backend rejects them. */}
@@ -220,8 +222,9 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
       ) : (
         <>
           <div className="compose-field">
-            <label>{t('chats.status.composeImage')}</label>
+            <label htmlFor="scm-4">{t('chats.status.composeImage')}</label>
             <input
+              id="scm-4"
               type="url"
               placeholder="https://example.com/image.jpg"
               value={composeImageUrl}
@@ -230,11 +233,18 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
           </div>
           <p className="compose-image-or">{t('chats.status.orLabel')}</p>
           <div className="compose-field">
-            <input type="file" accept="image/*" ref={composeFileInputRef} onChange={handleComposeImageFile} />
+            <input
+              type="file"
+              accept="image/*"
+              aria-label={t('chats.status.imageFile')}
+              ref={composeFileInputRef}
+              onChange={handleComposeImageFile}
+            />
           </div>
           <div className="compose-field">
-            <label>{t('chats.status.caption')}</label>
+            <label htmlFor="scm-5">{t('chats.status.caption')}</label>
             <input
+              id="scm-5"
               type="text"
               placeholder={t('chats.captionPlaceholder')}
               value={composeCaption}
@@ -247,8 +257,9 @@ function StatusComposeModal({ sessionId, onClose, onPosted }: Props) {
 
       {isBaileysEngine && (
         <div className="compose-field">
-          <label>{t('chats.status.recipients')}</label>
+          <label htmlFor="scm-6">{t('chats.status.recipients')}</label>
           <input
+            id="scm-6"
             type="text"
             placeholder={t('common.search')}
             value={composeRecipientSearch}

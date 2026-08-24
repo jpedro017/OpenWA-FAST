@@ -62,10 +62,9 @@ export interface InfraConfigForm {
 /**
  * Owns the editable infrastructure form: dbConfig/redisConfig/storageConfig/engineConfig, the
  * redis-enabled/queue-enabled toggles, and the hydration that seeds them from the two server
- * sources (live /status + saved /config). Takes those two query results (plus the resolved current
- * engine) as arguments rather than calling the query hooks itself — the page already holds them for
- * its own loading/error early returns, and passing them in keeps this hook testable without a
- * QueryClientProvider.
+ * sources (live /status + saved /config). Takes those two query results as arguments rather than
+ * calling the query hooks itself — the page already holds them for its own loading/error early
+ * returns, and passing them in keeps this hook testable without a QueryClientProvider.
  *
  * `redisConfig.connected` and the page's `queueStats` are LIVE indicators, not editable form state —
  * they are seeded by a separate effect that lives in the page (every refetch, not just once), and
@@ -74,7 +73,6 @@ export interface InfraConfigForm {
 export function useInfraConfigForm(
   infraStatus: InfraStatus | undefined,
   savedConfig: SavedConfig | undefined,
-  currentEngine: string,
 ): InfraConfigForm {
   const [dbConfig, setDbConfig] = useState<DatabaseConfig>({
     type: 'sqlite',
@@ -124,14 +122,14 @@ export function useInfraConfigForm(
   // operator's in-progress, unsaved edits. A successful save restarts → full page reload, re-arming it.
   const formHydrated = useRef(false);
 
-  // The engine radio seeds ONCE from the running engine (which honours a real ENGINE_TYPE env override
-  // over the saved .env.generated value — see the effect below), then is never re-stamped by a background
-  // refetch. `engineTouched` additionally wins over a late first resolution: if the operator clicked a
-  // different engine before /engines/current resolved, the delayed seed must not revert their selection (#735).
+  // The engine radio seeds ONCE from the saved file (see the effect below), then is never re-stamped by
+  // a background refetch. `engineTouched` additionally wins over a late first resolution: if the
+  // operator clicked a different engine before the seed resolved, the delayed seed must not revert
+  // their selection (#735).
   const engineHydrated = useRef(false);
   const engineTouched = useRef(false);
 
-  /** Whether engineConfig.type reflects a real value (seeded from the running engine or user-picked)
+  /** Whether engineConfig.type reflects a real value (seeded from the saved config or user-picked)
    * rather than the useState default — the save payload omits `type` when it doesn't. */
   const engineTypeKnown = (): boolean => engineHydrated.current || engineTouched.current;
 
@@ -209,15 +207,21 @@ export function useInfraConfigForm(
     if (infraStatus && savedConfig) formHydrated.current = true;
   }, [infraStatus, savedConfig]);
 
-  // The active engine reflects what's actually running (honours a real-env ENGINE_TYPE override),
-  // so seed the selected radio from it rather than the saved .env.generated value — but only ONCE, and
-  // never after the operator has touched it. Without this guard a background refetch (or a late first
-  // resolution racing an early click) re-stamps the running engine over an in-progress selection (#735).
+  // Seed the radio once from /config, and never after the operator has touched it (#735).
+  //
+  // /config reports the EFFECTIVE engine: the saved file value while nothing pins ENGINE_TYPE, the
+  // pinned value outright when an environment variable supplies one (#1313). Either way the seeded
+  // value may be one nobody chose here — the running one is stale from the moment a change is saved
+  // until the server restarts — so the seed is display-only: buildSavePayload omits `type` for an
+  // untouched seed under a pin, and only an operator click (engineTouched) persists a selection. What
+  // is actually running is reported by the card badge and, when the two differ, named by the card's
+  // own notice.
   useEffect(() => {
-    if (!currentEngine || engineHydrated.current || engineTouched.current) return;
+    const seed = savedConfig?.engine.type;
+    if (!seed || engineHydrated.current || engineTouched.current) return;
     engineHydrated.current = true;
-    setEngineConfig(prev => (prev.type === currentEngine ? prev : { ...prev, type: currentEngine }));
-  }, [currentEngine]);
+    setEngineConfig(prev => (prev.type === seed ? prev : { ...prev, type: seed }));
+  }, [savedConfig]);
 
   const updateDbConfig = (key: keyof DatabaseConfig, value: string | number | boolean) =>
     setDbConfig(prev => ({ ...prev, [key]: value }));
@@ -251,11 +255,22 @@ export function useInfraConfigForm(
     },
     queue: { enabled: queueEnabled },
     storage: { ...storageConfig },
-    // Only send `type` once we actually know it — either the radio seeded from the running engine
-    // or the operator picked one. If /engines/current never resolved (endpoint down), engineConfig.type
-    // still holds its useState default, and sending that would persist ENGINE_TYPE and silently flip
-    // the engine on the next restart. The backend treats an absent `type` as "leave ENGINE_TYPE alone".
-    engine: engineTypeKnown() ? { ...engineConfig } : { ...engineConfig, type: undefined },
+    // Only send `type` once we actually know it — either the radio seeded from /config or the
+    // operator picked one. If /config never resolved, engineConfig.type still holds its useState
+    // default, and sending that would persist ENGINE_TYPE and silently flip the engine on the next
+    // restart. The backend treats an absent `type` as "leave ENGINE_TYPE alone".
+    //
+    // An untouched seed under a PINNED ENGINE_TYPE counts as unknown too: /config reports the
+    // effective (pinned) engine, so the seeded value is the pin, not a choice made here — sending
+    // it would bake the pin into data/.env.generated over the operator's stored choice, which
+    // unsetting the variable was supposed to reveal (#1082). Pin-ness is read HERE, at save time,
+    // not at seed time: the two queries settle independently and the save click always sees the
+    // latest /status. An operator click (engineTouched) is a deliberate choice and always sends.
+    engine:
+      engineTypeKnown() &&
+      !(engineHydrated.current && !engineTouched.current && infraStatus?.envPinned?.includes('ENGINE_TYPE'))
+        ? { ...engineConfig }
+        : { ...engineConfig, type: undefined },
   });
 
   return {

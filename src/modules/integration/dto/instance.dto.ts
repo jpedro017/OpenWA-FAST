@@ -97,6 +97,8 @@ export class InstanceView {
   @ApiPropertyOptional({
     description: 'Session id the instance is scoped to, or null for all sessions.',
     nullable: true,
+    // `string | null` reduces to `Object` under emitDecoratorMetadata; declare the real type.
+    type: String,
   })
   sessionScope!: string | null;
 
@@ -109,6 +111,7 @@ export class InstanceView {
   @ApiPropertyOptional({
     description: "Provider verify-token. Masked ('***') on reads when set; plaintext on create/regenerate-secret.",
     nullable: true,
+    type: String,
   })
   verifyToken!: string | null;
 
@@ -137,4 +140,14 @@ export class InstanceView {
   ingressUrls!: IngressUrl[];
 }
 
-export type MintedInstance = InstanceView; // identical shape; `secret` carries the plaintext once
+/** Outcome of one redrive batch over an instance's dead-lettered ingress deliveries. */
+export class RedriveResultDto {
+  @ApiProperty({ description: 'Deliveries re-dispatched by this call.', example: 25 })
+  redriven!: number;
+
+  @ApiProperty({ description: 'Dead-lettered deliveries still retained after this batch.', example: 75 })
+  remaining!: number;
+
+  @ApiProperty({ description: 'The bounded batch size this call processed.', example: 25 })
+  batchSize!: number;
+}

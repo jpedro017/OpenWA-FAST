@@ -1,4 +1,4 @@
-import { isIPv4, isIPv6, type LookupFunction } from 'net';
+import { BlockList, isIPv4, isIPv6, type LookupFunction } from 'net';
 import { lookup } from 'dns/promises';
 import { type LookupAddress, type LookupOptions } from 'dns';
 import { Agent, fetch as undiciFetch, Headers, type RequestInit, type Response } from 'undici';
@@ -32,7 +32,13 @@ export function redactSsrfError(error: unknown, logger?: { warn: (message: strin
     logger?.warn(`SSRF guard blocked ${site ?? 'an outbound fetch'}: ${error.message}`);
     return SSRF_BLOCKED_CLIENT_MESSAGE;
   }
-  return error instanceof Error ? error.message : String(error);
+  // OS-level connect errors name the receiver's host:port (connect ECONNREFUSED 10.0.0.1:443) —
+  // internal topology an API consumer has no business reading out of a delivery-failure row.
+  // The error code stays (actionable), the address goes.
+  return (error instanceof Error ? error.message : String(error)).replace(
+    /\b(ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EHOSTUNREACH|ECONNRESET|EAI_AGAIN)\s+[\w.-]+(?::\d+)?(?=\s|$)/g,
+    '$1 [redacted]',
+  );
 }
 
 /**
@@ -66,18 +72,9 @@ function getAllowedHosts(): Set<string> {
   );
 }
 
-function ipv4ToInt(ip: string): number {
-  return ip.split('.').reduce((acc, octet) => acc * 256 + Number(octet), 0);
-}
-
-function inCidr4(ipInt: number, base: string, bits: number): boolean {
-  const baseInt = ipv4ToInt(base);
-  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-  return (ipInt & mask) >>> 0 === (baseInt & mask) >>> 0;
-}
-
-// IPv4 ranges that must never be reachable by an outbound webhook (SSRF targets).
-const BLOCKED_V4: ReadonlyArray<readonly [string, number]> = [
+// IPv4 ranges that must never be reachable by an outbound webhook (SSRF targets). Membership is
+// delegated to net.BlockList (the vetted stdlib implementation) rather than hand-rolled IP math.
+const BLOCKED_V4_RANGES: ReadonlyArray<readonly [string, number]> = [
   ['0.0.0.0', 8], // "this" network / unspecified
   ['10.0.0.0', 8], // RFC1918 private
   ['100.64.0.0', 10], // CGNAT
@@ -91,12 +88,34 @@ const BLOCKED_V4: ReadonlyArray<readonly [string, number]> = [
   ['240.0.0.0', 4], // reserved
 ];
 
-/**
- * Whether an IP literal points at an internal/reserved range that an outbound
- * webhook must not be allowed to reach (loopback, RFC1918, link-local/metadata,
- * CGNAT, multicast, IPv6 loopback/ULA/link-local, IPv4-mapped variants).
- * Anything that isn't a recognizable public IP is treated as blocked (fail-closed).
- */
+// IPv6 ranges with the same rule. The IPv4-embedding ranges (6to4 2002::/16, NAT64 64:ff9b::/96,
+// IPv4-compatible ::/96, mapped/RFC6052 ::ffff:0:0/96) are deliberately NOT here: an embedding of a
+// genuinely public IPv4 must stay reachable, so those are classified per-address by the
+// decapsulation ladder in isBlockedAddress, not blanket-blocked by range.
+const BLOCKED_V6_RANGES: ReadonlyArray<readonly [string, number]> = [
+  ['::', 128], // unspecified
+  ['::1', 128], // loopback
+  ['0000::', 3], // reserved by IETF (RFC 4291: global unicast is 2000::/3) — ::, ::1 and the
+  // IPv4-embedding forms return earlier via the ladder or their own entries, so the fallthrough
+  // check only catches the rest of the block (e.g. 1::, fc0::, fe8::)
+  ['fc00::', 7], // ULA (RFC 4193)
+  ['fe80::', 10], // link-local
+  ['fec0::', 10], // deprecated site-local (RFC 3879)
+];
+
+const BLOCKED_V4 = new BlockList();
+for (const [subnet, prefix] of BLOCKED_V4_RANGES) BLOCKED_V4.addSubnet(subnet, prefix, 'ipv4');
+
+const BLOCKED_V6 = new BlockList();
+for (const [subnet, prefix] of BLOCKED_V6_RANGES) BLOCKED_V6.addSubnet(subnet, prefix, 'ipv6');
+
+// The single IPv6 ALLOW: RFC 4291's global-unicast 2000::/3. The fallthrough in isBlockedAddress
+// allows only this range — everything outside it that no earlier branch classified (IPv6 multicast
+// ff00::/8, the reserved blocks above 3fff:: — 4000::/3, 5f00::/16, 8000::/3, c000::/3, e000::/3)
+// blocks, mirroring the IPv4 posture where multicast 224.0.0.0/4 and reserved 240.0.0.0/4 block.
+const GLOBAL_UNICAST_V6 = new BlockList();
+GLOBAL_UNICAST_V6.addSubnet('2000::', 3, 'ipv6');
+
 /** Two 16-bit hextets → dotted IPv4 string (for IPv4-in-IPv6 embeddings like ::ffff:, 6to4, NAT64). */
 function hextetsToV4(hi: number, lo: number): string {
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
@@ -129,15 +148,21 @@ function expandIPv6(lower: string): number[] | null {
   return nums.some(n => Number.isNaN(n)) ? null : nums;
 }
 
+/**
+ * Whether an IP literal points at an internal/reserved range that an outbound
+ * webhook must not be allowed to reach (loopback, RFC1918, link-local/metadata,
+ * CGNAT, multicast, IPv6 loopback/ULA/link-local, IPv4-mapped variants).
+ * Anything that isn't a recognizable public IP is treated as blocked (fail-closed).
+ */
 export function isBlockedAddress(ip: string): boolean {
+  // The address family is passed explicitly to check(): without it, an IPv6 literal silently
+  // answers false (BlockList defaults to interpreting the input as IPv4), which would fail open.
   if (isIPv4(ip)) {
-    const n = ipv4ToInt(ip);
-    return BLOCKED_V4.some(([base, bits]) => inCidr4(n, base, bits));
+    return BLOCKED_V4.check(ip, 'ipv4');
   }
 
   if (isIPv6(ip)) {
     const lower = ip.toLowerCase();
-    if (lower === '::1' || lower === '::') return true;
 
     // IPv4-mapped (::ffff:a.b.c.d or ::ffff:hhhh:hhhh) — classify by the embedded IPv4, handling
     // BOTH the dotted-decimal and the hex-hextet form (the hex form bypassed a dotted-only regex).
@@ -150,14 +175,9 @@ export function isBlockedAddress(ip: string): boolean {
       if (hextets.length === 2 && hextets.every(h => /^[0-9a-f]{1,4}$/.test(h))) {
         const hi = parseInt(hextets[0], 16);
         const lo = parseInt(hextets[1], 16);
-        return isBlockedAddress(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+        return isBlockedAddress(hextetsToV4(hi, lo));
       }
     }
-
-    const firstHextet = lower.split(':')[0];
-    if (firstHextet.startsWith('fc') || firstHextet.startsWith('fd')) return true; // ULA fc00::/7
-    if (/^fe[89ab]/.test(firstHextet)) return true; // link-local fe80::/10
-    if (/^fe[c-f]/.test(firstHextet)) return true; // deprecated site-local fec0::/10 (RFC 3879)
 
     // IPv6 forms that embed an IPv4 — 6to4 (2002::/16), NAT64 (64:ff9b::/96), and the deprecated
     // IPv4-compatible ::/96 — are classified by the embedded address so they reach the IPv4 blocklist,
@@ -203,7 +223,14 @@ export function isBlockedAddress(ip: string): boolean {
         return isBlockedAddress(hextetsToV4(hextets[6], hextets[7]));
       }
     }
-    return false;
+
+    // Reserved-range membership (unspecified, loopback, ULA, link-local, deprecated site-local,
+    // IETF-reserved 0000::/3) via the stdlib BlockList — numeric, so compressed and fully-expanded
+    // spellings of the same address answer alike — and beyond that only RFC 4291 global unicast
+    // (2000::/3) is allowed: IPv6 multicast (ff00::/8) and the reserved blocks above 3fff:: block
+    // too, the same fail-closed posture as IPv4's multicast/reserved ranges. Embedded forms already
+    // returned above (public embeddings, NAT64 included, stay allowed — only the ladder decides those).
+    return BLOCKED_V6.check(lower, 'ipv6') || !GLOBAL_UNICAST_V6.check(lower, 'ipv6');
   }
 
   // Not a valid IP literal — cannot verify, so block.
@@ -305,7 +332,10 @@ export async function resolveSafeFetchTarget(
   const host = url.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
 
   if (getAllowedHosts().has(host.toLowerCase())) {
-    return null; // explicitly allowlisted internal target
+    // Allowlisted = exempt from the BLOCK check, not from pinning: the operator opted into THIS
+    // host, so freeze the connection to the addresses it resolves to right now. Returning null
+    // here left a rebinding window where a name could flip to a different address after validation.
+    return lookupWithDeadline(host, signal);
   }
 
   if (isIPv4(host) || isIPv6(host)) {
@@ -443,7 +473,11 @@ export async function withSafeFetch<T>(
 ): Promise<T> {
   const guard = opts.guard ?? true;
   if (!guard) {
-    return useAndSettleBody(await undiciFetch(rawUrl, { ...init, redirect: 'follow' }), use);
+    // Redirect-following is a separate decision from SSRF protection: an operator who disabled the
+    // guard (closed network) did not opt into chasing 3xx chains to arbitrary hosts. Fail loudly
+    // unless WEBHOOK_SSRF_REDIRECTS=true says otherwise.
+    const follow = process.env.WEBHOOK_SSRF_REDIRECTS === 'true';
+    return useAndSettleBody(await undiciFetch(rawUrl, { ...init, redirect: follow ? 'follow' : 'error' }), use);
   }
 
   if (opts.followRedirects) {

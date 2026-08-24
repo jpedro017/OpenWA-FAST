@@ -1,69 +1,66 @@
 import type { ModuleRef } from '@nestjs/core';
-import type { MessageService } from '../../modules/message/message.service';
-import type { SessionService } from '../../modules/session/session.service';
-import type { ConversationMappingService } from '../../modules/integration/conversation-mapping.service';
-import type { PluginInstanceService } from '../../modules/integration/plugin-instance.service';
-import type { SearchProviderRegistry } from '../../modules/search/search-provider.registry';
+import {
+  PLUGIN_CONVERSATION_MAPPING_PORT,
+  PLUGIN_INSTANCE_PORT,
+  PLUGIN_MESSAGE_PORT,
+  PLUGIN_SEARCH_REGISTRY_PORT,
+  PLUGIN_SESSION_PORT,
+  type PluginConversationMappingPort,
+  type PluginInstancePort,
+  type PluginMessagePort,
+  type PluginSearchRegistryPort,
+  type PluginSessionPort,
+} from './plugin-host-ports';
 
 /**
  * Resolves the host services a plugin capability reaches, at call time rather than at module load.
  *
- * Every lookup here is a lazy `require` plus a non-strict `ModuleRef.get`, and both halves are
- * load-bearing:
+ * Every lookup is a non-strict `ModuleRef.get` against a core-owned port token from
+ * plugin-host-ports.ts, and the deferral is load-bearing: constructor injection would close the
+ * provider cycle
+ * `PluginLoaderService -> SessionService -> SessionEngineLifecycle -> EngineFactory -> PluginLoaderService`.
+ * Resolving the PORT tokens rather than the feature-module service classes also means this file
+ * names no feature module at all — no static import edge, and no lazy `require` either. The module
+ * that owns each service registers the token adapter, so the binding lives with the service while
+ * core/plugins depends only on its own tokens.
  *
- * - The lazy require exists so this file creates NO top-level module edge to the services. A static
- *   import of MessageService closes the cycle
- *   `plugin-loader -> message -> session -> engine.factory -> core/plugins barrel -> plugin-loader`,
- *   which corrupts MessageService's constructor paramtype metadata (`SessionService -> undefined`)
- *   at boot. The same reasoning covers the two integration services.
- * - `ModuleRef` rather than constructor injection avoids the provider cycle
- *   `PluginLoaderService -> SessionService -> SessionEngineLifecycle -> EngineFactory -> PluginLoaderService`.
- *
- * Keeping the pair in one place means the loader no longer has to carry that reasoning, nor name the
- * five services it was resolving. Everything below is a resolution detail; nothing here decides
- * policy.
+ * Keeping the lookups in one place means the loader never has to carry that reasoning, nor name the
+ * five ports it was resolving. Everything below is a resolution detail; nothing here decides policy.
  */
 export class PluginHostServices {
   constructor(private readonly moduleRef: ModuleRef) {}
 
-  getMessageService(): MessageService {
-    const mod =
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('../../modules/message/message.service') as typeof import('../../modules/message/message.service');
-    return this.moduleRef.get(mod.MessageService, { strict: false });
+  getMessagePort(): PluginMessagePort {
+    return this.moduleRef.get<typeof PLUGIN_MESSAGE_PORT, PluginMessagePort>(PLUGIN_MESSAGE_PORT, { strict: false });
   }
 
-  getSessionService(): SessionService {
-    const mod =
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('../../modules/session/session.service') as typeof import('../../modules/session/session.service');
-    return this.moduleRef.get(mod.SessionService, { strict: false });
+  getSessionPort(): PluginSessionPort {
+    return this.moduleRef.get<typeof PLUGIN_SESSION_PORT, PluginSessionPort>(PLUGIN_SESSION_PORT, { strict: false });
   }
 
-  getConversationMappingService(): ConversationMappingService {
-    const mod =
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('../../modules/integration/conversation-mapping.service') as typeof import('../../modules/integration/conversation-mapping.service');
-    return this.moduleRef.get(mod.ConversationMappingService, { strict: false });
+  getConversationMappingPort(): PluginConversationMappingPort {
+    return this.moduleRef.get<typeof PLUGIN_CONVERSATION_MAPPING_PORT, PluginConversationMappingPort>(
+      PLUGIN_CONVERSATION_MAPPING_PORT,
+      { strict: false },
+    );
   }
 
-  getPluginInstanceService(): PluginInstanceService {
-    const mod =
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('../../modules/integration/plugin-instance.service') as typeof import('../../modules/integration/plugin-instance.service');
-    return this.moduleRef.get(mod.PluginInstanceService, { strict: false });
+  getPluginInstancePort(): PluginInstancePort {
+    return this.moduleRef.get<typeof PLUGIN_INSTANCE_PORT, PluginInstancePort>(PLUGIN_INSTANCE_PORT, {
+      strict: false,
+    });
   }
 
   /**
-   * Search is conditionally loaded (`SEARCH_ENABLED=false` omits SearchModule), so the registry may
-   * not be registered at all. Returns undefined in that case so callers can no-op rather than throw.
+   * Search is conditionally loaded (`SEARCH_ENABLED=false` omits SearchModule), so the port adapter
+   * may not be registered at all. Returns undefined in that case so callers can no-op rather than throw.
    */
-  getSearchRegistry(): SearchProviderRegistry | undefined {
+  getSearchRegistryPort(): PluginSearchRegistryPort | undefined {
     try {
-      const mod =
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        require('../../modules/search/search-provider.registry') as typeof import('../../modules/search/search-provider.registry');
-      return this.moduleRef.get(mod.SearchProviderRegistry, { strict: false });
+      return this.moduleRef.get<typeof PLUGIN_SEARCH_REGISTRY_PORT, PluginSearchRegistryPort>(
+        PLUGIN_SEARCH_REGISTRY_PORT,
+        { strict: false },
+      );
     } catch {
       return undefined;
     }

@@ -7,6 +7,7 @@ import { AuditService } from '../audit/audit.service';
 import { sessionScopeVisible } from '../../common/security/session-scope';
 import { PluginInstanceService } from './plugin-instance.service';
 import { RedriveService } from './redrive.service';
+import { RedriveResultDto } from './dto/instance.dto';
 
 // Re-dispatching DLQ'd inbound payloads can cause real downstream sends, so this operator action is
 // ADMIN-gated — matching the sibling IntegrationInstanceController. (A bare API key, even VIEWER,
@@ -25,6 +26,7 @@ export class RedriveController {
   @ApiResponse({
     status: 201,
     description: 'One bounded batch of dead-lettered ingress deliveries re-dispatched, with remaining depth.',
+    type: RedriveResultDto,
   })
   async redriveInstance(
     @Param('pluginId') pluginId: string,

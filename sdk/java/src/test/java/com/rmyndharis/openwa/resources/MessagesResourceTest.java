@@ -172,6 +172,93 @@ class MessagesResourceTest {
         assertTrue(tx.lastRequest().body().contains("welcome-tpl"));
     }
 
+    // Asserted on the body rather than the path: Gson omits a null component, so a record that
+    // forgot the field would still compile and still route correctly while sending nothing.
+    @Test
+    void quotedMessageIdReachesTheBodyOnEverySend() {
+        tx.respond(200, MSG);
+        client.messages.sendText(
+            "s", SendTextRequest.builder().chatId("628@c.us").text("hi").quotedMessageId("q-text").build());
+        assertTrue(tx.lastRequest().body().contains("q-text"));
+
+        tx.respond(200, MSG);
+        client.messages.sendImage(
+            "s", SendMediaRequest.builder().chatId("628@c.us").url("http://u").quotedMessageId("q-media").build());
+        assertTrue(tx.lastRequest().body().contains("q-media"));
+
+        // Audio takes its own record rather than SendMediaRequest, because `ptt` is accepted on this
+        // route alone — and a Java record cannot inherit, so the field has to be declared twice. That
+        // is precisely how send-audio was left as the one quotable route Java could not quote on
+        // while the other four clients could.
+        tx.respond(200, MSG);
+        client.messages.sendAudio(
+            "s", SendAudioRequest.builder().chatId("628@c.us").url("http://u").quotedMessageId("q-audio").build());
+        assertTrue(tx.lastRequest().body().contains("q-audio"));
+
+        // Same flattening cost the audio route its mentions: the field lives on SendMediaRequest,
+        // which this record cannot inherit, so it has to be declared here too or the typed path can
+        // never tag anyone on a voice note.
+        tx.respond(200, MSG);
+        client.messages.sendAudio(
+            "s",
+            SendAudioRequest.builder()
+                .chatId("628@c.us")
+                .url("http://u")
+                .mentions(java.util.List.of("62811@c.us"))
+                .build());
+        assertTrue(tx.lastRequest().body().contains("62811@c.us"));
+
+        tx.respond(200, MSG);
+        client.messages.sendLocation(
+            "s",
+            SendLocationRequest.builder()
+                .chatId("628@c.us")
+                .latitude(1.0)
+                .longitude(2.0)
+                .quotedMessageId("q-loc")
+                .build());
+        assertTrue(tx.lastRequest().body().contains("q-loc"));
+
+        tx.respond(200, MSG);
+        client.messages.sendContact(
+            "s",
+            SendContactRequest.builder()
+                .chatId("628@c.us")
+                .contactName("A")
+                .contactNumber("628")
+                .quotedMessageId("q-contact")
+                .build());
+        assertTrue(tx.lastRequest().body().contains("q-contact"));
+
+        tx.respond(200, MSG);
+        client.messages.sendPoll(
+            "s",
+            SendPollRequest.builder()
+                .chatId("628@c.us")
+                .name("Q")
+                .options(java.util.List.of("a", "b"))
+                .quotedMessageId("q-poll")
+                .build());
+        assertTrue(tx.lastRequest().body().contains("q-poll"));
+    }
+
+    // Known-negative control: an ordinary send must not carry the key at all. The server declares
+    // quotedMessageId @IsNotEmpty, so a client that emitted "" or null would 400 every plain send.
+    // Audio is covered separately from the shared media record: it is the one send with its own
+    // record, it is the one that already drifted out of step, and bodySerializer() picks the
+    // serializer per REQUEST TYPE — so routing SendAudioRequest to the null-emitting Gson would
+    // break only audio, and the sendImage case alone would not notice.
+    @Test
+    void ordinarySendOmitsTheQuoteKey() {
+        tx.respond(200, MSG);
+        client.messages.sendImage("s", SendMediaRequest.builder().chatId("628@c.us").url("http://u").build());
+        assertTrue(!tx.lastRequest().body().contains("quotedMessageId"));
+
+        tx.respond(200, MSG);
+        client.messages.sendAudio("s", SendAudioRequest.builder().chatId("628@c.us").url("http://u").build());
+        assertTrue(!tx.lastRequest().body().contains("quotedMessageId"));
+    }
+
     @Test
     void replyHitsReplyPath() {
         tx.respond(200, MSG);

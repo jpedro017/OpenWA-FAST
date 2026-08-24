@@ -20,8 +20,8 @@ type StatusRecord struct {
 	Font            *int          `json:"font,omitempty"`
 	// The server types these as Date, which serializes to RFC 3339, so
 	// time.Time decodes them directly. Zero when the server omits the field.
-	Timestamp time.Time `json:"timestamp,omitempty"`
-	ExpiresAt time.Time `json:"expiresAt,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 // StatusListResponse is the {"statuses": [...]} envelope returned by GET
@@ -35,8 +35,8 @@ type StatusListResponse struct {
 // timing, no contact/media.
 type StatusResult struct {
 	StatusID  string    `json:"statusId"`
-	Timestamp time.Time `json:"timestamp,omitempty"`
-	ExpiresAt time.Time `json:"expiresAt,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 // StatusMedia is the one non-JSON shape on the wire: the raw bytes of a stored
@@ -47,13 +47,27 @@ type StatusMedia struct {
 	ContentType string
 }
 
+// StatusFont is a WhatsApp status font family.
+type StatusFont int
+
+const (
+	StatusFontDefault       StatusFont = 0
+	StatusFontSerif         StatusFont = 1
+	StatusFontNorican       StatusFont = 2
+	StatusFontBold          StatusFont = 6
+	StatusFontOswald        StatusFont = 7
+	StatusFontDamion        StatusFont = 8
+	StatusFontMorningbreeze StatusFont = 9
+	StatusFontBryndan       StatusFont = 10
+)
+
 // SendTextStatusRequest posts a text status. Recipients is required on the Baileys
 // engine only (absent/empty → 400 there); whatsapp-web.js ignores it — leave nil.
 type SendTextStatusRequest struct {
-	Text            string   `json:"text"`
-	Recipients      []string `json:"recipients,omitempty"`
-	BackgroundColor string   `json:"backgroundColor,omitempty"`
-	Font            *int     `json:"font,omitempty"`
+	Text            string      `json:"text"`
+	Recipients      []string    `json:"recipients,omitempty"`
+	BackgroundColor string      `json:"backgroundColor,omitempty"`
+	Font            *StatusFont `json:"font,omitempty"`
 }
 
 // StatusMediaInput is a status media payload: provide URL or Base64.

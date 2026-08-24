@@ -1,5 +1,6 @@
-import { type GroupNotification } from 'whatsapp-web.js';
-import { GroupEvent } from '../interfaces/whatsapp-engine.interface';
+import { type Client, type GroupNotification } from 'whatsapp-web.js';
+import { type EngineEventCallbacks, GroupEvent } from '../interfaces/whatsapp-engine.interface';
+import { type createLogger } from '../../common/services/logger.service';
 import { SerializedWid } from '../types/whatsapp-web-js.types';
 
 /**
@@ -60,4 +61,72 @@ export function wwebjsGroupRecipientIds(notification: GroupNotification): string
       return wid?._serialized ?? wid?.$1 ?? '';
     })
     .filter(id => id.length > 0);
+}
+
+/** Host surface for {@link registerWwebjsGroupEvents}. */
+export interface WwebjsGroupEventsHost {
+  readonly logger: ReturnType<typeof createLogger>;
+  /** Live callbacks bag — read per event, since initialize() installs it after delegates are built. */
+  getCallbacks(): EngineEventCallbacks;
+}
+
+/**
+ * Group-notification client events (group_join / group_leave / group_update /
+ * group_membership_request) extracted from the adapter's setupEventHandlers: pure mapping from
+ * wwebjs GroupNotifications to neutral GroupEvents fired through the engine callbacks. Like
+ * ./wwebjs-message-events, this file never touches connection-state or lifecycle latches.
+ */
+export function registerWwebjsGroupEvents(client: Client, host: WwebjsGroupEventsHost): void {
+  client.on('group_join', notification => handleGroupNotification(host, 'join', notification));
+  client.on('group_leave', notification => handleGroupNotification(host, 'leave', notification));
+  client.on('group_update', notification => handleGroupNotification(host, 'update', notification));
+  client.on('group_membership_request', notification => handleGroupNotification(host, 'join_request', notification));
+}
+
+/**
+ * Map a whatsapp-web.js GroupNotification (`group_join` / `group_leave` / `group_update`) to the
+ * neutral GroupEvent and forward it. wwebjs ids are already in the neutral dialect (@c.us/@g.us),
+ * so no jid translation is needed here. The try/catch mirrors message_edit: a malformed
+ * notification is logged and dropped, never thrown back into the client's emitter.
+ */
+function handleGroupNotification(
+  host: WwebjsGroupEventsHost,
+  kind: GroupEvent['kind'],
+  notification: GroupNotification,
+): void {
+  try {
+    // A notification without a chat id carries no usable target — drop it before payload building.
+    if (!notification.chatId) {
+      return;
+    }
+    const payload: GroupEvent = {
+      kind,
+      groupId: notification.chatId,
+      actorId: notification.author || undefined,
+      participantIds: wwebjsGroupRecipientIds(notification),
+      // The notification's own timestamp IS the occurrence time (unlike message_edit, where
+      // wwebjs keeps the original creation time). Fall back to receipt time when absent.
+      timestamp:
+        typeof notification.timestamp === 'number' && notification.timestamp > 0
+          ? Math.floor(notification.timestamp)
+          : Math.floor(Date.now() / 1000),
+    };
+    if (kind === 'join_request' && payload.participantIds.length === 0) {
+      // A self-request carries no recipients: the author IS the user asking to join
+      // (Client.js:633-641 documents chatId/author/timestamp for this event). A request naming
+      // nobody at all is unactionable and dropped.
+      if (!payload.actorId) {
+        return;
+      }
+      payload.participantIds = [payload.actorId];
+    }
+    if (kind === 'update') {
+      // Join/leave carry no metadata delta. An update whose subtype/body cannot be interpreted
+      // still emits with empty changes rather than being dropped silently.
+      payload.changes = wwebjsGroupUpdateChanges(notification);
+    }
+    host.getCallbacks().onGroupEvent?.(payload);
+  } catch (error) {
+    host.logger.error(`Error processing group_${kind} notification`, String(error));
+  }
 }

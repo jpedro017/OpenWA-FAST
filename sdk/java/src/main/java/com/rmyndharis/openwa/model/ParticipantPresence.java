@@ -9,4 +9,4 @@ package com.rmyndharis.openwa.model;
  * @param lastSeen Unix SECONDS; {@code null} whenever the contact's privacy settings hide last-seen,
  *     which is the common case and not an error
  */
-public record ParticipantPresence(String id, String state, Long lastSeen) {}
+public record ParticipantPresence(String id, PresenceState state, Long lastSeen) {}

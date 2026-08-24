@@ -2,6 +2,8 @@ import { Injectable, BadRequestException, HttpException, HttpStatus, NotFoundExc
 import { EngineRegistry } from '../../engine/engine-registry.service';
 import { GroupMemberAddMode, IWhatsAppEngine, MediaInput } from '../../engine/interfaces/whatsapp-engine.interface';
 import { assertBase64WithinMediaCap, stripBase64DataUri } from '../message/media-cap.util';
+import { chatKind } from '../../engine/identity/wa-id';
+import { isAddressableParticipant } from '../../engine/identity/wa-id';
 import { SetGroupPictureDto } from './dto/group.dto';
 import { paginate, ListOptions } from '../../common/utils/paginate';
 import { SendPacingService } from '../message/send-pacing.service';
@@ -21,6 +23,26 @@ export class GroupService {
   private getEngine(sessionId: string): IWhatsAppEngine {
     // EngineRegistry.require()'s default is this exact 400 "Session is not started".
     return this.engines.require(sessionId);
+  }
+
+  /**
+   * Reject participant ids WhatsApp cannot act on, before they reach an engine.
+   *
+   * This lives in the service rather than in ParticipantsDto because the MCP agent tools
+   * (src/core/agent-tools/tools/group.tools.ts) call createGroup and addParticipants directly with a
+   * plain `z.array(z.string())`, so a DTO-only check would leave that path unguarded. Mirrors
+   * ContactService.assertAddressable.
+   *
+   * Runs before pacing on the two paced writes: a batch that can never reach WhatsApp must not draw
+   * on the cold-reachout budget on its way to a 400.
+   */
+  private assertAddressableParticipants(participants: string[]): void {
+    const invalid = participants.filter(p => !isAddressableParticipant(p));
+    if (invalid.length) {
+      throw new BadRequestException(
+        `Not an individual participant id: ${invalid.join(', ')} — pass a phone number, <phone>@c.us or <lid>@lid`,
+      );
+    }
   }
 
   getGroups(sessionId: string, opts: ListOptions = {}) {
@@ -44,8 +66,11 @@ export class GroupService {
    * reachout cost as adding them one by one — and is paced accordingly.
    */
   async createGroup(sessionId: string, name: string, participants: string[]) {
-    await this.pacing.assertReachoutAllowed(sessionId, participants);
-    return this.getEngine(sessionId).createGroup(name, participants);
+    this.assertAddressableParticipants(participants);
+    const coldCount = await this.pacing.assertReachoutAllowed(sessionId, participants);
+    const group = await this.getEngine(sessionId).createGroup(name, participants);
+    this.pacing.chargeGroupReachouts(sessionId, coldCount);
+    return group;
   }
 
   /**
@@ -54,20 +79,47 @@ export class GroupService {
    * draws on the same cold-reachout budget a first message does.
    */
   async addParticipants(sessionId: string, groupId: string, participants: string[]) {
-    await this.pacing.assertReachoutAllowed(sessionId, participants);
-    return this.getEngine(sessionId).addParticipants(groupId, participants);
+    this.assertAddressableParticipants(participants);
+    const coldCount = await this.pacing.assertReachoutAllowed(sessionId, participants);
+    const result = await this.getEngine(sessionId).addParticipants(groupId, participants);
+    this.pacing.chargeGroupReachouts(sessionId, coldCount);
+    return result;
   }
 
   removeParticipants(sessionId: string, groupId: string, participants: string[]) {
+    this.assertAddressableParticipants(participants);
     return this.getEngine(sessionId).removeParticipants(groupId, participants);
   }
 
   promoteParticipants(sessionId: string, groupId: string, participants: string[]) {
+    this.assertAddressableParticipants(participants);
     return this.getEngine(sessionId).promoteParticipants(groupId, participants);
   }
 
   demoteParticipants(sessionId: string, groupId: string, participants: string[]) {
+    this.assertAddressableParticipants(participants);
     return this.getEngine(sessionId).demoteParticipants(groupId, participants);
+  }
+
+  getGroupMembershipRequests(sessionId: string, groupId: string) {
+    return this.getEngine(sessionId).getGroupMembershipRequests(groupId);
+  }
+
+  /**
+   * Deliberately NOT paced, unlike addParticipants: the people here asked for the contact
+   * themselves, so approving (or rejecting) them draws nothing from the cold-reachout budget.
+   * `participants` omitted means every pending request — so the shape guard is conditional, not
+   * skipped: these routes take the same participant ids as the writes above, and whatsapp-web.js
+   * feeds a named requester straight to `requesterIds.map(createWid)`.
+   */
+  approveGroupMembershipRequests(sessionId: string, groupId: string, participants?: string[]) {
+    if (participants) this.assertAddressableParticipants(participants);
+    return this.getEngine(sessionId).approveGroupMembershipRequests(groupId, participants);
+  }
+
+  rejectGroupMembershipRequests(sessionId: string, groupId: string, participants?: string[]) {
+    if (participants) this.assertAddressableParticipants(participants);
+    return this.getEngine(sessionId).rejectGroupMembershipRequests(groupId, participants);
   }
 
   setGroupSubject(sessionId: string, groupId: string, subject: string) {
@@ -106,12 +158,29 @@ export class GroupService {
     return this.getEngine(sessionId).joinGroupViaInviteCode(inviteCode);
   }
 
+  /**
+   * Refuse an id that does not name a group before it reaches an engine.
+   *
+   * These three routes reuse the ACCOUNT's profile-picture primitives, and Baileys omits the `target`
+   * attribute whenever the jid it is handed is the account's own — so a 1:1 id passed where a group id
+   * belongs replaced or permanently deleted the account's own avatar and answered 200, while
+   * whatsapp-web.js refused the same input through requireGroupChat. Guarded here rather than in either
+   * adapter so both engines agree, and so no engine ever sees the wrong kind of id.
+   */
+  private assertGroupId(groupId: string): void {
+    if (chatKind(groupId) !== 'group') {
+      throw new BadRequestException(`${groupId} is not a group id`);
+    }
+  }
+
   /** Read the group's picture URL, or null when it has none. Groups reuse the profile-picture read. */
   getGroupPicture(sessionId: string, groupId: string): Promise<string | null> {
+    this.assertGroupId(groupId);
     return this.getEngine(sessionId).getProfilePicture(groupId);
   }
 
   setGroupPicture(sessionId: string, groupId: string, dto: SetGroupPictureDto): Promise<void> {
+    this.assertGroupId(groupId);
     const base64 = stripBase64DataUri(dto.base64);
     if (!dto.url && !base64) {
       throw new BadRequestException('Either url or base64 must be provided');
@@ -129,6 +198,7 @@ export class GroupService {
   }
 
   deleteGroupPicture(sessionId: string, groupId: string): Promise<void> {
+    this.assertGroupId(groupId);
     return this.getEngine(sessionId).deleteGroupPicture(groupId);
   }
 

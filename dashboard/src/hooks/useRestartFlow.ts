@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { infraApi } from '../services/api';
 import { restartPollAttempts } from '../utils/restartPoll';
 
@@ -46,6 +46,40 @@ export function useRestartFlow(): RestartFlow {
   const [dbSwitch, setDbSwitch] = useState(false);
   const [storageSwitch, setStorageSwitch] = useState(false);
 
+  // Every pending health-poll timeout and the countdown interval are tracked so an unmount (navigating
+  // away mid-restart) cancels them instead of letting them fire setState on a dead component. The
+  // trailing window.location.reload() on success is kept — a restart that already completed is meant
+  // to reload the page.
+  const pollTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    const pollTimeouts = pollTimeoutsRef.current;
+    return () => {
+      for (const handle of pollTimeouts) clearTimeout(handle);
+      pollTimeouts.clear();
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+    };
+  }, []);
+
+  const schedulePollTimeout = (fn: () => void, ms: number) => {
+    const handle = setTimeout(() => {
+      pollTimeoutsRef.current.delete(handle);
+      fn();
+    }, ms);
+    pollTimeoutsRef.current.add(handle);
+  };
+
+  const stopCountdown = () => {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+  };
+
   const open = ({
     profiles: newProfiles,
     dbSwitch: nextDbSwitch,
@@ -64,25 +98,25 @@ export function useRestartFlow(): RestartFlow {
     if (restartStatus === 'idle') setShowRestartModal(false);
   };
 
-  const checkServerHealth = (stopCountdown?: () => void, estimatedTime?: number) => {
+  const checkServerHealth = (estimatedTime?: number) => {
     let attempts = 0;
     const maxAttempts = restartPollAttempts(estimatedTime);
 
     const check = async () => {
       try {
         await infraApi.healthCheck();
-        stopCountdown?.();
+        stopCountdown();
         setRestartCountdown(0);
         setRestartStatus('success');
-        setTimeout(() => window.location.reload(), 2000);
+        schedulePollTimeout(() => window.location.reload(), 2000);
       } catch {
         attempts++;
-        if (attempts < maxAttempts) setTimeout(check, 1000);
+        if (attempts < maxAttempts) schedulePollTimeout(check, 1000);
         else setRestartStatus('error');
       }
     };
 
-    setTimeout(check, 3000);
+    schedulePollTimeout(check, 3000);
   };
 
   const start = async () => {
@@ -103,15 +137,8 @@ export function useRestartFlow(): RestartFlow {
     }
 
     setRestartStatus('waiting');
-    let intervalRef: ReturnType<typeof setInterval> | null = null;
-    const stopCountdown = () => {
-      if (intervalRef) {
-        clearInterval(intervalRef);
-        intervalRef = null;
-      }
-    };
-
-    intervalRef = setInterval(() => {
+    stopCountdown();
+    countdownIntervalRef.current = setInterval(() => {
       setRestartCountdown(prev => {
         if (prev <= 1) {
           stopCountdown();
@@ -121,7 +148,7 @@ export function useRestartFlow(): RestartFlow {
       });
     }, 1000);
 
-    checkServerHealth(stopCountdown, estimatedTime);
+    checkServerHealth(estimatedTime);
   };
 
   return {

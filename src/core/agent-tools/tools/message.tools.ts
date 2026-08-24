@@ -1,7 +1,15 @@
 import { z } from 'zod';
 import { ApiKeyRole } from '../../../modules/auth/entities/api-key.entity';
 import type { MessageService } from '../../../modules/message/message.service';
-import { MESSAGE_TEXT_MAX_LENGTH } from '../../../modules/message/dto/send-message.dto';
+import {
+  CUSTOM_PREVIEW_DESCRIPTION_MAX_LENGTH,
+  CUSTOM_PREVIEW_TITLE_MAX_LENGTH,
+  CUSTOM_PREVIEW_URL_MAX_LENGTH,
+  MENTIONS_MAX,
+  MENTION_WID_MAX_LENGTH,
+  MESSAGE_TEXT_MAX_LENGTH,
+} from '../../../modules/message/dto/send-message.dto';
+import { isMentionWid } from '../../../modules/message/dto/is-mention-wid.validator';
 import {
   CONTACT_NAME_MAX_LENGTH,
   CONTACT_NUMBER_MAX_LENGTH,
@@ -11,6 +19,58 @@ import {
 import { defineTool, type AnyToolDescriptor } from '../tool-descriptor';
 
 const sessionId = z.string().min(1).describe('Session UUID (the session id, not the name)');
+
+/**
+ * Mirrors the REST `quotedMessageId` field so an agent can reply with media, a location, a contact
+ * card or a poll — the same capability, on the same endpoints, through the MCP surface.
+ */
+const quotedMessageIdSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    'Quote an earlier message, making this send a reply. Engine-specific: whatsapp-web.js takes ' +
+      'the serialized message id, Baileys the raw key id of a message it has already stored.',
+  );
+
+/**
+ * Mirrors the REST `mentions` field. The element rule and both caps come from the DTO rather than
+ * being restated here: a tool handler calls the service directly, so the ValidationPipe never runs
+ * and this schema is the only thing standing between an agent and the engine.
+ */
+const mentionsSchema = z
+  .array(z.string().max(MENTION_WID_MAX_LENGTH).refine(isMentionWid, 'must be an individual WID, e.g. 62811@c.us'))
+  .max(MENTIONS_MAX)
+  .optional()
+  .describe(
+    'WIDs to @mention (e.g. ["62811@c.us"]). The text or caption must also carry the matching ' +
+      '@<number> token for WhatsApp to render the tag.',
+  );
+
+/**
+ * Mirrors the REST `customLinkPreview` field, whose caps come from the DTO for the same reason as
+ * `mentionsSchema` above. Baileys only: whatsapp-web.js takes a boolean and answers 501, and the
+ * field cannot be combined with `linkPreview: false`, which asks for the opposite.
+ */
+const customLinkPreviewSchema = z
+  .object({
+    url: z
+      .string()
+      .min(1)
+      .max(CUSTOM_PREVIEW_URL_MAX_LENGTH)
+      .describe('The URL as it appears in the message text; WhatsApp anchors the preview to it.'),
+    title: z
+      .string()
+      .min(1)
+      .max(CUSTOM_PREVIEW_TITLE_MAX_LENGTH)
+      .describe('Required: WhatsApp renders no preview without a title.'),
+    description: z.string().max(CUSTOM_PREVIEW_DESCRIPTION_MAX_LENGTH).optional(),
+  })
+  .optional()
+  .describe(
+    'Attach a preview you supply instead of one fetched from the URL, so nothing is fetched and it ' +
+      'works for a URL the gateway cannot reach. Baileys only: whatsapp-web.js answers 501.',
+  );
 
 export function messageTools(message: MessageService): AnyToolDescriptor[] {
   return [
@@ -78,7 +138,7 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
       inputSchema: z.object({
         sessionId,
         chatId: z.string().describe('Chat JID (e.g. 628123456789@c.us or groupId@g.us)'),
-        text: z.string().min(1).max(4096).describe('Text message content'),
+        text: z.string().min(1).max(MESSAGE_TEXT_MAX_LENGTH).describe('Text message content'),
         linkPreview: z
           .boolean()
           .optional()
@@ -86,12 +146,18 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
             'Set false to suppress the URL preview. Guaranteed only in that direction — leaving it ' +
               'unset means the engine default, and the engines differ.',
           ),
+        quotedMessageId: quotedMessageIdSchema,
+        mentions: mentionsSchema,
+        customLinkPreview: customLinkPreviewSchema,
       }),
       handler: input =>
         message.sendText(input.sessionId, {
           chatId: input.chatId,
           text: input.text,
           ...(input.linkPreview === undefined ? {} : { linkPreview: input.linkPreview }),
+          quotedMessageId: input.quotedMessageId,
+          mentions: input.mentions,
+          customLinkPreview: input.customLinkPreview,
         }),
     }),
     defineTool({
@@ -108,6 +174,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
         mimetype: z.string().optional().describe('MIME type (required when using base64)'),
         filename: z.string().max(255).optional(),
         caption: z.string().max(1024).optional(),
+        quotedMessageId: quotedMessageIdSchema,
+        mentions: mentionsSchema,
       }),
       handler: input =>
         message.sendImage(input.sessionId, {
@@ -117,6 +185,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           mimetype: input.mimetype,
           filename: input.filename,
           caption: input.caption,
+          quotedMessageId: input.quotedMessageId,
+          mentions: input.mentions,
         }),
     }),
     defineTool({
@@ -133,6 +203,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
         mimetype: z.string().optional().describe('MIME type (required when using base64)'),
         filename: z.string().max(255).optional(),
         caption: z.string().max(1024).optional(),
+        quotedMessageId: quotedMessageIdSchema,
+        mentions: mentionsSchema,
       }),
       handler: input =>
         message.sendVideo(input.sessionId, {
@@ -142,6 +214,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           mimetype: input.mimetype,
           filename: input.filename,
           caption: input.caption,
+          quotedMessageId: input.quotedMessageId,
+          mentions: input.mentions,
         }),
     }),
     defineTool({
@@ -159,6 +233,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
         filename: z.string().max(255).optional(),
         caption: z.string().max(1024).optional(),
         ptt: z.boolean().optional().describe('Send as a WhatsApp voice note (PTT)'),
+        quotedMessageId: quotedMessageIdSchema,
+        mentions: mentionsSchema,
       }),
       handler: input =>
         message.sendAudio(input.sessionId, {
@@ -169,6 +245,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           filename: input.filename,
           caption: input.caption,
           ptt: input.ptt,
+          quotedMessageId: input.quotedMessageId,
+          mentions: input.mentions,
         }),
     }),
     defineTool({
@@ -185,6 +263,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
         mimetype: z.string().optional().describe('MIME type (required when using base64)'),
         filename: z.string().max(255).optional(),
         caption: z.string().max(1024).optional(),
+        quotedMessageId: quotedMessageIdSchema,
+        mentions: mentionsSchema,
       }),
       handler: input =>
         message.sendDocument(input.sessionId, {
@@ -194,6 +274,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           mimetype: input.mimetype,
           filename: input.filename,
           caption: input.caption,
+          quotedMessageId: input.quotedMessageId,
+          mentions: input.mentions,
         }),
     }),
     defineTool({
@@ -209,6 +291,7 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
         longitude: z.number().min(-180).max(180).describe('Longitude coordinate'),
         description: z.string().max(LOCATION_TEXT_MAX_LENGTH).optional().describe('Location label/description'),
         address: z.string().max(LOCATION_TEXT_MAX_LENGTH).optional().describe('Street address'),
+        quotedMessageId: quotedMessageIdSchema,
       }),
       handler: input =>
         message.sendLocation(input.sessionId, {
@@ -217,6 +300,7 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           longitude: input.longitude,
           description: input.description,
           address: input.address,
+          quotedMessageId: input.quotedMessageId,
         }),
     }),
     defineTool({
@@ -234,12 +318,14 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           .min(1)
           .max(CONTACT_NUMBER_MAX_LENGTH)
           .describe('Phone number of the contact to share'),
+        quotedMessageId: quotedMessageIdSchema,
       }),
       handler: input =>
         message.sendContact(input.sessionId, {
           chatId: input.chatId,
           contactName: input.contactName,
           contactNumber: input.contactNumber,
+          quotedMessageId: input.quotedMessageId,
         }),
     }),
     defineTool({
@@ -256,6 +342,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
         mimetype: z.string().optional().describe('MIME type (required when using base64)'),
         filename: z.string().max(255).optional(),
         caption: z.string().max(1024).optional(),
+        quotedMessageId: quotedMessageIdSchema,
+        mentions: mentionsSchema,
       }),
       handler: input =>
         message.sendSticker(input.sessionId, {
@@ -265,6 +353,8 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           mimetype: input.mimetype,
           filename: input.filename,
           caption: input.caption,
+          quotedMessageId: input.quotedMessageId,
+          mentions: input.mentions,
         }),
     }),
     defineTool({
@@ -283,6 +373,7 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           .record(z.string(), z.string())
           .optional()
           .describe('Variables to substitute into {{placeholder}} tokens'),
+        mentions: mentionsSchema,
       }),
       handler: input =>
         message.sendTemplate(input.sessionId, {
@@ -290,6 +381,7 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
           templateId: input.templateId,
           templateName: input.templateName,
           vars: input.vars,
+          mentions: input.mentions,
         }),
     }),
     defineTool({
@@ -303,12 +395,14 @@ export function messageTools(message: MessageService): AnyToolDescriptor[] {
         chatId: z.string().describe('Chat JID'),
         quotedMessageId: z.string().describe('ID of the message to quote/reply to'),
         text: z.string().min(1).max(MESSAGE_TEXT_MAX_LENGTH).describe('Reply text content'),
+        mentions: mentionsSchema,
       }),
       handler: input =>
         message.reply(input.sessionId, {
           chatId: input.chatId,
           quotedMessageId: input.quotedMessageId,
           text: input.text,
+          mentions: input.mentions,
         }),
     }),
     defineTool({

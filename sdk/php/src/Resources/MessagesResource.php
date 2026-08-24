@@ -98,6 +98,11 @@ class MessagesResource
     /** @return array<string,mixed> */
     public function sendTemplate(string $sessionId, array $body): array
     {
+        // vars is a map: an empty PHP array would serialize as a JSON list [] and be rejected by the
+        // gateway's object validation. Cast the empty map to stdClass so it encodes as {}.
+        if (isset($body['vars']) && $body['vars'] === []) {
+            $body['vars'] = new \stdClass();
+        }
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-template", [], $body);
     }
 
@@ -208,7 +213,8 @@ class MessagesResource
     }
 
     /**
-     * Fetch a message's archived media bytes (404 when nothing is archived for it).
+     * Fetch a message's stored media bytes: the archived file when one exists, else the inline
+     * copy on the message row (covers media sent by this account); 404 when neither holds bytes.
      *
      * @return array{data: string, contentType: ?string}
      */
@@ -220,6 +226,13 @@ class MessagesResource
     /** @return array<string,mixed> */
     public function sendBulk(string $sessionId, array $body): array
     {
+        // variables inside each item is a map: an empty PHP array would serialize as a JSON list []
+        // and be rejected by the gateway's object validation, like headers/vars on the other sends.
+        foreach ($body['messages'] ?? [] as $i => $item) {
+            if (is_array($item) && isset($item['variables']) && $item['variables'] === []) {
+                $body['messages'][$i]['variables'] = new \stdClass();
+            }
+        }
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-bulk", [], $body);
     }
 

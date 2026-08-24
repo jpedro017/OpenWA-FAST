@@ -34,6 +34,12 @@ import { SessionEngineLeafEvents } from './session-engine-leaf-events';
 export interface SessionEngineWiringHost {
   /** Liveness gate: true only while `engine` is still the live engine registered for `id`. */
   isLiveEngine(id: string, engine: IWhatsAppEngine): boolean;
+  /**
+   * Ownership gate: true while this node may still speak for `id`. Orthogonal to isLiveEngine —
+   * between a lapsed lease and the teardown the heartbeat schedules, isLiveEngine is still true
+   * while this is already false. TRUE when no ownership service is wired (single process).
+   */
+  ownsSession(id: string): boolean;
   handleEngineReady(id: string, engine: IWhatsAppEngine, phone: string, pushName: string): void;
   handleEngineDisconnected(id: string, engine: IWhatsAppEngine, reason: string): Promise<void>;
   updateStatus(id: string, status: SessionStatus): Promise<void>;
@@ -79,12 +85,42 @@ export class SessionEngineEventWiring {
     this.logger = deps.logger;
   }
 
+  /**
+   * `previouslyLinked` is whether the session row carried a phone when this engine started, i.e.
+   * it had completed a link before. A QR from such an engine means the stored credentials are gone
+   * or no longer accepted, and when that happened while the engine was down nothing else in the
+   * log says so, hence the warning below. One-shot per engine start: a lifecycle reconnect builds a
+   * new table from the row, which still carries the phone, and warns again.
+   */
   buildCallbacks(
     id: string,
     engine: IWhatsAppEngine,
     sessionName: string,
     host: SessionEngineWiringHost,
+    previouslyLinked = false,
   ): EngineEventCallbacks {
+    let relinkWarned = false;
+    /**
+     * Persist an engine-driven status, but only while this node still owns the session.
+     *
+     * Every caller has already passed the isLiveEngine fence; this closes the other axis. A node
+     * whose lease lapsed keeps a live engine until the heartbeat's teardown completes, and a status
+     * written in that window lands on a row a peer now owns. FAILED is the one that does not heal:
+     * the boot reset and the takeover sweep both exclude it by design, so the session leaves every
+     * automatic recovery path until an operator restarts it by hand.
+     */
+    const persistStatus = (status: SessionStatus): void => {
+      if (!host.ownsSession(id)) {
+        this.logger.warn('Skipped an engine status write for a session this node no longer owns', {
+          sessionId: id,
+          status,
+          action: 'status_write_skipped_not_owned',
+        });
+        return;
+      }
+      void host.updateStatus(id, status);
+    };
+
     return {
       onQRCode: (qr: string): void => {
         if (!host.isLiveEngine(id, engine)) return;
@@ -92,6 +128,22 @@ export class SessionEngineEventWiring {
           sessionId: id,
           action: 'qr_generated',
         });
+        // A whatsapp-web.js revocation that happened while the engine was down leaves no other trace:
+        // the engine simply boots into the QR screen, with no LOGOUT, no auth failure and no audit
+        // row. The paths where OpenWA itself discarded the credentials (a LOGOUT close, the
+        // stuck-auth recovery) also end here, but each of those has already logged its own warning,
+        // and starting a session under a different ENGINE_TYPE than it was linked with lands here too.
+        if (previouslyLinked && !relinkWarned) {
+          relinkWarned = true;
+          this.logger.warn(
+            'Previously linked session is asking for a QR again: its stored credentials are missing or no ' +
+              'longer accepted. Unless an earlier warning for this session (LOGOUT, auth_cleared) or a changed ' +
+              'ENGINE_TYPE explains it, WhatsApp dropped the link while the engine was down (unlinked from the ' +
+              "phone, expired while offline, or the engine's stored auth state was lost). Check Linked devices " +
+              'on the phone before re-pairing.',
+            { sessionId: id, action: 'relink_required' },
+          );
+        }
 
         void host.webhookService.dispatch(id, 'session.qr', { sessionId: id, qr });
 
@@ -109,7 +161,7 @@ export class SessionEngineEventWiring {
           },
         );
 
-        void host.updateStatus(id, SessionStatus.QR_READY);
+        persistStatus(SessionStatus.QR_READY);
       },
       onReady: (phone, pushName): void => host.handleEngineReady(id, engine, phone, pushName),
       onMessage: (message): void => host.messages.handleInboundMessage(id, engine, message),
@@ -204,7 +256,7 @@ export class SessionEngineEventWiring {
         };
         const newStatus = statusMap[engineState];
         if (newStatus) {
-          void host.updateStatus(id, newStatus);
+          persistStatus(newStatus);
         }
       },
       onActionRequired: (reason: string): void => {
@@ -324,7 +376,7 @@ export class SessionEngineEventWiring {
           },
         );
 
-        void host.updateStatus(id, SessionStatus.FAILED);
+        persistStatus(SessionStatus.FAILED);
 
         // onError is terminal (no reconnect is scheduled — re-scan is required). Evict the dead engine
         // and SIGKILL its process: leaving it in the map would hold a concurrency slot indefinitely and

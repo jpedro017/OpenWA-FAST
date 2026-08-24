@@ -6,7 +6,7 @@ NOTE: the real paths use the ``/send-`` prefix, e.g. ``/messages/send-text``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 
 from .._http import quote_segment
 from ..types import (
@@ -102,12 +102,12 @@ class MessagesResource:
 
     def history(
         self, session_id: str, chat_id: str, query: MessageHistoryQuery | None = None
-    ) -> list[ChatHistoryMessage]:
+    ) -> List[ChatHistoryMessage]:
         return self._http.request(
             "GET", f"/api/sessions/{quote_segment(session_id)}/messages/{quote_segment(chat_id)}/history", query=query
         )
 
-    def reactions(self, session_id: str, chat_id: str, message_id: str) -> list[ReactionRecord]:
+    def reactions(self, session_id: str, chat_id: str, message_id: str) -> List[ReactionRecord]:
         return self._http.request(
             "GET", f"/api/sessions/{quote_segment(session_id)}/messages/{quote_segment(chat_id)}/{quote_segment(message_id)}/reactions"
         )
@@ -128,7 +128,9 @@ class MessagesResource:
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/unpin", body=body)
 
     def media(self, session_id: str, chat_id: str, message_id: str) -> MessageMedia:
-        """Fetch a message's archived media bytes (404 when nothing is archived for it)."""
+        """Fetch a message's stored media bytes: the archived file when one exists, else the
+        inline copy on the message row (covers media sent by this account); 404 when neither
+        holds bytes."""
         data, content_type = self._http.request_bytes(
             "GET",
             f"/api/sessions/{quote_segment(session_id)}/messages/{quote_segment(chat_id)}/{quote_segment(message_id)}/media",

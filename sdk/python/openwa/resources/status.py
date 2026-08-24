@@ -6,7 +6,7 @@ NOTE: this is WhatsApp "Status/Stories", distinct from session lifecycle status.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 
 from .._http import quote_segment
 from ..types import (
@@ -27,10 +27,10 @@ class StatusResource:
     def __init__(self, http: "HttpExecutor") -> None:
         self._http = http
 
-    def list(self, session_id: str) -> dict[str, list[StatusRecord]]:
+    def list(self, session_id: str) -> dict[str, List[StatusRecord]]:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/status")
 
-    def from_contact(self, session_id: str, contact_id: str) -> dict[str, list[StatusRecord]]:
+    def from_contact(self, session_id: str, contact_id: str) -> dict[str, List[StatusRecord]]:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/status/{quote_segment(contact_id)}")
 
     def media(self, session_id: str, status_id: str) -> StatusMedia:

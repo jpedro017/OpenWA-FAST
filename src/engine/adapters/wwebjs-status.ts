@@ -10,6 +10,7 @@ import {
 import { SerializedWid } from '../types/whatsapp-web-js.types';
 import { toMessageMedia } from './wwebjs-messaging';
 import { type WwebjsEngineHost } from './wwebjs-host';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
 
 /**
  * The status-post counterpart of `toMessageResult`, but its absent-message case is *narrower* than a
@@ -58,9 +59,26 @@ export class WwebjsStatus {
     return this.host.getClient();
   }
 
+  /**
+   * Run a client operation, classifying a dead page/transport as the documented 503 plus an early
+   * death signal instead of an opaque 500 under a status that still says READY - the split every
+   * chats read already makes (#1081). Other errors propagate unchanged.
+   */
+  private async withPage<T>(context: string, op: () => Promise<T>): Promise<T> {
+    try {
+      return await op();
+    } catch (error) {
+      if (this.host.isPageTransportError(error)) {
+        this.host.reportIfPageTransportError(error, context);
+        throw new EngineTransportError(`Transport died during ${context}`);
+      }
+      throw error;
+    }
+  }
+
   async getContactStatuses(): Promise<Status[]> {
     this.host.ensureReady();
-    return this.collectStatuses(await this.client().getBroadcasts());
+    return this.collectStatuses(await this.withPage('getContactStatuses', () => this.client().getBroadcasts()));
   }
 
   async getContactStatus(contactId: string): Promise<Status[]> {
@@ -68,7 +86,7 @@ export class WwebjsStatus {
     // A contact with no active 24h story resolves to an "empty" Broadcast (id/msgs/getContact
     // undefined — Broadcast._patch only runs when data is truthy). That is the common case, so guard
     // it: return [] rather than dereferencing undefined inside collectStatuses (→ 500).
-    const broadcast = await this.client().getBroadcastById(contactId);
+    const broadcast = await this.withPage('getContactStatus', () => this.client().getBroadcastById(contactId));
     return broadcast?.msgs?.length ? this.collectStatuses([broadcast]) : [];
   }
 
@@ -141,12 +159,14 @@ export class WwebjsStatus {
     // whatsapp-web.js posts a text status by messaging status@broadcast with styling in `extra`
     // (Client.js maps options.extra → page extraOptions → sendStatusTextMsgAction in Utils.js).
     // backgroundColor is a #RRGGBB hex; font is the fontStyle index 0-7.
-    const msg = await this.client().sendMessage('status@broadcast', text, {
-      extra: {
-        ...(options.backgroundColor !== undefined ? { backgroundColor: options.backgroundColor } : {}),
-        ...(options.font !== undefined ? { fontStyle: options.font } : {}),
-      },
-    });
+    const msg = await this.withPage('postTextStatus', () =>
+      this.client().sendMessage('status@broadcast', text, {
+        extra: {
+          ...(options.backgroundColor !== undefined ? { backgroundColor: options.backgroundColor } : {}),
+          ...(options.font !== undefined ? { fontStyle: options.font } : {}),
+        },
+      }),
+    );
     return toStatusResult(msg);
   }
 
@@ -173,10 +193,12 @@ export class WwebjsStatus {
     this.host.ensureReady();
     this.warnStatusRecipientsOnce(options);
     const messageMedia = await toMessageMedia(media);
-    const msg = await this.client().sendMessage('status@broadcast', messageMedia, {
-      ...(options.caption !== undefined ? { caption: options.caption } : {}),
-      ...extra,
-    });
+    const msg = await this.withPage('postMediaStatus', () =>
+      this.client().sendMessage('status@broadcast', messageMedia, {
+        ...(options.caption !== undefined ? { caption: options.caption } : {}),
+        ...extra,
+      }),
+    );
     return toStatusResult(msg);
   }
 
@@ -194,6 +216,6 @@ export class WwebjsStatus {
     // Revokes the caller's own status post. revokeStatusMessage resolves the message by id and
     // throws if it isn't fromMe/isn't a status — the statusId returned by postText/Image/VideoStatus
     // (msg.id._serialized) is the id it expects.
-    await this.client().revokeStatusMessage(statusId);
+    await this.withPage('deleteStatus', () => this.client().revokeStatusMessage(statusId));
   }
 }

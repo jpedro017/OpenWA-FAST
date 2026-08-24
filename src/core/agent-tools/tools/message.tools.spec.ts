@@ -267,6 +267,100 @@ describe('messageTools', () => {
     expect(out).toEqual({ id: 'm2' });
   });
 
+  it('forwards a tag list on the text and reply tools', async () => {
+    const sendText = jest.fn().mockResolvedValue({ id: 'm1' });
+    const reply = jest.fn().mockResolvedValue({ id: 'm2' });
+    const tools = makeTools({ sendText, reply } as unknown as MessageService);
+
+    await run(tools.get('MessageSendText')!, {
+      sessionId: 's1',
+      chatId: '120363@g.us',
+      text: 'hi @62811',
+      mentions: ['62811@c.us'],
+    });
+    expect(sendText).toHaveBeenCalledWith('s1', expect.objectContaining({ mentions: ['62811@c.us'] }));
+
+    await run(tools.get('MessageReply')!, {
+      sessionId: 's1',
+      chatId: '120363@g.us',
+      quotedMessageId: 'm1',
+      text: 'hi @62811',
+      mentions: ['62811@c.us'],
+    });
+    expect(reply).toHaveBeenCalledWith('s1', expect.objectContaining({ mentions: ['62811@c.us'] }));
+  });
+
+  it('refuses a tag that is not an individual WID, instead of dropping it', async () => {
+    // The whole point of declaring the field here. A tool schema is a plain z.object, so before it was
+    // declared an agent's `mentions` was stripped silently and the send reported success; and this path
+    // calls the service directly, so no ValidationPipe ever sees the value.
+    const sendText = jest.fn().mockResolvedValue({ id: 'm1' });
+    const tools = makeTools({ sendText } as unknown as MessageService);
+
+    // The detail lives on the response, not on .message, which reads "Bad Request Exception".
+    await expect(
+      run(tools.get('MessageSendText')!, {
+        sessionId: 's1',
+        chatId: '120363@g.us',
+        text: 'hi',
+        mentions: ['120363000000000000@g.us'],
+      }),
+    ).rejects.toMatchObject({
+      response: { message: [expect.stringContaining('individual WID') as unknown as string] },
+    });
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('forwards a caller-supplied link preview, and enforces the title WhatsApp requires', async () => {
+    // REST declares customLinkPreview; the tool did not, so an agent's object was stripped before the
+    // handler ran and the send went out with whatever preview the engine chose on its own.
+    const sendText = jest.fn().mockResolvedValue({ id: 'm1' });
+    const tools = makeTools({ sendText } as unknown as MessageService);
+
+    await run(tools.get('MessageSendText')!, {
+      sessionId: 's1',
+      chatId: '628111@c.us',
+      text: 'see https://example.com/launch',
+      customLinkPreview: { url: 'https://example.com/launch', title: 'We just launched' },
+    });
+    expect(sendText).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({
+        customLinkPreview: { url: 'https://example.com/launch', title: 'We just launched' },
+      }),
+    );
+
+    // Control: the required title is enforced here, not left to the DTO, because this path never
+    // reaches the ValidationPipe.
+    sendText.mockClear();
+    await expect(
+      run(tools.get('MessageSendText')!, {
+        sessionId: 's1',
+        chatId: '628111@c.us',
+        text: 'see https://example.com/launch',
+        customLinkPreview: { url: 'https://example.com/launch' },
+      }),
+    ).rejects.toBeDefined();
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('tags a sticker too, now that both adapters carry the list', async () => {
+    // Excluded when this tool set was written, because neither adapter built a mention list for a
+    // sticker. Both do now, and the route has always accepted the field, so withholding it here
+    // would leave the MCP surface silently weaker than REST for the same send.
+    const sendSticker = jest.fn().mockResolvedValue({ id: 'm1' });
+    const tools = makeTools({ sendSticker } as unknown as MessageService);
+
+    await run(tools.get('MessageSendSticker')!, {
+      sessionId: 's1',
+      chatId: '120363@g.us',
+      url: 'https://example.test/s.webp',
+      mentions: ['62811@c.us'],
+    });
+
+    expect(sendSticker).toHaveBeenCalledWith('s1', expect.objectContaining({ mentions: ['62811@c.us'] }));
+  });
+
   it('MessageForward delegates to forward', async () => {
     const forward = jest.fn().mockResolvedValue({ id: 'm2' });
     const tools = makeTools({ forward } as unknown as MessageService);

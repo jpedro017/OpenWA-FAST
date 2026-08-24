@@ -78,7 +78,7 @@ describe('Session name-scoped teardown fence: 409 code survives HTTP serializati
     }
   });
 
-  it('DELETE /api/sessions/:id serializes the teardown-pending 409 with the code field in the body', async () => {
+  it('DELETE /api/sessions/:sessionId serializes the teardown-pending 409 with the code field in the body', async () => {
     const res = await request(app.getHttpServer()).delete(`/api/sessions/${sessionId}`).set('X-API-Key', adminKey);
 
     expect(res.status).toBe(409);
@@ -93,7 +93,7 @@ describe('Session name-scoped teardown fence: 409 code survives HTTP serializati
     expect((res.body as { message: unknown }).message).toEqual(expect.stringContaining('still in flight'));
   });
 
-  it('POST /api/sessions/:id/start serializes the teardown-pending 409 with the code field in the body', async () => {
+  it('POST /api/sessions/:sessionId/start serializes the teardown-pending 409 with the code field in the body', async () => {
     const res = await request(app.getHttpServer()).post(`/api/sessions/${sessionId}/start`).set('X-API-Key', adminKey);
 
     expect(res.status).toBe(409);

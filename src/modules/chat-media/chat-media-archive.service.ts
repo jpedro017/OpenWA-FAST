@@ -5,6 +5,7 @@ import { In, IsNull, LessThan, Not, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Message } from '../message/entities/message.entity';
 import { StorageService } from '../../common/storage/storage.service';
+import { sweepOrphanedFiles } from '../../common/storage/orphan-sweep';
 import { createLogger } from '../../common/services/logger.service';
 
 /** Storage key prefix owned by the chat-media archive; the media bucket is shared with statuses. */
@@ -37,6 +38,9 @@ function extFromMimetype(mimetype: string): string {
   return MIME_SUBTYPE_EXT_OVERRIDES[subtype] ?? subtype;
 }
 
+/** `metadata.media.data` holding a remote URL (a URL-based send) rather than base64 bytes. */
+const MEDIA_URL_POINTER = /^https?:\/\//i;
+
 /** The inline media shape carried on a persisted row's `metadata.media`. */
 interface InlineMedia {
   mimetype?: string;
@@ -53,10 +57,12 @@ interface InlineMedia {
  * cap: the inline copy is deliberately left in place, since the dashboard renders from it and
  * stripping it would break the response contract.
  *
- * Two recurring sweeps run only while archiving is enabled: a retention purge (when
- * `CHAT_MEDIA_ARCHIVE_TTL_DAYS` is non-zero) that clears files past their TTL along with the
- * columns pointing at them, and an hourly reconciliation sweep that reaps files no row references —
- * the crash leftovers of the narrow window between a file write and its row update.
+ * Two recurring sweeps run regardless of that flag, which gates the writer rather than the store: a
+ * retention purge (when `CHAT_MEDIA_ARCHIVE_TTL_DAYS` is non-zero) that clears files past their TTL
+ * along with the columns pointing at them, and an hourly reconciliation sweep that reaps files no
+ * row references — the crash leftovers of the narrow window between a file write and its row
+ * update. Files and pointers written while the flag was on outlive it being turned off, so the
+ * maintenance they need does not stop with the writer.
  */
 @Injectable()
 export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
@@ -78,10 +84,6 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit(): void {
-    // Both sweeps exist only to maintain archived files. With archiving off no row can hold a
-    // mediaPath, so scheduling them would be a recurring no-op walk of the store.
-    if (!this.enabled) return;
-
     const runPurge = (): void => {
       this.purgeExpired(Date.now()).catch(err =>
         this.logger.error('Chat media purge failed', err instanceof Error ? err.stack : String(err)),
@@ -121,11 +123,20 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
    * Never throws: archiving is a side benefit of receiving a message, and a storage hiccup must not
    * surface on the receive path. Returns the storage key when a file was written.
    */
-  async archive(row: Pick<Message, 'id' | 'sessionId' | 'metadata'>): Promise<string | null> {
+  async archive(row: Pick<Message, 'id' | 'sessionId' | 'metadata' | 'mediaPath'>): Promise<string | null> {
     if (!this.enabled) return null;
+    // Outbound rows have two possible writers (the REST/bulk persist and the engine echo), so the
+    // same row can reach here twice. A second write would leave the first file referenced by
+    // nothing but still inside the grace window — work and storage for no gain.
+    if (row.mediaPath) return null;
 
     const media = (row.metadata as { media?: InlineMedia } | null | undefined)?.media;
     if (!media?.data || media.omitted || !media.mimetype) return null;
+    // A URL-based send stores the URL STRING as `data`, not bytes. `Buffer.from(url, 'base64')`
+    // does not throw — it yields ~18 bytes of noise — and the read endpoint consults the archive
+    // BEFORE the inline copy, so archiving one would serve garbage in place of the correct 404.
+    // Same discriminator the send path and the export controller already apply to this value.
+    if (MEDIA_URL_POINTER.test(media.data)) return null;
 
     const maxBytes = this.configService.get<number>('chatMedia.maxBytes', DEFAULT_ARCHIVE_MAX_BYTES);
     const sizeBytes = media.sizeBytes ?? Buffer.byteLength(media.data, 'base64');
@@ -165,10 +176,13 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
    */
   async getMedia(
     sessionId: string,
-    chatId: string,
+    chatIds: string[],
     waMessageId: string,
   ): Promise<{ path: string; mimetype: string } | null> {
-    const row = await this.repository.findOne({ where: { sessionId, chatId, waMessageId } });
+    // Candidates rather than one id: an outbound row stores the caller's literal chatId or the
+    // engine-neutral form depending on which writer won the persist race. The caller owns the
+    // dialect resolution (it holds the lid table), so this only has to match any of them.
+    const row = await this.repository.findOne({ where: { sessionId, chatId: In(chatIds), waMessageId } });
     if (!row?.mediaPath || !row.mediaMimetype) return null;
     return { path: row.mediaPath, mimetype: row.mediaMimetype };
   }
@@ -246,54 +260,24 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
    */
   async sweepOrphanedMedia(now: number = Date.now()): Promise<number> {
     const graceMs = this.configService.get<number>('chatMedia.orphanGraceMs', DEFAULT_ORPHAN_GRACE_MS);
-    let removed = 0;
-    // Keys still unreferenced at the end of THIS pass. Bounded by the orphan count (normally ~0),
-    // not by the size of the store, so it can safely drive the bookkeeping prune below.
-    const stillOrphaned = new Set<string>();
-
-    // Reconciled in chunks rather than as two whole-store sets. iterateFiles streams (listFiles
-    // truncates at STORAGE_LIST_MAX_FILES, which would strand every orphan past the cap), but
-    // collecting every key AND every archived row into memory would undo that: with the default
-    // TTL of 0 the archive grows without bound, so a mature gateway would spend an hourly spike
-    // holding millions of key strings. Each chunk asks the DB only which of ITS keys are
-    // referenced — an indexed lookup over a bounded id list.
-    let chunk: string[] = [];
-    const flush = async (): Promise<void> => {
-      if (chunk.length === 0) return;
-      const rows = await this.repository.find({ where: { mediaPath: In(chunk) }, select: { mediaPath: true } });
-      const referenced = new Set(rows.map(row => row.mediaPath));
-      for (const file of chunk) {
-        if (referenced.has(file)) {
-          this.orphanFirstSeenAt.delete(file);
-          continue;
-        }
-        stillOrphaned.add(file);
-        const firstSeenAt = this.orphanFirstSeenAt.get(file) ?? now;
-        this.orphanFirstSeenAt.set(file, firstSeenAt);
-        if (now - firstSeenAt < graceMs) continue;
-        try {
-          await this.storageService.deleteFile(file);
-          this.orphanFirstSeenAt.delete(file);
-          stillOrphaned.delete(file);
-          removed += 1;
-        } catch (err) {
-          this.logger.warn(`Failed to delete orphaned chat media ${file}`, { error: String(err) });
-        }
-      }
-      chunk = [];
-    };
-
-    for await (const file of this.storageService.iterateFiles(CHAT_MEDIA_PREFIX)) {
-      if (!file.startsWith(CHAT_MEDIA_PREFIX)) continue;
-      chunk.push(file);
-      if (chunk.length >= SWEEP_CHUNK_SIZE) await flush();
-    }
-    await flush();
-    // Drop bookkeeping for anything not still orphaned this pass — the file is gone, or a row now
-    // references it. Keyed off the orphan set rather than a full listing so this stays bounded too.
-    for (const key of [...this.orphanFirstSeenAt.keys()]) {
-      if (!stillOrphaned.has(key)) this.orphanFirstSeenAt.delete(key);
-    }
+    // Reconciled in chunks rather than as two whole-store sets: with the default TTL of 0 the
+    // archive grows without bound, so collecting every key AND every archived row into memory would
+    // turn the hourly sweep into a memory spike. Each chunk asks the DB only which of ITS keys are
+    // referenced — an indexed lookup over a bounded key list.
+    const removed = await sweepOrphanedFiles({
+      storage: this.storageService,
+      prefix: CHAT_MEDIA_PREFIX,
+      graceMs,
+      now,
+      firstSeenAt: this.orphanFirstSeenAt,
+      chunkSize: SWEEP_CHUNK_SIZE,
+      referencedAmong: async keys => {
+        const rows = await this.repository.find({ where: { mediaPath: In(keys) }, select: { mediaPath: true } });
+        return new Set(rows.map(row => row.mediaPath));
+      },
+      onDeleteFailed: (file, err) =>
+        this.logger.warn(`Failed to delete orphaned chat media ${file}`, { error: String(err) }),
+    });
     if (removed > 0) this.logger.log(`Chat media orphan sweep removed ${removed} file(s)`);
     return removed;
   }

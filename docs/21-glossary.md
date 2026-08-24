@@ -73,7 +73,7 @@ Web interface to manage OpenWA without using the API directly. Built with React 
 
 ### Dead Letter Queue (DLQ)
 
-The durable record of deliveries abandoned after every retry. In OpenWA it is a **database table**, not a Redis queue: `webhook_delivery_failures` for outbound webhooks and `integration_delivery_failures` for plugin ingress. Used for debugging and manual redrive.
+The durable record of deliveries abandoned after every retry. In OpenWA it is a **database table**, not a Redis queue: `webhook_delivery_failures` for outbound webhooks and `integration_delivery_failures` for plugin ingress. Used for debugging; **redrive exists for plugin ingress only** (`POST /api/integration/instances/:pluginId/:instanceId/redrive`); an outbound-webhook failure row is a record, not a replay source, so recovery means the provider or your own tooling re-sending the event.
 
 ### Docker
 
@@ -118,7 +118,7 @@ Browser mode that runs without a GUI. Puppeteer runs Chrome in headless mode.
 
 ### Health Check
 
-Endpoints to check system health: `/api/health` (basic status and running version), `/api/health/live` (liveness) and `/api/health/ready` (readiness — probes both databases, and reports 503 while the process is draining). All three are public and exempt from rate limiting. The `/api` prefix is applied globally with no exclusions, so the unprefixed paths do not exist — container and Kubernetes probes must use the prefixed form.
+Endpoints to check system health: `/api/health` (basic status; the running version is added only for an authenticated caller), `/api/health/live` (liveness) and `/api/health/ready` (readiness — probes both databases, and reports 503 while the process is draining). All three are public and exempt from rate limiting. The `/api` prefix is applied globally with no exclusions, so the unprefixed paths do not exist — container and Kubernetes probes must use the prefixed form.
 
 ### Hook
 
@@ -134,7 +134,7 @@ Data stored in RAM. Fast but non-persistent — lost on restart. Independent of 
 
 ### JID (Jabber ID)
 
-WhatsApp's id format, inherited from XMPP; the user-facing "Chat ID" is a JID. The same entity can be addressed in more than one dialect: `<phone>@c.us` (whatsapp-web.js, and OpenWA's neutral form), `<phone>@s.whatsapp.net` (Baileys' raw form for the same user), `<id>@g.us` (a group), or `<lid>@lid` (a LID, a privacy id). OpenWA normalizes engine ids to a single neutral dialect at the engine boundary - see _System Architecture > WhatsApp Identity Contract_.
+WhatsApp's id format, inherited from XMPP; the user-facing "Chat ID" is a JID. The same entity can be addressed in more than one dialect: `<phone>@c.us` (whatsapp-web.js, and OpenWA's neutral form), `<phone>@s.whatsapp.net` (Baileys' raw form for the same user), `<id>@g.us` (a group), or `<lid>@lid` (a LID, a privacy id). WhatsApp also issues Meta-hosted dialects of the first and last of these (`@hosted`, `@hosted.lid`); they name the same account and normalize to the same neutral form. OpenWA normalizes engine ids to a single neutral dialect at the engine boundary - see _System Architecture > WhatsApp Identity Contract_.
 
 ### Job Queue
 

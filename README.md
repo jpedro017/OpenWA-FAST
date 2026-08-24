@@ -262,11 +262,11 @@ docker compose --profile full up -d
 
 ## 🔌 Ports
 
-| Service         | Port            | Description                                     |
-| --------------- | --------------- | ----------------------------------------------- |
-| API & Dashboard | `2785`          | REST API + bundled web dashboard (same port)    |
-| Swagger         | `2785/api/docs` | Interactive API docs                            |
-| Dashboard (dev) | `2886`          | Vite dev server with hot reload (`npm run dev`) |
+| Service         | Port            | Description                                                                         |
+| --------------- | --------------- | ----------------------------------------------------------------------------------- |
+| API & Dashboard | `2785`          | REST API + bundled web dashboard (same port)                                        |
+| Swagger         | `2785/api/docs` | Interactive API docs — off under `NODE_ENV=production` unless `ENABLE_SWAGGER=true` |
+| Dashboard (dev) | `2886`          | Vite dev server with hot reload (`npm run dev`)                                     |
 
 ---
 
@@ -327,7 +327,7 @@ curl -X POST http://localhost:2785/api/sessions/{sessionId}/webhooks \
 
 OpenWA can expose a **curated set of tools over the [Model Context Protocol](https://modelcontextprotocol.io)** so AI agents (Claude, Cursor, …) can drive WhatsApp. It is **off by default** and **additive** — every REST route keeps working unchanged.
 
-Set `MCP_ENABLED=true` to mount a stateless Streamable-HTTP transport at **`POST /mcp`** on the existing server (same port, no extra process). It exposes 51 curated tools (sessions, messaging, contacts, basic group ops, webhook reads, labels, automation-rule reads) — a focused surface rather than the full API, so agents aren't overwhelmed and destructive operations stay off the agent path.
+Set `MCP_ENABLED=true` to mount a stateless Streamable-HTTP transport at **`POST /mcp`** on the existing server (same port, no extra process). It mounts **25 read-only tools** by default — session, message, contact, group, webhook, label and automation-rule _reads_ — because the surface is read-only unless you opt out. Add `MCP_READONLY=false` to mount all **51 tools**, adding the write tier (send, reply, group operations). Either way it is a focused surface rather than the full API, so agents aren't overwhelmed.
 
 ```bash
 MCP_ENABLED=true npm run start:prod   # or set MCP_ENABLED in your .env / compose

@@ -431,6 +431,10 @@ export BACKUP_DIR="/backups/openwa"
 curl -H "X-API-Key: $API_KEY" \
   http://localhost:2785/api/infra/export-data > "$BACKUP_DIR/export-data.json"
 
+# Started with docker-compose.dev.yml (the README Quick Start)? Add `-f docker-compose.dev.yml`
+# to every docker compose command in this runbook, the Rollback block included, and write `openwa`
+# wherever a command names the `openwa-api` service (steps 6 and 7, rollback step 2).
+
 # 4. Stop services
 docker compose down
 
@@ -455,8 +459,8 @@ docker compose up -d
 sleep 30
 curl http://localhost:2785/api/health
 
-# 10. Verify version
-curl http://localhost:2785/api/health | jq '.version'
+# 10. Verify version (`version` is only included for an authenticated request)
+curl -H "X-API-Key: $API_KEY" http://localhost:2785/api/health | jq '.version'
 
 # 11. Verify all sessions
 curl -H "X-API-Key: $API_KEY" \
@@ -476,8 +480,8 @@ curl -X POST http://localhost:2785/api/sessions/{sessionId}/messages/send-text \
 **Verification:**
 
 ```bash
-# Correct version
-curl http://localhost:2785/api/health | jq '.version'
+# Correct version (`version` is only included for an authenticated request)
+curl -H "X-API-Key: $API_KEY" http://localhost:2785/api/health | jq '.version'
 # Expected: "<new-version>"
 
 # All sessions reconnected
@@ -496,8 +500,9 @@ git checkout v<old-version>
 docker compose build openwa-api
 
 # 3. Restore from the pre-upgrade backup (both DBs + sessions) — the archive step 2 produced is
-#    "$BACKUP_DIR/openwa-backup-<timestamp>.tar.gz"
-./scripts/restore.sh "$BACKUP_DIR/openwa-backup-<timestamp>.tar.gz"
+#    "$BACKUP_DIR/openwa-backup-<timestamp>.tar.gz". The databases in place still hold the failed
+#    upgrade's data, so the restore refuses to touch them without --force
+./scripts/restore.sh "$BACKUP_DIR/openwa-backup-<timestamp>.tar.gz" --force
 
 # 4. Start with old version
 docker compose up -d
@@ -604,7 +609,9 @@ docker compose down
 # 2. Restore from an archive produced by scripts/backup.sh
 #    (databases land on MAIN_DATABASE_NAME / DATABASE_NAME, default ./data/... — the same paths
 #    the app reads; non-DB state follows OPENWA_DATA_DIR. Pass --strict to refuse an archive
-#    whose CONSISTENCY-WARNING marker reports plain-copied, possibly-torn database snapshots)
+#    whose CONSISTENCY-WARNING marker reports plain-copied, possibly-torn database snapshots.
+#    Restoring over an existing install's live databases requires --force; without it the script
+#    refuses to overwrite them)
 ./scripts/restore.sh ./backups/openwa-backup-<timestamp>.tar.gz
 
 # 3. (Postgres only) the archive contains database.sql — import it manually:

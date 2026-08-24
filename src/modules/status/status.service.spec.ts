@@ -138,6 +138,44 @@ describe('StatusService media validation and selection', () => {
 
       expect(media.mimetype).toBe('application/octet-stream');
     });
+
+    it('serves image/svg+xml as inert octet-stream despite the image/ prefix (scriptable)', async () => {
+      // SVG clears the (image|video|audio)/ family check yet is active content — a stored SVG
+      // status served with its declared Content-Type is stored-XSS material on the API origin.
+      // The chat-media path already excludes it; this closes the same hole for status media.
+      store.getMedia.mockResolvedValue({ path: 'statuses/sess/x.svg', mimetype: 'image/svg+xml' });
+      storageService.getFile.mockResolvedValue(Buffer.from('<svg/>'));
+
+      const media = await service.getStatusMedia('sess', 'w1');
+
+      expect(media.mimetype).toBe('application/octet-stream');
+    });
+
+    it.each(['image/svg+xml;charset=utf-8', 'image/svg+xml ', 'image/svg+xml ;charset=utf-8'])(
+      'serves the parameterized/spaced form %s as inert octet-stream too (browsers parse it as SVG)',
+      async mimetype => {
+        // The stored mimetype is engine-reported verbatim, so it can carry MIME parameters or
+        // trailing OWS; a browser strips both and renders `image/svg+xml` — the exclusion must match
+        // what the browser will see, not the exact byte string.
+        store.getMedia.mockResolvedValue({ path: 'statuses/sess/x.svg', mimetype });
+        storageService.getFile.mockResolvedValue(Buffer.from('<svg/>'));
+
+        const media = await service.getStatusMedia('sess', 'w1');
+
+        expect(media.mimetype).toBe('application/octet-stream');
+      },
+    );
+
+    it('still serves a parameterized NON-scriptable image with its declared mimetype', async () => {
+      // The exclusion is scoped to SVG: a perfectly ordinary `image/jpeg` with a charset parameter
+      // (or any other image/video/audio type) must not be dragged down to octet-stream by it.
+      store.getMedia.mockResolvedValue({ path: 'statuses/sess/x.jpg', mimetype: 'image/jpeg;charset=ISO-8859-1' });
+      storageService.getFile.mockResolvedValue(Buffer.from('x'));
+
+      const media = await service.getStatusMedia('sess', 'w1');
+
+      expect(media.mimetype).toBe('image/jpeg;charset=ISO-8859-1');
+    });
   });
 
   it('prefers explicit base64 over url for image and video status media', async () => {

@@ -64,7 +64,14 @@ MEDIA_DIR="$(openwa_resolve STORAGE_LOCAL_PATH "$DATA_DIR/media")"
 # registry and each plugin's ctx.storage below — so an unset PLUGINS_DIR must resolve there
 # too, or the archive silently omits the plugin packages.
 PLUGIN_PACKAGES_DIR="$(openwa_resolve PLUGINS_DIR "$DATA_DIR/plugins")"
-PLUGIN_STATE_DIR="$DATA_DIR/plugins"
+# Plugin registry + every plugin's persisted ctx.storage. The app puts them at <dataDir>/plugins,
+# where dataDir is PLUGIN_STATE_DIR when that is set and ./data otherwise, so the knob has to be
+# resolved here exactly like PLUGINS_DIR above. Hardcoding $DATA_DIR/plugins meant an operator who
+# moved plugin state got an archive with neither the registry nor any plugin's storage in it, and
+# a restore that put nothing back. Resolved under its own name because the knob names the ROOT,
+# not the plugins directory inside it.
+PLUGIN_STATE_ROOT="$(openwa_resolve PLUGIN_STATE_DIR "$DATA_DIR")"
+PLUGIN_STATE_DIR="$PLUGIN_STATE_ROOT/plugins"
 GENERATED_ENV="$DATA_DIR/.env.generated"
 ADMIN_KEY_FILE="$DATA_DIR/.api-key"
 
@@ -123,8 +130,9 @@ if [ "$DATABASE_TYPE" = "postgres" ]; then
     log "ERROR: DATABASE_TYPE=postgres but pg_dump is not installed"
     exit 1
   fi
-  if [ -n "${DATABASE_URL:-}" ]; then
-    pg_dump "$DATABASE_URL" >"$STAGE/database.sql"
+  DATABASE_URL_RESOLVED="$(openwa_resolve DATABASE_URL '')"
+  if [ -n "$DATABASE_URL_RESOLVED" ]; then
+    pg_dump "$DATABASE_URL_RESOLVED" >"$STAGE/database.sql"
   else
     # Same layered resolution as the paths above: a dashboard-provisioned Postgres keeps its
     # connection details in <data dir>/.env.generated, never in the operator's shell.

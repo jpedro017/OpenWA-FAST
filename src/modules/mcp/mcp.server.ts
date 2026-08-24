@@ -14,6 +14,7 @@ import { AuditAction } from '../audit/entities/audit-log.entity';
 import { handleToolError, jsonToolResult, smartToolResult } from './tool-result';
 import type { KeyRateLimiter } from './mcp-rate-limit';
 import { resolveClientIp } from '../../common/utils/ip';
+import { resolveBodyLimit } from '../../config/bootstrap-security';
 
 const logger = new Logger('McpServer');
 
@@ -247,5 +248,8 @@ export function mountMcpServer(
   // `inflate: false` matches the global parsers: a compressed body is refused by the budget
   // middleware long before this runs, and this keeps the fallback from becoming the one parser that
   // would still gunzip an unaccounted body if that ordering ever changed.
-  adapter.post(basePath, createIpThrottle(ipRateLimiter), express.json({ inflate: false }), handler);
+  // `limit` mirrors the same global cap for the same reason: without it a middleware reorder would
+  // silently leave this mount uncapped.
+  const bodyLimit = resolveBodyLimit(process.env.BODY_SIZE_LIMIT);
+  adapter.post(basePath, createIpThrottle(ipRateLimiter), express.json({ limit: bodyLimit, inflate: false }), handler);
 }

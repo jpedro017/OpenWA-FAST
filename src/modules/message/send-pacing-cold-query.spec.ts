@@ -221,14 +221,20 @@ describe('group reachouts against a real database', () => {
     await ds.destroy();
   });
 
+  // The group callers charge only after the engine call resolves; mirror that flow so the tally
+  // semantics below (accumulation, day reset, shared budget) are tested through the real seam.
+  const reachout = async (sessionId: string, ids: string[]): Promise<void> => {
+    service.chargeGroupReachouts(sessionId, await service.assertReachoutAllowed(sessionId, ids));
+  };
+
   it("allows a batch that fits inside the day's remaining allowance", async () => {
-    await expect(service.assertReachoutAllowed('s1', ['a@c.us', 'b@c.us', 'c@c.us'])).resolves.toBeUndefined();
+    await expect(reachout('s1', ['a@c.us', 'b@c.us', 'c@c.us'])).resolves.toBeUndefined();
   });
 
   // The cost is per stranger, not per call — otherwise one request adding two hundred numbers would
   // cost exactly as much as adding one, which is the abuse the rule exists to bound.
   it('charges the batch per new contact, not per call', async () => {
-    await expect(service.assertReachoutAllowed('s1', ['a@c.us', 'b@c.us', 'c@c.us', 'd@c.us'])).rejects.toMatchObject({
+    await expect(reachout('s1', ['a@c.us', 'b@c.us', 'c@c.us', 'd@c.us'])).rejects.toMatchObject({
       status: 429,
     });
   });
@@ -239,7 +245,7 @@ describe('group reachouts against a real database', () => {
 
     // Five participants, but only three are strangers — exactly the allowance.
     await expect(
-      service.assertReachoutAllowed('s1', ['known-1@c.us', 'known-2@c.us', 'a@c.us', 'b@c.us', 'c@c.us']),
+      reachout('s1', ['known-1@c.us', 'known-2@c.us', 'a@c.us', 'b@c.us', 'c@c.us']),
     ).resolves.toBeUndefined();
   });
 
@@ -247,9 +253,7 @@ describe('group reachouts against a real database', () => {
     await addMessage('628555@s.whatsapp.net', YESTERDAY);
 
     // Four participants, but the dialect twin is known — three strangers, exactly the allowance.
-    await expect(
-      service.assertReachoutAllowed('s1', ['628555@c.us', 'a@c.us', 'b@c.us', 'c@c.us']),
-    ).resolves.toBeUndefined();
+    await expect(reachout('s1', ['628555@c.us', 'a@c.us', 'b@c.us', 'c@c.us'])).resolves.toBeUndefined();
   });
 
   // The group endpoints accept a bare number and the engines qualify it themselves, so the probe
@@ -258,15 +262,11 @@ describe('group reachouts against a real database', () => {
     await addMessage('628555@c.us', YESTERDAY);
 
     // Four participants, but the bare-number form of a known contact is not a stranger — three are.
-    await expect(
-      service.assertReachoutAllowed('s1', ['628555', 'a@c.us', 'b@c.us', 'c@c.us']),
-    ).resolves.toBeUndefined();
+    await expect(reachout('s1', ['628555', 'a@c.us', 'b@c.us', 'c@c.us'])).resolves.toBeUndefined();
   });
 
   it('counts a repeated id once', async () => {
-    await expect(
-      service.assertReachoutAllowed('s1', ['a@c.us', 'a@c.us', 'a@c.us', 'b@c.us', 'b@c.us']),
-    ).resolves.toBeUndefined();
+    await expect(reachout('s1', ['a@c.us', 'a@c.us', 'a@c.us', 'b@c.us', 'b@c.us'])).resolves.toBeUndefined();
   });
 
   // The two paths share one budget, so a day spent on direct messages leaves nothing for group adds.
@@ -274,32 +274,32 @@ describe('group reachouts against a real database', () => {
     await addMessage('dm-1@c.us', TODAY);
     await addMessage('dm-2@c.us', TODAY);
 
-    await expect(service.assertReachoutAllowed('s1', ['a@c.us'])).resolves.toBeUndefined();
+    await expect(reachout('s1', ['a@c.us'])).resolves.toBeUndefined();
     await addMessage('dm-3@c.us', TODAY);
-    await expect(service.assertReachoutAllowed('s1', ['a@c.us'])).rejects.toMatchObject({ status: 429 });
+    await expect(reachout('s1', ['a@c.us'])).rejects.toMatchObject({ status: 429 });
   });
 
   // The regression this file exists to lock: group adds persist no message row, so the cap must be
   // charged in memory or every request gets the full allowance afresh (per-request, not per-day).
   it('accumulates across calls in the same day — the allowance is per-day, not per-request', async () => {
-    await expect(service.assertReachoutAllowed('s1', ['a@c.us', 'b@c.us', 'c@c.us'])).resolves.toBeUndefined();
+    await expect(reachout('s1', ['a@c.us', 'b@c.us', 'c@c.us'])).resolves.toBeUndefined();
     // The allowance (3) is now spent for the day, even though no message row was written.
-    await expect(service.assertReachoutAllowed('s1', ['d@c.us'])).rejects.toMatchObject({ status: 429 });
+    await expect(reachout('s1', ['d@c.us'])).rejects.toMatchObject({ status: 429 });
   });
 
   it('charges the chat cold cap too, so group adds leave fewer direct cold reachouts', async () => {
-    await service.assertReachoutAllowed('s1', ['a@c.us', 'b@c.us', 'c@c.us']);
+    await reachout('s1', ['a@c.us', 'b@c.us', 'c@c.us']);
     // Budget consumed by group adds; a fresh cold direct message must now be refused.
     await expect(service.assertSendAllowed('s1', 'stranger@c.us')).rejects.toMatchObject({ status: 429 });
   });
 
   it('resets the group tally on the UTC day boundary', async () => {
-    await service.assertReachoutAllowed('s1', ['a@c.us', 'b@c.us', 'c@c.us']);
-    await expect(service.assertReachoutAllowed('s1', ['d@c.us'])).rejects.toMatchObject({ status: 429 });
+    await reachout('s1', ['a@c.us', 'b@c.us', 'c@c.us']);
+    await expect(reachout('s1', ['d@c.us'])).rejects.toMatchObject({ status: 429 });
 
     // Roll into the next UTC day: the tally is keyed by day, so the allowance is fresh.
     jest.setSystemTime(new Date(NOW.getTime() + DAY_MS));
-    await expect(service.assertReachoutAllowed('s1', ['e@c.us', 'f@c.us', 'g@c.us'])).resolves.toBeUndefined();
+    await expect(reachout('s1', ['e@c.us', 'f@c.us', 'g@c.us'])).resolves.toBeUndefined();
   });
 
   it('is inert for an empty participant list', async () => {
@@ -307,6 +307,6 @@ describe('group reachouts against a real database', () => {
     await addMessage('dm-2@c.us', TODAY);
     await addMessage('dm-3@c.us', TODAY);
 
-    await expect(service.assertReachoutAllowed('s1', [])).resolves.toBeUndefined();
+    await expect(service.assertReachoutAllowed('s1', [])).resolves.toBe(0);
   });
 });

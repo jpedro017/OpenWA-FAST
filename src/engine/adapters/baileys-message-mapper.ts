@@ -76,14 +76,32 @@ export interface BaileysBodyContent {
     hydratedFourRowTemplate?: { hydratedContentText?: string | null } | null;
   } | null;
   interactiveResponseMessage?: { body?: { text?: string | null } | null } | null;
+  /** A poll's question; the wire bumps the content key across versions, all carry `name`. */
+  pollCreationMessage?: { name?: string | null } | null;
+  pollCreationMessageV2?: { name?: string | null } | null;
+  pollCreationMessageV3?: { name?: string | null } | null;
+  /** A shared WhatsApp event; only its display name is surfaced as text. */
+  eventMessage?: { name?: string | null } | null;
+  /** The user tapping a business message button: which visible label they pressed. */
+  buttonsResponseMessage?: { selectedDisplayText?: string | null } | null;
+  templateButtonReplyMessage?: { selectedDisplayText?: string | null } | null;
+  /** A single shared contact card. */
+  contactMessage?: { vcard?: string | null } | null;
+  /** Several contact cards shared together; each carries its own vCard. */
+  contactsArrayMessage?: { contacts?: Array<{ vcard?: string | null }> | null } | null;
 }
 
 /**
  * Extract the display text of an inbound Baileys message: plain text first, then a media caption,
  * then the WhatsApp Business interactive shapes (interactive / buttons / template / interactive-
  * response) whose text was previously dropped — the OTP/verification text businesses send via these
- * shapes (#562). Returns `''` when the message carries no extractable text. Pass the NORMALIZED
- * content (ephemeral/viewOnce/documentWithCaption wrappers already unwrapped), as the adapter does.
+ * shapes (#562), then the text-shaped non-conversation content whose display text whatsapp-web.js
+ * already exposes as `body` and Baileys used to drop silently: a poll's question, a shared event's
+ * name, which button label the user tapped, and a shared contact card's vCard(s). Multiple vCards
+ * from a `contactsArrayMessage` are newline-joined; RFC 6350 allows concatenated vCards in one
+ * stream, so this is a single valid multi-card body, not string mangling. Returns `''` when the
+ * message carries no extractable text. Pass the NORMALIZED content (ephemeral/viewOnce/
+ * documentWithCaption wrappers already unwrapped), as the adapter does.
  */
 export function extractBaileysBody(content: BaileysBodyContent): string {
   return (
@@ -97,8 +115,31 @@ export function extractBaileysBody(content: BaileysBodyContent): string {
     content.templateMessage?.hydratedTemplate?.hydratedContentText ??
     content.templateMessage?.hydratedFourRowTemplate?.hydratedContentText ??
     content.interactiveResponseMessage?.body?.text ??
+    content.pollCreationMessage?.name ??
+    content.pollCreationMessageV2?.name ??
+    content.pollCreationMessageV3?.name ??
+    content.eventMessage?.name ??
+    content.buttonsResponseMessage?.selectedDisplayText ??
+    content.templateButtonReplyMessage?.selectedDisplayText ??
+    content.contactMessage?.vcard ??
+    extractContactsArrayVcards(content.contactsArrayMessage) ??
     ''
   );
+}
+
+/**
+ * Joins the vCards of a `contactsArrayMessage` into one string, in the order they were shared.
+ * Returns `undefined` (not `''`) when there are no vCards to join, so it composes with `??` in
+ * {@link extractBaileysBody} the same way every other optional-field lookup there does.
+ */
+function extractContactsArrayVcards(
+  contactsArrayMessage: BaileysBodyContent['contactsArrayMessage'],
+): string | undefined {
+  const vcards = (contactsArrayMessage?.contacts ?? [])
+    .map(contact => contact.vcard)
+    .filter((vcard): vcard is string => !!vcard);
+
+  return vcards.length > 0 ? vcards.join('\n') : undefined;
 }
 
 /**
@@ -216,21 +257,11 @@ export function extractBaileysContext(content: BaileysContextContent): BaileysMe
   };
 
   if (contextInfo?.quotedMessage && contextInfo.stanzaId) {
-    const qm = contextInfo.quotedMessage as {
-      conversation?: string | null;
-      extendedTextMessage?: { text?: string | null } | null;
-      imageMessage?: { caption?: string | null } | null;
-      videoMessage?: { caption?: string | null } | null;
-      documentMessage?: { caption?: string | null } | null;
-    };
-    const qBody =
-      qm.conversation ??
-      qm.extendedTextMessage?.text ??
-      qm.imageMessage?.caption ??
-      qm.videoMessage?.caption ??
-      qm.documentMessage?.caption ??
-      '';
-    context.quotedMessage = { id: contextInfo.stanzaId, body: qBody };
+    // The quote's body comes from the SAME extractor as the live message, so a quoted contact card,
+    // poll or interactive shape carries its text instead of an empty string — matching wwjs, whose
+    // quote is a full Message and therefore shows the same body it would show unquoted.
+    const qm = contextInfo.quotedMessage as BaileysBodyContent;
+    context.quotedMessage = { id: contextInfo.stanzaId, body: extractBaileysBody(qm) };
   }
 
   return context;

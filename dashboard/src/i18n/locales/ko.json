@@ -142,7 +142,8 @@
       "orLabel": "또는",
       "post": "게시",
       "posted": "상태가 게시되었습니다",
-      "postFailed": "상태를 게시할 수 없습니다"
+      "postFailed": "상태를 게시할 수 없습니다",
+      "imageFile": "상태 이미지"
     },
     "channels": {
       "notSupported": "Baileys 엔진에서는 채널을 지원하지 않습니다.",
@@ -157,9 +158,17 @@
       "markRead": "채팅을 읽음으로 표시하지 못했습니다",
       "send": "메시지를 보내지 못했습니다",
       "react": "메시지에 반응하지 못했습니다",
-      "delete": "메시지를 삭제하지 못했습니다"
+      "delete": "메시지를 삭제하지 못했습니다",
+      "fileTooLarge": "파일이 너무 큽니다 (최대 18 MB)"
     },
-    "loadMessagesError": "메시지를 불러올 수 없습니다. 서버 로그를 확인하세요."
+    "loadMessagesError": "메시지를 불러올 수 없습니다. 서버 로그를 확인하세요.",
+    "messageStatus": {
+      "pending": "대기 중",
+      "sent": "전송됨",
+      "delivered": "전달됨",
+      "read": "읽음",
+      "failed": "실패"
+    }
   },
   "errorBoundary": {
     "title": "문제가 발생했습니다",
@@ -290,7 +299,9 @@
       "phone": "전화번호",
       "phoneNone": "연결되지 않음",
       "created": "생성일",
-      "lastActive": "마지막 활동"
+      "lastActive": "마지막 활동",
+      "autoRejectCalls": "통화 자동 거절",
+      "autoRejectCallsHint": "수신 통화가 울리는 즉시 거절됩니다. call.received 웹훅은 그전에 그대로 전송됩니다. 다음 통화부터 적용되며 재시작이 필요하지 않습니다."
     },
     "actions": {
       "view": "보기",
@@ -410,7 +421,10 @@
         "isNot": "다음과 같지 않음",
         "contains": "포함",
         "equals": "동일함"
-      }
+      },
+      "fieldLabel": "필터 필드",
+      "operatorLabel": "필터 연산자",
+      "valueLabel": "필터 값"
     },
     "columns": {
       "url": "URL",
@@ -491,7 +505,8 @@
       "deleted": "템플릿이 삭제되었습니다",
       "deleteFailed": "템플릿 삭제 실패: {{message}}",
       "copied": "템플릿 이름이 복사되었습니다"
-    }
+    },
+    "sessionSelect": "세션"
   },
   "apiKeys": {
     "title": "API 키",
@@ -563,7 +578,10 @@
     },
     "empty": {
       "title": "로그가 없습니다",
-      "description": "작업이 수행되면 감사 로그가 여기에 표시됩니다"
+      "description": "작업이 수행되면 감사 로그가 여기에 표시됩니다",
+      "filteredTitle": "이 페이지에 일치하는 항목이 없습니다",
+      "filteredDescription": "검색은 현재 페이지만 필터링합니다. 지우거나 페이지를 이동하거나 서버 측 심각도 필터를 사용하세요.",
+      "filteredServerDescription": "이 필터에 일치하는 로그가 없습니다. 검색 범위를 넓히려면 심각도 필터를 조정하세요."
     }
   },
   "messageTester": {
@@ -760,6 +778,8 @@
       "export": "데이터 내보내기",
       "import": "데이터 가져오기",
       "exportFailed": "데이터를 내보내지 못했습니다",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "데이터를 가져오지 못했습니다",
       "importOk": "데이터를 가져왔습니다",
       "importConfirm": "가져오기를 실행하면 현재 데이터가 백업본({{rows}}행)으로 완전히 대체됩니다. 되돌릴 수 없습니다. 계속할까요?",
@@ -822,6 +842,7 @@
     "installModal": {
       "title": "플러그인 설치",
       "hint": "manifest.json이 포함된 .zip으로 패키징된 플러그인을 업로드하세요. 활성화되면 샌드박스에서 실행됩니다.",
+      "trustWarning": "플러그인은 게이트웨이의 전체 프로세스 권한으로 실행됩니다. 샌드박스는 충돌만 격리할 뿐 악성 코드는 막지 못합니다. 신뢰할 수 있는 플러그인만 설치하세요.",
       "choose": ".zip 파일 선택…",
       "tooLarge": "파일이 5MB 제한을 초과합니다.",
       "catalogHint": "OpenWA 플러그인 카탈로그에서 직접 설치하세요. .zip 파일은 SSRF 가드를 통해 서버에서 가져온 후 검증되고 샌드박스에서 실행됩니다.",

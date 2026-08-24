@@ -90,10 +90,15 @@ export class Message {
 
   /**
    * Storage key of this message's archived media, or null when nothing was archived — which is the
-   * case for every row while `CHAT_MEDIA_ARCHIVE_ENABLED` is off (the default), for non-media
+   * case for every row written while `CHAT_MEDIA_ARCHIVE_ENABLED` is off (the default), for non-media
    * messages, and for media above the archive cap. Independent of the inline base64 copy in
    * `metadata.media`, which is unaffected by archiving.
    */
+  // Partial index for the chat-media orphan sweep's per-chunk `mediaPath IN (...)` lookup. NULL for
+  // every un-archived row (archiving is opt-in), so the WHERE clause keeps the index to rows that
+  // can ever match. The explicit name matches the migration that creates it on synchronize-disabled
+  // deployments, so both schema paths converge on one index.
+  @Index('IDX_messages_mediaPath', { where: 'mediaPath IS NOT NULL' })
   @Column({ nullable: true })
   mediaPath?: string;
 

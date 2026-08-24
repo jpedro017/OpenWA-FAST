@@ -1,5 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
 import { HookManager } from './hook-manager.service';
+import { createLogger } from '../../common/services/logger.service';
+
+const logger = createLogger('SendingGate');
 
 /**
  * Run the pre-send `message:sending` plugin gate for one piece of outbound content and return the
@@ -41,6 +44,43 @@ export async function applySendingGate<T extends object>(
   if (!shouldContinue) {
     throw new BadRequestException('Message sending blocked by plugin');
   }
+  // Defensive, and unreachable through HookManager: `runHandlers` returns `{ continue: true, data }`
+  // with the envelope it was given when no handler is registered, and only replaces it when a
+  // handler returns `data !== undefined` — so neither the no-plugin path nor a handler that returns
+  // nothing produces `undefined` here. It stays because "the manager returned no data" is not
+  // evidence a plugin wanted this send stopped, so the safe reading is the caller's own input; the
+  // fail-CLOSED rule below applies to a reply that IS present and cannot be read.
+  if (hookData === undefined) {
+    return input;
+  }
+  // Anything else must still be an envelope. Reading `.input` off it unchecked handed `undefined`
+  // (or threw, for a null) to every caller, so one plugin authoring mistake turned every outbound
+  // send on the session into an unhandled TypeError and a 500 that named no plugin.
+  //
+  // Fails CLOSED, deliberately: this is a moderation chokepoint, and a handler whose reply cannot be
+  // read may have been redacting something — proceeding with the original input would turn a plugin
+  // bug into a moderation bypass. Same status as a veto, because to the caller the outcome is the
+  // same (a plugin stopped this send); the message names the hook so the operator can find it.
+  const envelope = hookData as { input?: unknown } | null;
+  if (
+    typeof envelope !== 'object' ||
+    envelope === null ||
+    typeof envelope.input !== 'object' ||
+    envelope.input === null
+  ) {
+    // The 400 reaches the API caller, who cannot fix a plugin. This refusal stops EVERY send on the
+    // session, so the operator needs it in the server log — with the session and call site, since
+    // the chain's aggregated reply does not say which handler produced it.
+    logger.warn('A message:sending handler returned a payload without a usable `input`; refusing the send', {
+      sessionId,
+      source,
+      type,
+      received: hookData === null ? 'null' : typeof hookData,
+    });
+    throw new BadRequestException(
+      'A message:sending handler returned a payload without a usable `input`; the send was refused rather than sent unmoderated',
+    );
+  }
   // Use the potentially plugin-modified input.
-  return (hookData as { input: T }).input;
+  return envelope.input as T;
 }

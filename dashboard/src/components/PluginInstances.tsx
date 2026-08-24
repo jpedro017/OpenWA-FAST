@@ -235,38 +235,43 @@ export function PluginInstances({ pluginId }: { pluginId: string }) {
             </>
           }
         >
-          <label>{t('plugins.instances.form.instanceId')}</label>
+          <label htmlFor="pi-1">{t('plugins.instances.form.instanceId')}</label>
           <input
+            id="pi-1"
             type="text"
             value={form.instanceId}
             placeholder={t('plugins.instances.form.instanceIdPlaceholder')}
             onChange={e => setForm({ ...form, instanceId: e.target.value })}
           />
           <p className="pi-hint">{t('plugins.instances.form.instanceIdHint')}</p>
-          <label>{t('plugins.instances.form.sessionScope')}</label>
+          <label htmlFor="pi-2">{t('plugins.instances.form.sessionScope')}</label>
           <input
+            id="pi-2"
             type="text"
             value={form.sessionScope}
             placeholder={t('plugins.instances.form.sessionScopePlaceholder')}
             onChange={e => setForm({ ...form, sessionScope: e.target.value })}
           />
-          <label>{t('plugins.instances.form.verifyToken')}</label>
+          <label htmlFor="pi-3">{t('plugins.instances.form.verifyToken')}</label>
           <input
+            id="pi-3"
             type="text"
             value={form.verifyToken}
             placeholder={t('plugins.instances.form.verifyTokenPlaceholder')}
             onChange={e => setForm({ ...form, verifyToken: e.target.value })}
           />
-          <label>{t('plugins.instances.form.secret')}</label>
+          <label htmlFor="pi-4">{t('plugins.instances.form.secret')}</label>
           <input
+            id="pi-4"
             type="text"
             value={form.secret}
             placeholder={t('plugins.instances.form.secretPlaceholder')}
             onChange={e => setForm({ ...form, secret: e.target.value })}
           />
           <p className="pi-hint">{t('plugins.instances.form.secretHint')}</p>
-          <label>{t('plugins.instances.form.config')}</label>
+          <label htmlFor="pi-5">{t('plugins.instances.form.config')}</label>
           <textarea
+            id="pi-5"
             value={form.config}
             placeholder={t('plugins.instances.form.configPlaceholder')}
             onChange={e => setForm({ ...form, config: e.target.value })}
@@ -334,15 +339,17 @@ export function PluginInstances({ pluginId }: { pluginId: string }) {
             </>
           }
         >
-          <label>{t('plugins.instances.form.sessionScope')}</label>
+          <label htmlFor="pi-6">{t('plugins.instances.form.sessionScope')}</label>
           <input
+            id="pi-6"
             type="text"
             value={editForm.sessionScope}
             placeholder={t('plugins.instances.form.sessionScopePlaceholder')}
             onChange={e => setEditForm({ ...editForm, sessionScope: e.target.value })}
           />
-          <label>{t('plugins.instances.form.config')}</label>
+          <label htmlFor="pi-7">{t('plugins.instances.form.config')}</label>
           <textarea
+            id="pi-7"
             value={editForm.config}
             placeholder={t('plugins.instances.form.configPlaceholder')}
             onChange={e => setEditForm({ ...editForm, config: e.target.value })}

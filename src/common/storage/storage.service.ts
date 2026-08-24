@@ -311,7 +311,8 @@ export class StorageService implements OnModuleDestroy {
         if (s3Keys.has(file)) continue;
         count += 1;
         try {
-          sizeBytes += fs.statSync(path.join(this.localPath, file)).size;
+          // Same reason as the local branch below: this walk is uncapped too, so the stat must yield.
+          sizeBytes += (await fs.promises.stat(path.join(this.localPath, file))).size;
         } catch (error) {
           this.logger.debug(`Failed to stat file: ${file}`, { error: String(error) });
         }
@@ -319,12 +320,18 @@ export class StorageService implements OnModuleDestroy {
       return { count, sizeBytes };
     }
 
-    const files = await this.listFiles();
+    // The uncapped walk, for the same reason createExportStream uses it: this is the pre-check an
+    // operator runs BEFORE the export/import migration, so a count truncated at STORAGE_LIST_MAX_FILES
+    // would hide exactly the gap they are checking for.
+    const files = await this.listAllFiles();
     let sizeBytes = 0;
     for (const file of files) {
       try {
         const fullPath = path.join(this.localPath, file);
-        const stats = fs.statSync(fullPath);
+        // Awaited, not statSync: uncapping the walk above also uncapped this loop, and a synchronous
+        // stat per file holds the event loop for the whole store — health checks, webhooks and every
+        // in-flight request wait behind a count. Measured at one event-loop tick for 2000 files.
+        const stats = await fs.promises.stat(fullPath);
         sizeBytes += stats.size;
       } catch (error) {
         this.logger.debug(`Failed to stat file: ${file}`, { error: String(error) });
@@ -368,11 +375,24 @@ export class StorageService implements OnModuleDestroy {
   // ============================================================================
 
   createExportStream(): Promise<PassThrough> {
+    // Enumerated with iterateFiles(), NOT listFiles(). listFiles() stops at STORAGE_LIST_MAX_FILES
+    // and returns without logging or throwing — a per-call DoS guard, as its own doc says, and not a
+    // completeness contract. Spending it here made the documented local→S3 migration (export,
+    // repoint STORAGE_TYPE, import) leave media behind on the old backend silently, and the
+    // operator's own files/count pre-check was truncated by the same path, so the consistency check
+    // could not reveal the gap. An export exists to be complete; that is what the uncapped walk is for.
     return createExportStream(
-      () => this.listFiles(),
+      () => this.listAllFiles(),
       filePath => this.getFile(filePath),
       this.logger,
     );
+  }
+
+  /** Every key in the store, uncapped — the completeness counterpart to the capped listFiles(). */
+  private async listAllFiles(): Promise<string[]> {
+    const files: string[] = [];
+    for await (const file of this.iterateFiles()) files.push(file);
+    return files;
   }
 
   // Best-effort, NOT atomic: see the implementation in storage-transfer.ts for the full contract.

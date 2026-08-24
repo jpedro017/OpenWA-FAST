@@ -11,9 +11,9 @@ openwa/
 │   ├── config/                    # Runtime config, env validation, bootstrap security, Swagger
 │   ├── core/                      # Hook and plugin framework
 │   ├── database/                  # TypeORM data sources and migrations
-│   ├── engine/                    # WhatsApp engine abstraction, adapters, identity mapping
+│   ├── engine/                    # WhatsApp engine abstraction, adapters, identity mapping,
+│   │                              # and the built-in engine plugins (engine/builtin/)
 │   ├── modules/                   # API feature modules
-│   └── plugins/                   # Built-in engine and extension plugins
 ├── test/                          # E2E smoke tests and mocks
 ├── dashboard/                     # React/Vite dashboard
 ├── sdk/                           # Client SDKs: go, java, javascript, php, python
@@ -276,6 +276,32 @@ export class CreateExampleDto {
 }
 ```
 
+### Global modules — the fixed set
+
+`@Global()` makes a module's exported providers injectable everywhere without an import, which is
+convenient exactly until two modules both assume they own a name and the injector silently picks
+one. The sanctioned set is therefore frozen at these ten — every one of them a cross-cutting
+concern that nearly every module would otherwise have to import:
+
+| Module             | Path                                         | Why it is global                                      |
+| ------------------ | -------------------------------------------- | ----------------------------------------------------- |
+| `AuthModule`       | `src/modules/auth/auth.module.ts`            | API-key guard + role checks run on nearly every route |
+| `AuditModule`      | `src/modules/audit/audit.module.ts`          | Every mutation surface writes audit entries           |
+| `EventsModule`     | `src/modules/events/events.module.ts`        | The event bus fans out from every module              |
+| `EngineModule`     | `src/engine/engine.module.ts`                | `EngineRegistry`, the narrow port to the live engines |
+| `PluginsModule`    | `src/core/plugins/plugins.module.ts`         | Plugin services are consumed across modules           |
+| `HooksModule`      | `src/core/hooks/hooks.module.ts`             | `HookManager` is invoked from unrelated modules       |
+| `CacheModule`      | `src/common/cache/cache.module.ts`           | Shared cache service                                  |
+| `StorageModule`    | `src/common/storage/storage.module.ts`       | File/media storage used across modules                |
+| `LoggerModule`     | `src/common/services/logger.module.ts`       | The logger is needed literally everywhere             |
+| `AgentToolsModule` | `src/core/agent-tools/agent-tools.module.ts` | The tool registry is shared by MCP and the REST layer |
+
+Do not add an eleventh. A new global needs an ADR-level justification — written down and reviewed
+with the same weight as an architecture decision record — because the cost (implicit coupling,
+order-dependent provider resolution, tests that pass only because the whole app booted) is paid by
+every future module, not by the one that opts out of an explicit `imports` entry. The default for a
+new module is the standard template above: declare `exports` and let consumers `imports` you.
+
 ## 8.4 Git Workflow
 
 ### Branch Strategy
@@ -411,7 +437,7 @@ test/
 
 ```typescript
 // src/modules/session/reconnect-config.spec.ts
-import { resolveReconnectConfig } from './session.service';
+import { resolveReconnectConfig } from './session-engine-lifecycle.service';
 
 describe('resolveReconnectConfig', () => {
   it('keeps reconnect settings finite and bounded', () => {
@@ -698,7 +724,8 @@ SESSION_DATA_PATH=./data/sessions
 ENGINE_TYPE=whatsapp-web.js
 PUPPETEER_HEADLESS=true
 
-# Swagger is enabled by default. Set false to disable.
+# Swagger defaults ON outside production and OFF under NODE_ENV=production.
+# Set it explicitly to force either way.
 ENABLE_SWAGGER=true
 ```
 
@@ -890,6 +917,8 @@ npm run lint -- --fix
 # Debug database queries (TypeORM) — add to .env:
 # DATABASE_LOGGING=true
 # (there is no DEBUG=typeorm:query switch; both connections read DATABASE_LOGGING)
+# PII warning: this logs full queries WITH bound parameters — message bodies and phone
+# numbers end up in the application log. Use on a local/debug data set only, never in production.
 
 # View Docker logs (service is `openwa-api` in docker-compose.yml, `openwa` in
 # docker-compose.dev.yml — there is no service named `app`)

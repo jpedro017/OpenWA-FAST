@@ -1,13 +1,13 @@
 import { Module, INestApplication, Controller, Get } from '@nestjs/common';
 import { applyGlobalValidation } from '../src/config/app-validation';
+import { configureApp } from '../src/configure-app';
 import { NestFactory } from '@nestjs/core';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import request from 'supertest';
 import { App } from 'supertest/types';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'fs';
 import { tmpdir } from 'os';
-import { join, sep, extname } from 'path';
-import type { Request, Response, NextFunction } from 'express';
+import { join, sep } from 'path';
 
 /**
  * Two throwaway dashboard builds, evaluated before the module decorators (forRoot reads rootPath
@@ -61,34 +61,6 @@ class PlainServeStaticModule {}
 })
 class DottedServeStaticModule {}
 
-/**
- * Mirrors the SPA document handler main.ts installs (the CSP-nonce one), minus the nonce
- * injection. It is load-bearing, not decoration: it reads the index with `readFileSync` and
- * `res.send`s it, which is what makes client-side routes work at all on a dot-segment install
- * path. Reproducing serve-static WITHOUT it - as this spec used to - tests a stack that does
- * not exist in production and reports a failure the product does not have.
- */
-function applyDashboardDocumentHandler(app: INestApplication<App>, distDir: string): void {
-  const dashboardIndex = readFileSync(join(distDir, 'index.html'), 'utf8');
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    const excluded =
-      req.path.startsWith('/api/') ||
-      req.path === '/api' ||
-      req.path.startsWith('/socket.io/') ||
-      req.path === '/socket.io' ||
-      req.path.startsWith('/mcp/') ||
-      req.path === '/mcp' ||
-      req.path.startsWith('/assets/');
-    const documentRequest =
-      req.method === 'GET' &&
-      !excluded &&
-      ((req.headers.accept ?? '').includes('text/html') || extname(req.path) === '');
-    if (!documentRequest) return next();
-    res.setHeader('Cache-Control', 'no-store');
-    res.type('html').send(dashboardIndex);
-  });
-}
-
 describe('serve-static test fixtures', () => {
   it('really does cover BOTH install-path shapes', () => {
     // Without this, a dotted os.tmpdir() collapses the matrix onto one shape and the
@@ -113,8 +85,11 @@ describe.each([
   let app: INestApplication<App>;
 
   beforeAll(async () => {
-    app = await NestFactory.create(moduleClass, { logger: false });
-    applyDashboardDocumentHandler(app, distDir);
+    // The REAL production stack, pointed at this fixture build. It used to be a copy of the
+    // document handler kept in this file, minus the nonce injection, so a divergence between the
+    // copy and the original passed.
+    app = await NestFactory.create(moduleClass, { bodyParser: false, logger: false });
+    configureApp(app, { dashboard: { distDir, enabled: true } });
     applyGlobalValidation(app);
     await app.init();
   });
@@ -140,6 +115,15 @@ describe.each([
     const res = await request(app.getHttpServer()).get('/sessions/abc/messages');
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/html/);
+  });
+
+  it('never answers an /assets path with the SPA shell, even extensionless', async () => {
+    // The handler excludes /assets/ explicitly. Every other case is already covered by the
+    // extension check, so deleting the exclusion breaks nothing visible: an extensionless asset
+    // path asking for HTML is the one request that tells the two apart, and without it the guard
+    // is unprotected.
+    const res = await request(app.getHttpServer()).get('/assets/app').set('Accept', 'text/html');
+    expect(res.status).toBe(404);
   });
 
   it('serves built assets with their own content-type (not the SPA shell)', async () => {

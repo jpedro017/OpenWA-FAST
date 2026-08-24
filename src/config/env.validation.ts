@@ -70,6 +70,25 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   };
   checkEnum('ENGINE_TYPE', ['whatsapp-web.js', 'baileys']);
   checkEnum('STORAGE_TYPE', ['local', 's3']);
+  // Every production hardening in the repo gates on the exact string 'production', so an
+  // unrecognised value silently selects the permissive branch of each one — CORS, Swagger, DTO
+  // error detail, the default-secret guard and the ALLOW_DEV_API_KEY rejection that stops the public
+  // `dev-admin-key` being seeded as ADMIN.
+  //
+  // Unset stays legal because it is the standard Node default for a plain `node dist/main` outside
+  // any packaged runtime — refusing it would break local runs. The packaged runtimes all set it (the
+  // runtime image carries `ENV NODE_ENV=production`, the chart sets it, and both compose files set it
+  // via `${NODE_ENV:-production}` and a hardcoded `development`); only a hand-rolled deployment that
+  // strips it still takes the permissive branch of every hardening listed above.
+  //
+  // Checked RAW rather than through `str()`: the readers compare `process.env.NODE_ENV` verbatim, so
+  // a padded ' production ' that only matches after trimming would validate clean here and still take
+  // the permissive branch at runtime — blessing the very downgrade this check exists to stop.
+  const nodeEnvAllowed = ['production', 'development', 'test'];
+  const rawNodeEnv = config.NODE_ENV;
+  if (typeof rawNodeEnv === 'string' && rawNodeEnv !== '' && !nodeEnvAllowed.includes(rawNodeEnv)) {
+    errors.push(`NODE_ENV must be one of ${nodeEnvAllowed.map(v => `"${v}"`).join(', ')} (got "${rawNodeEnv}")`);
+  }
 
   if (dbType === 'postgres') {
     for (const key of ['DATABASE_HOST', 'DATABASE_USERNAME', 'DATABASE_PASSWORD']) {
@@ -172,8 +191,55 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'WEBHOOK_MAX_PER_SESSION', // 0 = unlimited
     'AUTOMATION_MAX_PER_SESSION', // 0 = unlimited
     'WEBHOOK_MEDIA_INLINE_MAX_BYTES', // 0 = never inline media
+    'EXPORT_INLINE_MEDIA_BUDGET_BYTES', // 0 = a data export carries no inline media at all
+    'MESSAGE_LIST_INLINE_MEDIA_BUDGET_BYTES', // 0 = a message list carries no inline media at all
   ]) {
     checkNonNegativeInt(key);
+  }
+
+  // Retention knobs whose read site documents `<= 0` as the switch that disables pruning, so a
+  // negative value is a supported spelling of "off" rather than a typo — `audit.service.ts` clamps
+  // with Math.max(0, parsed) and `docs/05-database-design.md` advertises `≤ 0 disables`. The point of
+  // validating them is to reject `30d` / `ninety`, which parse to NaN and silently become the
+  // default; rejecting `-1` would instead refuse to boot a configuration this repo documents.
+  const SIGNED_DECIMAL_INTEGER = /^-?\d+$/;
+  const checkInt = (key: string): void => {
+    const raw = str(key);
+    if (raw === undefined) return;
+    const n = SIGNED_DECIMAL_INTEGER.test(raw) ? Number(raw) : NaN;
+    if (!Number.isInteger(n)) {
+      errors.push(`${key} must be an integer (got "${raw}")`);
+    }
+  };
+  // Keep this an ARRAY LITERAL even at one entry: docs-env-example.spec.ts derives the keys it
+  // requires `.env.example` to list by scanning `'KEY',` array elements in this file. Collapsing it
+  // into a bare checkInt('AUDIT_RETENTION_DAYS') call would silently drop the knob out of that gate.
+  for (const key of [
+    'AUDIT_RETENTION_DAYS', // <= 0 disables retention
+  ]) {
+    checkInt(key);
+  }
+
+  // BAILEYS_WA_VERSION: optional version pin for the Baileys engine (e.g. 2.3000.1045340097 or 2,3000,1045340097)
+  for (const key of ['BAILEYS_WA_VERSION']) {
+    const raw = str(key);
+    if (raw !== undefined) {
+      const match = raw.match(/^(\d+)[.,](\d+)[.,](\d+)$/);
+      if (!match) {
+        errors.push(
+          `${key} must be a valid WhatsApp Web version (e.g. "2.3000.1045340097"; got ${JSON.stringify(raw)})`,
+        );
+      } else {
+        const major = parseInt(match[1], 10);
+        const minor = parseInt(match[2], 10);
+        const patch = parseInt(match[3], 10);
+        if (major !== 2 || minor < 2000 || patch < 0) {
+          errors.push(
+            `${key} must be a valid WhatsApp Web version (e.g. "2.3000.1045340097"; got ${JSON.stringify(raw)})`,
+          );
+        }
+      }
+    }
   }
 
   // Some knobs are nonsensical at 0 and contradict the "non-negative" intent: a rate-limit LIMIT of 0
@@ -199,6 +265,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'WS_MAX_SOCKETS_PER_KEY',
     'WEBHOOK_TIMEOUT',
     'INGRESS_INSTANCE_LIMIT',
+    'INGRESS_IP_LIMIT',
     'REQUEST_TIMEOUT_MS',
     'HEADERS_TIMEOUT_MS',
     'KEEPALIVE_TIMEOUT_MS',
@@ -299,8 +366,73 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // conversion/archive endpoints answer as if nothing was configured. Same class as the above.
     'MEDIA_CONVERSION_ENABLED',
     'CHAT_MEDIA_ARCHIVE_ENABLED',
+    'CHAT_MEDIA_ARCHIVE_OUTBOUND',
+    // Read with `=== 'true'` in BOTH configuration.ts and data-source.ts, and this is the one whose
+    // typo fails OPEN: `DATABASE_SSL=require` is the natural Postgres spelling and reads as OFF, so
+    // credentials and message bodies cross the wire in plaintext to a server the operator believed
+    // was TLS-protected. Nothing logs it.
+    'DATABASE_SSL',
+    // `!== 'false'`, so a typo keeps the SECURE value — but it is still not the flag the operator set,
+    // and it is only meaningful alongside DATABASE_SSL above.
+    'DATABASE_SSL_REJECT_UNAUTHORIZED',
+    // `!== 'false'`, so a typo keeps synchronize ON — and app.module.ts derives `migrationsRun` from
+    // its negation, so the main connection's migration ledger silently never advances for an operator
+    // who deliberately opted into migration-managed api_keys/audit_logs.
+    'MAIN_DATABASE_SYNCHRONIZE',
+    // Read with `=== 'true'` by the plugin ingress gate: a typo turns an intentional
+    // `ALLOW_UNSIGNED_INGRESS=true` back off, and a route the operator meant to open stops loading.
+    'ALLOW_UNSIGNED_INGRESS',
+    // `=== 'true'`; already refused outright in production, but a typo in development silently
+    // withholds the dev key the operator asked for.
+    'ALLOW_DEV_API_KEY',
+    // `!== 'false'`: a typo keeps SSRF protection on (safe) or contact enrichment off — either way
+    // the webhook payload an integrator receives is not the one the operator configured.
+    'WEBHOOK_SSRF_PROTECT',
+    'WEBHOOK_CONTACT_DETAILS',
+    // Engine behaviour flags: a typo leaves full-history sync off, or leaves the account marked
+    // online on connect (#871 — it suppresses notifications on the operator's own phone).
+    'BAILEYS_SYNC_FULL_HISTORY',
+    'BAILEYS_MARK_ONLINE_ON_CONNECT',
+    // Read with `=== 'true'` by DockerService. A typo does not fail silently here — it voids the
+    // built-in-datastore credential exemption and the production boot refuses with a confusing
+    // complaint about DATABASE_PASSWORD instead of naming the real cause.
+    'POSTGRES_BUILTIN',
+    'REDIS_BUILTIN',
+    'MINIO_BUILTIN',
+    // Perf/observability only, but same silent-typo class.
+    'CACHE_ENABLED',
+    'DATABASE_LOGGING',
+    // DELIBERATELY NOT LISTED. `MCP_READONLY` is read `!== 'false'` and mcp.server.spec.ts asserts
+    // that `yes` keeps it read-only — a tolerance the repo tests on purpose. `PUPPETEER_HEADLESS` is
+    // read `!== 'false'` and `new` is a real Puppeteer value that works today. Both fail toward the
+    // safe state, so strictness here would refuse working deployments to no benefit.
   ]) {
     checkBool(key);
+  }
+
+  // MEDIA_DOWNLOAD_ENABLED is the one boolean whose read site NORMALISES before comparing
+  // (`inbound-media-cap.ts` trims and lowercases, then treats 'false'/'0'/'no' as off), so the strict
+  // check above would reject spellings that demonstrably work — inbound-media-cap.spec.ts asserts
+  // 'FALSE' and ' false ' disable. What normalising cannot save it from is a MISSPELLING: every
+  // unrecognised value means ENABLED, so `fasle` leaves inbound media being decrypted and
+  // base64-inlined into every message row, up to MEDIA_DOWNLOAD_MAX_BYTES apiece — the most
+  // expensive behaviour the gateway has, chosen by an operator who asked for the opposite. So accept
+  // exactly the vocabulary the read site understands, and fail the boot on anything else.
+  const LENIENT_BOOL_VALUES = new Set(['true', '1', 'yes', 'false', '0', 'no']);
+  const lenientBoolKey = 'MEDIA_DOWNLOAD_ENABLED';
+  const lenientRaw = config[lenientBoolKey];
+  if (lenientRaw !== undefined) {
+    if (typeof lenientRaw !== 'string') {
+      errors.push(`${lenientBoolKey} must be one of true/false/1/0/yes/no`);
+    } else {
+      const normalized = lenientRaw.trim().toLowerCase();
+      if (normalized !== '' && !LENIENT_BOOL_VALUES.has(normalized)) {
+        errors.push(
+          `${lenientBoolKey} must be one of true/false/1/0/yes/no (got ${JSON.stringify(lenientRaw)}) — ` +
+            'an unrecognised value silently means ENABLED',
+        );
+      }
+    }
   }
 
   // SEARCH_PROVIDER enum: 'auto' selects the built-in DB full-text provider at runtime, 'builtin-fts'

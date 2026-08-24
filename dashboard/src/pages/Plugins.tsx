@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { localizePlugin } from '../utils/localizePlugin';
 import { configUiSafeConfig, missingRequiredConfig, sparseSessionOverride } from '../utils/pluginConfigRules';
@@ -24,6 +24,7 @@ import {
   Download,
   Plus,
   Search,
+  ArrowUpCircle,
 } from 'lucide-react';
 import { pluginsApi } from '../services/api';
 import type { Plugin, CatalogPlugin, PluginConfigField } from '../services/api';
@@ -64,23 +65,37 @@ function ConfigField({
   onChange: (next: unknown) => void;
 }) {
   const { t } = useTranslation();
+  // Per-instance id: ConfigField renders once per schema property (and recurses), so a hardcoded
+  // id would collide on any schema with two boolean fields - the second label would toggle the
+  // first checkbox. useId is stable across re-renders and unique per instance.
+  const fieldId = React.useId();
   const desc = field.description ? <small>{field.description}</small> : null;
+  // Bound to the control it names. The boolean branch below builds its own pair because its caption
+  // and its checkbox sit in different containers.
   const labelEl = (
-    <label>
+    <label htmlFor={fieldId}>
       {label}
       {field.required && <span className="required-mark"> *</span>}
     </label>
+  );
+  // An array renders one control PER ROW, so there is no single input for a label to point at; a
+  // `<label>` here would be an orphan that names nothing. It is a caption, so it is marked up as one.
+  const captionEl = (
+    <span className="config-array-label">
+      {label}
+      {field.required && <span className="required-mark"> *</span>}
+    </span>
   );
 
   if (field.type === 'boolean') {
     return (
       <div className="form-group toggle-group">
         <div className="toggle-info">
-          <label>{label}</label>
+          <label htmlFor={fieldId}>{label}</label>
           {desc}
         </div>
         <label className="toggle-switch">
-          <input type="checkbox" checked={Boolean(value)} onChange={e => onChange(e.target.checked)} />
+          <input id={fieldId} type="checkbox" checked={Boolean(value)} onChange={e => onChange(e.target.checked)} />
           <span className="toggle-slider"></span>
         </label>
       </div>
@@ -93,6 +108,7 @@ function ConfigField({
       <div className="form-group">
         {labelEl}
         <select
+          id={fieldId}
           value={String(value ?? '')}
           // Restore the option's original type (e.g. a number/boolean enum), not the raw string value.
           onChange={e => onChange(options.find(o => String(o) === e.target.value) ?? e.target.value)}
@@ -136,14 +152,14 @@ function ConfigField({
       // that would stringify the array to "[object Object]"/"" and corrupt it).
       return (
         <div className="config-array">
-          {labelEl}
+          {captionEl}
           {desc}
         </div>
       );
     }
     return (
       <div className="config-array">
-        {labelEl}
+        {captionEl}
         {desc}
         {rows.map((row, i) => (
           <div className="config-array-row" key={i}>
@@ -178,6 +194,7 @@ function ConfigField({
       <div className="form-group">
         {labelEl}
         <textarea
+          id={fieldId}
           value={value === undefined || value === null ? '' : String(value)}
           placeholder={field.default !== undefined ? String(field.default) : undefined}
           required={field.required}
@@ -196,6 +213,7 @@ function ConfigField({
     <div className="form-group">
       {labelEl}
       <input
+        id={fieldId}
         type={inputType}
         value={value === undefined || value === null ? '' : String(value)}
         placeholder={field.default !== undefined ? String(field.default) : undefined}
@@ -487,7 +505,14 @@ function SessionsTab({ plugin }: { plugin: Plugin }) {
         <section className="sessions-section">
           <h3>{t('plugins.sessions.perSessionTitle')}</h3>
           <small>{t('plugins.sessions.perSessionDesc')}</small>
-          <select className="sessions-select" value={selSession} onChange={e => setSelSession(e.target.value)}>
+          {/* The heading above is a sibling, not a label, so the select had no accessible name of its
+              own: a screen reader announced an unnamed combobox. */}
+          <select
+            className="sessions-select"
+            aria-label={t('plugins.sessions.selectSession')}
+            value={selSession}
+            onChange={e => setSelSession(e.target.value)}
+          >
             <option value="">{t('plugins.sessions.selectSession')}</option>
             {sessions.map(s => (
               <option key={s.id} value={s.id}>
@@ -675,13 +700,17 @@ export default function Plugins() {
     }
   };
 
-  const loadCatalog = async () => {
+  const loadCatalog = async (silent = false) => {
     setCatalogLoading(true);
     setCatalogError(null);
     try {
       setCatalog(await pluginsApi.catalog());
     } catch (err) {
-      setCatalogError(err instanceof Error ? err.message : String(err));
+      // Silent mode is the page-mount prefetch that powers the update chips: a catalog that
+      // cannot be reached just means no chips, so the failure is not surfaced here — the
+      // drawer's own lazy-load effect (which skips while an error is set) retries loudly
+      // when the user actually opens the Catalog tab.
+      if (!silent) setCatalogError(err instanceof Error ? err.message : String(err));
     } finally {
       setCatalogLoading(false);
     }
@@ -694,6 +723,19 @@ export default function Plugins() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showInstallModal, installMode]);
+
+  // Prefetch once on mount so installed-plugin cards can flag newer catalog versions without the
+  // user having to open the Install drawer first. Silent: an unreachable catalog hides the chips.
+  useEffect(() => {
+    void loadCatalog(true);
+  }, []);
+
+  // Catalog entries with a strictly newer version than the installed one, keyed by plugin id —
+  // drives both the per-card update chip and the counter on the Install button.
+  const updatesById = useMemo(
+    () => new Map(catalog.filter(entry => entry.updateAvailable).map(entry => [entry.id, entry])),
+    [catalog],
+  );
 
   const handleInstallFromCatalog = async (entry: CatalogPlugin) => {
     if (!entry.download) {
@@ -782,6 +824,11 @@ export default function Plugins() {
             <button className="btn-primary" onClick={() => setShowInstallModal(true)}>
               <Upload size={16} />
               {t('plugins.install', 'Install plugin')}
+              {updatesById.size > 0 && (
+                <span className="install-update-count" title={t('plugins.catalog.updateAvailable', 'Update available')}>
+                  {updatesById.size}
+                </span>
+              )}
             </button>
           </>
         }
@@ -842,6 +889,23 @@ export default function Plugins() {
                       <div>
                         <h3 className="plugin-name">{lz.name}</h3>
                         <span className="plugin-version">v{plugin.version}</span>
+                        {updatesById.has(plugin.id) && (
+                          <button
+                            type="button"
+                            className="plugin-update-chip"
+                            title={`${t('plugins.catalog.updateAvailable', 'Update available')} (v${plugin.version} → v${updatesById.get(plugin.id)!.version})`}
+                            aria-label={t('plugins.catalog.updateAvailable', 'Update available')}
+                            onClick={() => {
+                              // Land the user directly on this plugin's catalog entry, where the
+                              // existing Update button (and its confirmation flow) lives.
+                              setInstallMode('catalog');
+                              setCatalogSearch(plugin.id);
+                              setShowInstallModal(true);
+                            }}
+                          >
+                            <ArrowUpCircle size={12} />v{updatesById.get(plugin.id)!.version}
+                          </button>
+                        )}
                       </div>
                     </div>
                     {plugin.builtIn && <span className="plugin-builtin-badge">{t('plugins.builtIn')}</span>}
@@ -984,6 +1048,15 @@ export default function Plugins() {
             )
           }
         >
+          {/* Trusted-code warning sits ABOVE the tab conditional: upload and catalog land the
+              same payload in the same process, so it must show on both. */}
+          <p className="install-hint install-hint-warning">
+            <AlertCircle size={15} />
+            {t(
+              'plugins.installModal.trustWarning',
+              "Plugins run with the gateway's full process privileges — the sandbox contains crashes, not malicious code. Install only plugins you trust.",
+            )}
+          </p>
           {installMode === 'upload' ? (
             <>
               <p className="install-hint">

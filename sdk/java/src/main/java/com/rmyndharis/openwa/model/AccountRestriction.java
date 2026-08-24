@@ -11,4 +11,4 @@ package com.rmyndharis.openwa.model;
  * @param code the engine's own token for the cause, verbatim ({@code TOS_BLOCK}, {@code BIZ_QUALITY}, …)
  * @param expiresAt ISO timestamp for the end of enforcement, when WhatsApp states one
  */
-public record AccountRestriction(String kind, String code, String expiresAt) {}
+public record AccountRestriction(AccountRestrictionKind kind, String code, String expiresAt) {}

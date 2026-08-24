@@ -166,6 +166,14 @@ export const PluginCapabilityPermission = {
   ENGINE_READ: 'engine:read',
   /** `ctx.net.fetch` — SSRF-guarded outbound HTTP, scoped to the manifest `net.allow` host list. */
   NET_FETCH: 'net:fetch',
+  /**
+   * `ctx.storage.*` — per-plugin key/value persistence on the host disk (get / set / delete / list).
+   * The per-plugin directory, the key-shape check and the byte quota already bound what a plugin can
+   * reach, so this is a DECLARATION boundary rather than a containment one: without it a manifest
+   * declaring no permissions at all still wrote to disk, and the operator reading that manifest had
+   * no way to see it.
+   */
+  STORAGE_USE: 'storage:use',
   /** `ctx.registerWebhook` — claim an inbound ingress route. Loader-enforced; cannot be widened by config. */
   WEBHOOK_INGRESS: 'webhook:ingress',
   /** `ctx.conversations.send` — normalized outbound send translated to MessageService. */
@@ -317,7 +325,10 @@ export function validateIngressManifest(manifest: PluginManifest, allowUnsignedI
   }
   const perms = manifest.permissions ?? [];
   if (!perms.includes(PluginCapabilityPermission.WEBHOOK_INGRESS)) {
-    throw new Error(`Plugin ${manifest.id}: declares ingress routes but is missing the 'webhook:ingress' permission`);
+    throw new Error(
+      `Plugin ${manifest.id}: declares ingress routes but is missing the 'webhook:ingress' permission. ` +
+        `Add "webhook:ingress" to the "permissions" array in the plugin's manifest.json.`,
+    );
   }
   const seen = new Set<string>();
   for (const r of manifest.ingress) {
@@ -615,6 +626,12 @@ export interface PluginInstance {
   // First-party built-ins (engines, bundled extensions) run in-process; plugins loaded from the
   // plugins directory are untrusted and run sandboxed in a worker. `false` => sandboxed.
   builtIn?: boolean;
+  // Absolute path of the directory this plugin's package was loaded from. Usually
+  // <plugins.dir>/<id>, but the loader also scans the legacy plugins directory, and every later
+  // operation on the package — enable, uninstall, update, config UI — has to act on the tree the
+  // code actually came from rather than assume the configured one. Absent for built-ins, which are
+  // registered programmatically and have no on-disk package.
+  packageDir?: string;
 }
 
 // ============================================================================

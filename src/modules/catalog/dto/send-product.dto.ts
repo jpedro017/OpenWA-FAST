@@ -17,20 +17,6 @@ export class SendProductDto {
   body?: string;
 }
 
-export class SendCatalogDto {
-  @ApiProperty({ description: 'Chat to send the catalog to (@c.us or @g.us).', example: '628123456789@c.us' })
-  @IsString()
-  chatId!: string;
-
-  @ApiPropertyOptional({
-    description: 'Optional body text accompanying the catalog.',
-    example: 'Browse our full catalog',
-  })
-  @IsOptional()
-  @IsString()
-  body?: string;
-}
-
 export class ProductQueryDto {
   @ApiPropertyOptional({ description: 'Result page (1-based).', example: 1, minimum: 1 })
   @IsOptional()

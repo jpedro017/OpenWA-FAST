@@ -126,9 +126,10 @@ E2E smoke tests live in `test/` and use `test/jest-e2e.json`.
 
 > **They run one at a time (`maxWorkers: 1`), and that is a correctness requirement, not a
 > performance preference.** Each suite boots a real application, and not every piece of application
-> state is redirected to a per-worker location. `dataDir` is a hard-coded `./data` with no
-> environment lever, so every worker's plugin loader read-modify-writes the same
-> `data/plugins/registry.json`. Measured on a single parallel run: 52 writes from 12 processes, 30
+> state is redirected to a per-worker location. The plugin registry once had no environment
+> lever, so every worker's plugin loader read-modify-wrote the same
+> `data/plugins/registry.json`. `PLUGIN_STATE_DIR` now redirects it and each suite takes its own state
+> roots, so that particular collision is closed. Measured on a single parallel run: 52 writes from 12 processes, 30
 > of them within 500ms of a write by a different process. Individual writes are atomic; the
 > read-modify-write cycle is not.
 >
@@ -137,7 +138,15 @@ E2E smoke tests live in `test/` and use `test/jest-e2e.json`.
 > reproduced when a suite ran on its own, which is what made it look like flakiness. Serially it
 > does not occur.
 >
-> Adding a suite is safe. Restoring parallelism is not, until each worker gets its own data root.
+> Adding a suite is safe. Restoring parallelism has not been retried since those roots landed, so it
+> is untested rather than known-safe.
+>
+> A second requirement has nothing to do with parallelism: each suite's server is put on a **loopback**
+> port while it initialises (`test/setup-e2e.ts`). Left alone, supertest starts a listener per request
+> on the wildcard address and then dials 127.0.0.1, and macOS both permits that bind over a port
+> another process holds on 127.0.0.1 specifically and routes the connection to the more specific
+> holder. An assertion then reads a status from an unrelated program on the host, which is why the lane
+> could fail on a status no route can return. `setup-e2e-env.e2e-spec.ts` holds that contract.
 
 ```text
 test/
@@ -177,45 +186,51 @@ authoritative gate. Current policy:
 
 | Scope                       | Branches | Functions | Lines | Statements |
 | --------------------------- | -------- | --------- | ----- | ---------- |
-| Global                      | 58%      | 63%       | 66%   | 65%        |
+| Global                      | 61%      | 70%       | 68%   | 67%        |
 | `src/common/cache/`         | 34%      | 33%       | 42%   | 42%        |
 | `src/common/security/`      | 85%      | 95%       | 93%   | 92%        |
-| `src/common/services/`      | 74%      | 91%       | 87%   | 84%        |
-| `src/common/storage/`       | 75%      | 80%       | 80%   | 77%        |
-| `src/common/utils/`         | 86%      | 92%       | 92%   | 91%        |
-| `src/config/`               | 88%      | 92%       | 91%   | 91%        |
-| `src/core/agent-tools/`     | 88%      | 87%       | 83%   | 83%        |
-| `src/core/hooks/`           | 81%      | 73%       | 85%   | 84%        |
-| `src/core/plugins/`         | 72%      | 74%       | 81%   | 80%        |
+| `src/common/services/`      | 82%      | 91%       | 90%   | 88%        |
+| `src/common/storage/`       | 75%      | 85%       | 84%   | 80%        |
+| `src/common/utils/`         | 87%      | 92%       | 92%   | 92%        |
+| `src/config/`               | 85%      | 92%       | 91%   | 91%        |
+| `src/core/agent-tools/`     | 83%      | 86%       | 83%   | 83%        |
+| `src/core/hooks/`           | 84%      | 71%       | 86%   | 85%        |
+| `src/core/plugins/`         | 73%      | 76%       | 82%   | 81%        |
 | `src/database/`             | 69%      | 69%       | 72%   | 72%        |
-| `src/engine/adapters/`      | 74%      | 84%       | 83%   | 83%        |
-| `src/engine/identity/`      | 85%      | 95%       | 94%   | 93%        |
-| `src/modules/audit/`        | 59%      | 45%       | 72%   | 68%        |
-| `src/modules/auth/`         | 75%      | 85%       | 86%   | 85%        |
-| `src/modules/automation/`   | 67%      | 57%       | 83%   | 79%        |
-| `src/modules/chat-media/`   | 78%      | 81%       | 92%   | 90%        |
-| `src/modules/contact/`      | 79%      | 90%       | 89%   | 88%        |
-| `src/modules/docker/`       | 88%      | 99%       | 96%   | 96%        |
-| `src/modules/events/`       | 70%      | 84%       | 81%   | 80%        |
-| `src/modules/group/`        | 64%      | 47%       | 67%   | 67%        |
-| `src/modules/infra/`        | 73%      | 71%       | 87%   | 86%        |
+| `src/engine/adapters/`      | 78%      | 85%       | 86%   | 86%        |
+| `src/engine/identity/`      | 85%      | 86%       | 94%   | 93%        |
+| `src/modules/audit/`        | 59%      | 45%       | 73%   | 70%        |
+| `src/modules/auth/`         | 76%      | 85%       | 86%   | 86%        |
+| `src/modules/automation/`   | 67%      | 86%       | 83%   | 79%        |
+| `src/modules/chat-media/`   | 75%      | 72%       | 84%   | 84%        |
+| `src/modules/contact/`      | 82%      | 92%       | 89%   | 88%        |
+| `src/modules/docker/`       | 84%      | 93%       | 92%   | 92%        |
+| `src/modules/events/`       | 72%      | 84%       | 84%   | 82%        |
+| `src/modules/group/`        | 67%      | 65%       | 79%   | 79%        |
+| `src/modules/infra/`        | 75%      | 76%       | 89%   | 88%        |
 | `src/modules/integration/`  | 76%      | 83%       | 90%   | 89%        |
-| `src/modules/mcp/`          | 62%      | 81%       | 78%   | 78%        |
-| `src/modules/media/`        | 71%      | 87%       | 89%   | 88%        |
-| `src/modules/message/`      | 57%      | 66%       | 81%   | 80%        |
-| `src/modules/metrics/`      | 61%      | 65%       | 68%   | 65%        |
-| `src/modules/plugins/`      | 67%      | 63%       | 74%   | 73%        |
-| `src/modules/queue/`        | 74%      | 88%       | 95%   | 95%        |
-| `src/modules/search/`       | 66%      | 87%       | 71%   | 71%        |
+| `src/modules/mcp/`          | 62%      | 76%       | 78%   | 78%        |
+| `src/modules/media/`        | 69%      | 86%       | 89%   | 88%        |
+| `src/modules/message/`      | 75%      | 66%       | 86%   | 85%        |
+| `src/modules/metrics/`      | 64%      | 58%       | 70%   | 67%        |
+| `src/modules/plugins/`      | 69%      | 64%       | 77%   | 76%        |
+| `src/modules/queue/`        | 74%      | 81%       | 95%   | 95%        |
+| `src/modules/search/`       | 69%      | 86%       | 78%   | 78%        |
 | `src/modules/session/`      | 75%      | 79%       | 88%   | 87%        |
-| `src/modules/stats/`        | 67%      | 63%       | 71%   | 69%        |
-| `src/modules/status-store/` | 79%      | 83%       | 92%   | 91%        |
-| `src/modules/status/`       | 70%      | 58%       | 79%   | 78%        |
-| `src/modules/template/`     | 77%      | 99%       | 92%   | 89%        |
+| `src/modules/stats/`        | 67%      | 63%       | 78%   | 76%        |
+| `src/modules/status-store/` | 79%      | 79%       | 92%   | 91%        |
+| `src/modules/status/`       | 70%      | 60%       | 83%   | 82%        |
+| `src/modules/template/`     | 76%      | 87%       | 91%   | 89%        |
 | `src/modules/webhook/`      | 72%      | 89%       | 90%   | 87%        |
 
-Set each floor about five points below that scope's measured coverage, so it catches a real
-regression without failing on ordinary churn. Raise a floor when coverage rises; never lower one.
+When raising a floor, set it about five points below that scope's measured coverage, so it catches
+a real regression without failing on ordinary churn, and then check that gap in UNITS rather than
+percent. Five points is denominator-blind: on a scope with 14 functions it buys nothing, and a floor
+that admits zero growth has stopped measuring coverage and started blocking ordinary change. Every
+floor here leaves room for at least two newly uncovered units of its metric, which is the one case
+where a floor may be lowered: not because coverage fell, but because the margin was unattainable. When coverage legitimately shifts — a refactor
+relocating covered logic, a lane split changing which specs a lane runs — reset the floor to the
+newly measured coverage instead. Floors exist to catch regressions, not to force coverage.
 
 Two behaviours of Jest's threshold matching are worth knowing before adding a scope:
 
@@ -234,16 +249,17 @@ on broad integration coverage.
 
 Main CI is defined in `.github/workflows/ci.yml`.
 
-| Job             | Checks                                                                                                                  |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `lint`          | backend ESLint, full-program TypeScript check, formatting, version consistency, .dockerignore context, OpenAPI snapshot |
-| `audit`         | dependency security audit                                                                                               |
-| `test`          | backend coverage run, script unit tests (node:test), e2e smoke tests, Codecov upload                                    |
-| `test-postgres` | real PostgreSQL 16 service, backend build, migration smoke, and PostgreSQL FTS provider spec                            |
-| `dashboard`     | dashboard install, lint, test type-check, unit tests, i18n parity, build                                                |
-| `scripts-smoke` | shellcheck on the backup/restore scripts plus the backup/restore smoke test                                             |
-| `build`         | backend build after lint/audit/test/dashboard/scripts-smoke jobs pass                                                   |
-| `docker`        | multi-arch Docker build on pushes and pull requests; publish only where workflow permissions allow                      |
+| Job             | Checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lint`          | backend ESLint, full-program TypeScript check, formatting, version consistency, .dockerignore context, OpenAPI snapshot, SDK routes and webhook events against the contract, contract coverage per SDK, SDK docs against the shipped client surface, client wire shapes (`check:contract-shapes` — the JavaScript SDK's, dashboard's, Python's, Go's and Java's hand-written types against the OpenAPI schemas; the PHP client returns untyped arrays and has no types layer to gate) |
+| `audit`         | dependency security audit of BOTH npm trees (root and `dashboard/`)                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `test`          | backend coverage run, script unit tests (node:test), e2e smoke tests, Codecov upload                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `test-postgres` | real PostgreSQL 16 service, backend build, migration smoke, and PostgreSQL FTS provider spec                                                                                                                                                                                                                                                                                                                                                                                          |
+| `dashboard`     | dashboard install, lint, formatting, type-check, i18n parity, build, unit tests                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `scripts-smoke` | shellcheck on `docker-entrypoint.sh` and every `scripts/*.sh`, plus the backup/restore smoke test                                                                                                                                                                                                                                                                                                                                                                                     |
+| `chart`         | helm lint, helm template with default and fully-toggled values, kubeconform on both renders, the rendered-behaviour check, actionlint on the workflows                                                                                                                                                                                                                                                                                                                                |
+| `build`         | backend build after lint/audit/test/dashboard/scripts-smoke/chart jobs pass                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `docker`        | multi-arch Docker build on pushes and pull requests, then `scripts/smoke-test-non-root.sh` against the built image so the entrypoint's root→openwa drop is verified, not assumed; publishes to GHCR only on push, so fork pull requests validate both architectures without publishing                                                                                                                                                                                                |
 
 SDK CI is defined in `.github/workflows/sdk-ci.yml` and is path-filtered to SDK sources plus server
 contract surfaces that SDKs mirror (`src/**/dto/**`, `src/**/*.controller.ts`, `src/**/*.service.ts`, and
@@ -256,9 +272,12 @@ re-runs the SDK suites. It runs:
 - Java SDK tests with Maven.
 - Go SDK formatting, `go vet`, and race-enabled tests at the declared Go floor.
 
-Release tags run `.github/workflows/release.yml`. The release gate verifies the tag matches
-`package.json`, checks documented version consistency, runs backend tests with coverage, builds the
-backend, and publishes the GitHub Release only after the Docker image has built and pushed successfully.
+Release tags run `.github/workflows/release.yml`, which mirrors the CI gate rather than running a
+lighter one: the same lint job (including all four SDK contract checks), the same test, PostgreSQL,
+dashboard, shell-script and chart jobs. It additionally verifies the tag matches `package.json`, and
+publishes the GitHub Release only after the Docker image has built and pushed successfully. Nothing in
+it packages or publishes the Helm chart — operators install that from the tagged ref, so the tag is the
+last gate the chart passes.
 
 ## 9.7 Testing Guidelines
 

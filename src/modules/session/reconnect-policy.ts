@@ -59,7 +59,7 @@ export const RECONNECT_LOOP_ALERT_INTERVAL_ATTEMPTS = 5;
 /** Upper bound on a computed backoff delay (see clampReconnectDelay). */
 export const RECONNECT_DELAY_CAP_MS = 3_600_000;
 
-function clampNumber(value: number, min: number, max: number): number {
+export function clampNumber(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 

@@ -24,6 +24,67 @@ describe('LabelService', () => {
     await makeService({ addLabelToChat }).addLabelToChat('s1', 'chat1', 'l1');
     expect(addLabelToChat).toHaveBeenCalledWith('chat1', 'l1');
   });
+
+  it('delegates getLabels to the engine and returns its list', async () => {
+    const labels = [{ id: 'l1', name: 'VIP' }];
+    const getLabels = jest.fn().mockResolvedValue(labels);
+    await expect(makeService({ getLabels }).getLabels('s1')).resolves.toBe(labels);
+    expect(getLabels).toHaveBeenCalledTimes(1);
+  });
+
+  it('delegates getLabelById and returns the label when it exists', async () => {
+    const label = { id: 'l1', name: 'VIP' };
+    const getLabelById = jest.fn().mockResolvedValue(label);
+    await expect(makeService({ getLabelById }).getLabelById('s1', 'l1')).resolves.toBe(label);
+    expect(getLabelById).toHaveBeenCalledWith('l1');
+  });
+
+  // Only a null lookup maps to 404 — an engine failure says nothing about whether the label
+  // exists, so it must propagate unchanged rather than be reported as "not found".
+  it('propagates an engine failure from getLabelById instead of mapping it to 404', async () => {
+    const down = new Error('engine down');
+    const getLabelById = jest.fn().mockRejectedValue(down);
+    await expect(makeService({ getLabelById }).getLabelById('s1', 'l1')).rejects.toBe(down);
+  });
+
+  it('delegates getChatLabels to the engine', async () => {
+    const getChatLabels = jest.fn().mockResolvedValue([{ id: 'l1' }]);
+    await expect(makeService({ getChatLabels }).getChatLabels('s1', 'c@c.us')).resolves.toEqual([{ id: 'l1' }]);
+    expect(getChatLabels).toHaveBeenCalledWith('c@c.us');
+  });
+
+  it('delegates removeLabelFromChat to the engine', async () => {
+    const removeLabelFromChat = jest.fn().mockResolvedValue(undefined);
+    await makeService({ removeLabelFromChat }).removeLabelFromChat('s1', 'chat1', 'l1');
+    expect(removeLabelFromChat).toHaveBeenCalledWith('chat1', 'l1');
+  });
+
+  it('throws 400 for getChatLabels and removeLabelFromChat when the session is not started', () => {
+    const svc = makeService(undefined);
+    expect(() => svc.getChatLabels('s1', 'c@c.us')).toThrow(BadRequestException);
+    expect(() => svc.removeLabelFromChat('s1', 'chat1', 'l1')).toThrow(BadRequestException);
+  });
+
+  // Every label operation is a pass-through: a rejecting engine must reach the caller as-is.
+  it.each([
+    ['getLabels', { getLabels: jest.fn() }, (svc: LabelService) => svc.getLabels('s1')],
+    ['getChatLabels', { getChatLabels: jest.fn() }, (svc: LabelService) => svc.getChatLabels('s1', 'c@c.us')],
+    ['upsertLabel', { upsertLabel: jest.fn() }, (svc: LabelService) => svc.upsertLabel('s1', 'l1', { name: 'VIP' })],
+    ['deleteLabel', { deleteLabel: jest.fn() }, (svc: LabelService) => svc.deleteLabel('s1', 'l1')],
+    ['getChatsByLabel', { getChatsByLabel: jest.fn() }, (svc: LabelService) => svc.getChatsByLabel('s1', 'l1')],
+    ['addLabelToChat', { addLabelToChat: jest.fn() }, (svc: LabelService) => svc.addLabelToChat('s1', 'chat1', 'l1')],
+    [
+      'removeLabelFromChat',
+      { removeLabelFromChat: jest.fn() },
+      (svc: LabelService) => svc.removeLabelFromChat('s1', 'chat1', 'l1'),
+    ],
+  ])('propagates an engine failure from %s unchanged', async (_name, engine, call) => {
+    const down = new Error('engine down');
+    const method = Object.values(engine)[0];
+    method.mockRejectedValue(down);
+
+    await expect(call(makeService(engine))).rejects.toBe(down);
+  });
 });
 
 // Create and update are one operation upstream — a single `label_edit` write keyed on the label id —

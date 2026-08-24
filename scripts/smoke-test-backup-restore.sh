@@ -294,4 +294,41 @@ fi
 pass "(f) data/.env.generated resolves paths for both scripts, and the environment still wins"
 
 echo ""
+echo "==> (g) PLUGIN_STATE_DIR moves the registry and ctx.storage, and both scripts follow it"
+# The knob names the ROOT; the app keeps plugin state at <root>/plugins. Both scripts hardcoded
+# $OPENWA_DATA_DIR/plugins, so with the knob set the archive carried neither the registry nor any
+# plugin's persisted storage, and the restore put nothing back. Silent both ways: an empty source
+# directory simply produces no plugin-state entry.
+G="$WORK/g"
+mkdir -p "$G/state" "$G/elsewhere/plugins/chatwoot" "$G/extract" "$G/restore/state"
+make_fixture "$G/state/main.sqlite" "golf-main"
+make_fixture "$G/state/openwa.sqlite" "golf-data"
+printf '{"plugins":[{"id":"chatwoot"}]}' >"$G/elsewhere/plugins/registry.json"
+printf 'mapped-conversation' >"$G/elsewhere/plugins/chatwoot/key-Zm9v.json"
+(
+  cd "$G"
+  OPENWA_DATA_DIR="$G/state" PLUGIN_STATE_DIR="$G/elsewhere" BACKUP_DIR="$G/out" \
+    MAIN_DATABASE_NAME="$G/state/main.sqlite" DATABASE_NAME="$G/state/openwa.sqlite" "$BACKUP" >/dev/null
+)
+ARCHIVE_G="$(ls "$G"/out/openwa-backup-*.tar.gz)"
+tar -xzf "$ARCHIVE_G" -C "$G/extract"
+if [ ! -f "$G/extract/plugin-state/registry.json" ]; then
+  fail "(g) backup ignored PLUGIN_STATE_DIR: the plugin registry is missing from the archive"
+fi
+if [ ! -f "$G/extract/plugin-state/chatwoot/key-Zm9v.json" ]; then
+  fail "(g) backup ignored PLUGIN_STATE_DIR: a plugin's persisted ctx.storage is missing"
+fi
+# And the restore has to put them back where the knob points, not under the default data dir.
+(
+  cd "$G"
+  OPENWA_DATA_DIR="$G/restore/state" PLUGIN_STATE_DIR="$G/restored-elsewhere" \
+    MAIN_DATABASE_NAME="$G/restore/state/main.sqlite" DATABASE_NAME="$G/restore/state/openwa.sqlite" \
+    "$RESTORE" "$ARCHIVE_G" --force >/dev/null
+)
+if [ ! -f "$G/restored-elsewhere/plugins/registry.json" ]; then
+  fail "(g) restore ignored PLUGIN_STATE_DIR: the registry did not land under the configured root"
+fi
+pass "(g) PLUGIN_STATE_DIR is honoured by backup and by restore"
+
+echo ""
 echo "All smoke tests passed!"

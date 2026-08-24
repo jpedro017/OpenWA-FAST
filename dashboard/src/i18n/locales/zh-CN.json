@@ -142,7 +142,8 @@
       "orLabel": "或",
       "post": "发布",
       "posted": "状态已发布",
-      "postFailed": "无法发布状态"
+      "postFailed": "无法发布状态",
+      "imageFile": "状态图片"
     },
     "channels": {
       "notSupported": "Baileys 引擎不支持频道。",
@@ -157,9 +158,17 @@
       "markRead": "将聊天标记为已读失败",
       "send": "发送消息失败",
       "react": "回应消息失败",
-      "delete": "删除消息失败"
+      "delete": "删除消息失败",
+      "fileTooLarge": "文件过大（最大 18 MB）"
     },
-    "loadMessagesError": "无法加载消息。请检查服务器日志。"
+    "loadMessagesError": "无法加载消息。请检查服务器日志。",
+    "messageStatus": {
+      "pending": "待发送",
+      "sent": "已发送",
+      "delivered": "已送达",
+      "read": "已读",
+      "failed": "发送失败"
+    }
   },
   "errorBoundary": {
     "title": "出了点问题",
@@ -290,7 +299,9 @@
       "phone": "电话号码",
       "phoneNone": "未连接",
       "created": "创建时间",
-      "lastActive": "上次活跃"
+      "lastActive": "上次活跃",
+      "autoRejectCalls": "自动拒接来电",
+      "autoRejectCallsHint": "来电响铃后立即拒接。call.received webhook 仍会先行触发。下一通来电起生效，无需重启。"
     },
     "actions": {
       "view": "查看",
@@ -410,7 +421,10 @@
         "isNot": "不是",
         "contains": "包含",
         "equals": "等于"
-      }
+      },
+      "fieldLabel": "筛选字段",
+      "operatorLabel": "筛选运算符",
+      "valueLabel": "筛选值"
     },
     "columns": {
       "url": "URL",
@@ -491,7 +505,8 @@
       "deleted": "模板删除成功",
       "deleteFailed": "删除模板失败：{{message}}",
       "copied": "已复制模板名称"
-    }
+    },
+    "sessionSelect": "会话"
   },
   "apiKeys": {
     "title": "API 密钥",
@@ -563,7 +578,10 @@
     },
     "empty": {
       "title": "未找到日志",
-      "description": "执行操作后，审计日志将显示在这里"
+      "description": "执行操作后，审计日志将显示在这里",
+      "filteredTitle": "本页无匹配项",
+      "filteredDescription": "搜索仅过滤当前页。请清除搜索、翻页，或使用严重级别筛选在服务端收窄。",
+      "filteredServerDescription": "没有符合这些筛选条件的日志。请调整严重级别筛选以扩大搜索范围。"
     }
   },
   "messageTester": {
@@ -779,6 +797,8 @@
       "export": "导出数据",
       "import": "导入数据",
       "exportFailed": "无法导出数据",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "无法导入数据",
       "importOk": "数据已导入",
       "importConfirm": "导入操作将用备份数据替换（REPLACE）当前所有数据（{{rows}} 行）。此操作无法撤销。是否继续？",
@@ -822,6 +842,7 @@
     "installModal": {
       "title": "安装插件",
       "hint": "上传打包为 .zip 的插件（包含 manifest.json）。启用后将在沙箱中运行。",
+      "trustWarning": "插件以网关进程的完整权限运行——沙箱只能隔离崩溃，无法防御恶意代码。请只安装你信任的插件。",
       "choose": "选择 .zip 文件…",
       "tooLarge": "文件超过 5 MB 限制。",
       "catalogHint": "直接从 OpenWA 插件目录安装。.zip 文件由服务器通过 SSRF 防护获取，然后经过验证并在沙箱中运行。",

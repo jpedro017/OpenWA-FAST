@@ -179,3 +179,31 @@ describe('SessionRestrictionStore', () => {
     );
   });
 });
+
+describe('the restricted-sessions gauge follows expiry, not just mutations', () => {
+  const timelock = (expiresAt: number): AccountRestriction =>
+    ({ kind: 'timelock', code: 'reachout', expiresAt }) as unknown as AccountRestriction;
+
+  it('drops to zero once the only restriction lapses, with no further mutation', () => {
+    const store = new SessionRestrictionStore();
+    store.set('s1', timelock(Date.now() + 60_000));
+    expect(getRestrictedSessionCount()).toBe(1);
+
+    // The clock passes the stated end. Nothing calls set() or clear().
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+    try {
+      expect(store.get('s1')).toBeUndefined(); // the read path already agrees it has lapsed
+      expect(getRestrictedSessionCount()).toBe(0);
+    } finally {
+      jest.spyOn(Date, 'now').mockRestore();
+    }
+  });
+
+  // Negative twin: a restriction still in force must keep being counted, or the fix would just
+  // zero the gauge.
+  it('keeps counting a restriction that is still in force', () => {
+    const store = new SessionRestrictionStore();
+    store.set('s2', timelock(Date.now() + 60_000));
+    expect(getRestrictedSessionCount()).toBe(1);
+  });
+});

@@ -142,7 +142,8 @@
       "orLabel": "or",
       "post": "Post",
       "posted": "Status posted",
-      "postFailed": "Could not post the status"
+      "postFailed": "Could not post the status",
+      "imageFile": "Status image"
     },
     "channels": {
       "notSupported": "Channels are not supported on the Baileys engine.",
@@ -157,9 +158,17 @@
       "markRead": "Failed to mark chat as read",
       "send": "Failed to send message",
       "react": "Failed to react to message",
-      "delete": "Failed to delete message"
+      "delete": "Failed to delete message",
+      "fileTooLarge": "File is too large (max 18 MB)"
     },
-    "loadMessagesError": "Couldn't load messages. Check the server logs."
+    "loadMessagesError": "Couldn't load messages. Check the server logs.",
+    "messageStatus": {
+      "pending": "Pending",
+      "sent": "Sent",
+      "delivered": "Delivered",
+      "read": "Read",
+      "failed": "Failed"
+    }
   },
   "errorBoundary": {
     "title": "Something went wrong",
@@ -294,7 +303,9 @@
       "phone": "Phone Number",
       "phoneNone": "Not connected",
       "created": "Created",
-      "lastActive": "Last Active"
+      "lastActive": "Last Active",
+      "autoRejectCalls": "Auto-reject calls",
+      "autoRejectCallsHint": "Incoming calls are declined as soon as they ring. The call.received webhook still fires first. Applies to the next call — no restart needed."
     },
     "actions": {
       "view": "View",
@@ -410,7 +421,10 @@
         "isNot": "is not",
         "contains": "contains",
         "equals": "equals"
-      }
+      },
+      "fieldLabel": "Filter field",
+      "operatorLabel": "Filter operator",
+      "valueLabel": "Filter value"
     },
     "columns": {
       "url": "URL",
@@ -491,7 +505,8 @@
       "deleted": "Template deleted successfully",
       "deleteFailed": "Failed to delete template: {{message}}",
       "copied": "Template name copied"
-    }
+    },
+    "sessionSelect": "Session"
   },
   "apiKeys": {
     "title": "API Keys",
@@ -563,7 +578,10 @@
     },
     "empty": {
       "title": "No logs found",
-      "description": "Audit logs will appear here as actions are performed"
+      "description": "Audit logs will appear here as actions are performed",
+      "filteredTitle": "No matches on this page",
+      "filteredDescription": "The search filters the current page only. Clear it, page through, or use the severity filter to narrow server-side.",
+      "filteredServerDescription": "No logs match these filters. Adjust the severity filter to widen the search."
     }
   },
   "messageTester": {
@@ -760,6 +778,8 @@
       "export": "Export data",
       "import": "Import data",
       "exportFailed": "Couldn't export data",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "Couldn't import data",
       "importOk": "Data imported",
       "importConfirm": "Importing will REPLACE all current data with the backup ({{rows}} rows). This cannot be undone. Continue?",
@@ -822,6 +842,7 @@
     "installModal": {
       "title": "Install a plugin",
       "hint": "Upload a plugin packaged as a .zip (with a manifest.json). It runs sandboxed once enabled.",
+      "trustWarning": "Plugins run with the gateway's full process privileges — the sandbox contains crashes, not malicious code. Install only plugins you trust.",
       "choose": "Choose a .zip file…",
       "tooLarge": "The file exceeds the 5 MB limit.",
       "catalogHint": "Install directly from the OpenWA plugin catalog. The .zip is fetched server-side through the SSRF guard, then validated and sandboxed.",

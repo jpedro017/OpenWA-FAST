@@ -7,7 +7,7 @@ feature; the session must be a business account.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 
 from .._http import quote_segment
 from ..types import AddLabelRequest, ChatSummary, LabelRecord, SuccessResult, UpsertLabelRequest
@@ -20,13 +20,13 @@ class LabelsResource:
     def __init__(self, http: "HttpExecutor") -> None:
         self._http = http
 
-    def list(self, session_id: str) -> list[LabelRecord]:
+    def list(self, session_id: str) -> List[LabelRecord]:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/labels")
 
     def get(self, session_id: str, label_id: str) -> LabelRecord:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/labels/{quote_segment(label_id)}")
 
-    def chats(self, session_id: str, label_id: str) -> list[ChatSummary]:
+    def chats(self, session_id: str, label_id: str) -> List[ChatSummary]:
         """Every chat carrying a label.
 
         whatsapp-web.js only -- Baileys has label writes but no label query of any kind, and
@@ -54,7 +54,7 @@ class LabelsResource:
             "DELETE", f"/api/sessions/{quote_segment(session_id)}/labels/{quote_segment(label_id)}"
         )
 
-    def for_chat(self, session_id: str, chat_id: str) -> list[LabelRecord]:
+    def for_chat(self, session_id: str, chat_id: str) -> List[LabelRecord]:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/labels/chat/{quote_segment(chat_id)}")
 
     def add_to_chat(self, session_id: str, chat_id: str, body: AddLabelRequest) -> SuccessResult:

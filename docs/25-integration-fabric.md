@@ -111,6 +111,12 @@ Alongside this async pipeline, a route may additionally declare a `response` con
   many instances (for example, one external account per WhatsApp number). Each instance owns a host-minted
   ingress secret, a resolved session scope, and a config slice. It is a serializable field threaded
   through payloads and rows — **not** a separate worker; there is still one worker per plugin.
+  _Known residue:_ per-instance isolation covers the **ingress dispatch** path (concrete-scoped
+  instances resolve their own config slice). A `wildcard`/`null`-scoped sibling is still projected
+  into the plugin's **base** config with last-write-wins merging, so a sparse wildcard instance
+  inherits keys a sibling projected, and hook dispatch resolves config without per-instance
+  scoping. Run one enabled wildcard instance per plugin, or scope instances concretely, until the
+  projection is re-keyed per instance.
 - **`conversation.send` capability** — a normalized outbound send authored by the plugin and translated
   host-side to the message service, so persistence and the message hook chain are preserved. It is gated
   by a `conversation:send` permission and the instance's session scope.

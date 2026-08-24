@@ -23,6 +23,7 @@ import {
 import {
   applyMessageEdit,
   mergeDeliveryStatus,
+  mergeReactionSnapshot,
   findRevokedIndex,
   getMediaSrc,
   type ChatMessageView,
@@ -416,12 +417,15 @@ export function Chats() {
   );
 
   const handleIncomingMessageReaction = useCallback(
-    (event: { sessionId: string; messageId: string; reactions: Record<string, string> }) => {
+    (event: { sessionId: string; messageId: string; reactions?: Record<string, string> }) => {
       if (event.sessionId !== selectedSessionId) return;
 
       // Reactions update `metadata.reactions` while preserving `metadata.media` / `metadata.quotedMessage`,
       // so we must read the prior message and deep-merge — `updateMessage`'s shallow merge would clobber
       // the rest of metadata.
+      //
+      // The absent-vs-empty distinction on `reactions` is mergeReactionSnapshot's job; it is a named
+      // function so the behaviour is covered by a test, because nothing here is.
       const caches = queryClient.getQueriesData<ChatMessageView[]>({
         queryKey: ['messages', event.sessionId],
       });
@@ -433,7 +437,10 @@ export function Chats() {
         const next = list.slice();
         next[idx] = {
           ...target,
-          metadata: { ...(target.metadata || {}), reactions: event.reactions },
+          metadata: {
+            ...(target.metadata || {}),
+            reactions: mergeReactionSnapshot(target.metadata?.reactions, event.reactions),
+          },
         };
         queryClient.setQueryData(key, next);
       }
@@ -510,14 +517,27 @@ export function Chats() {
     [queryClient],
   );
 
-  const { isConnected, connectionFailed, reconnect, subscribe, unsubscribe } = useWebSocket({
-    onMessage: handleIncomingMessage,
-    onMessageAck: handleIncomingMessageAck,
-    onMessageReaction: handleIncomingMessageReaction,
-    onMessageRevoked: handleIncomingMessageRevoked,
-    onMessageEdited: handleIncomingMessageEdited,
-    onStatusReceived: handleStatusReceived,
-  });
+  // The events object must be referentially stable: useWebSocket re-registers its socket handler
+  // on every identity change, so an inline literal would tear down and re-attach per render.
+  const wsEvents = useMemo(
+    () => ({
+      onMessage: handleIncomingMessage,
+      onMessageAck: handleIncomingMessageAck,
+      onMessageReaction: handleIncomingMessageReaction,
+      onMessageRevoked: handleIncomingMessageRevoked,
+      onMessageEdited: handleIncomingMessageEdited,
+      onStatusReceived: handleStatusReceived,
+    }),
+    [
+      handleIncomingMessage,
+      handleIncomingMessageAck,
+      handleIncomingMessageReaction,
+      handleIncomingMessageRevoked,
+      handleIncomingMessageEdited,
+      handleStatusReceived,
+    ],
+  );
+  const { isConnected, connectionFailed, reconnect, subscribe, unsubscribe } = useWebSocket(wsEvents);
 
   // A transient WebSocket gap means message.received/ack/revoke events were missed, and the chat
   // cache uses staleTime: Infinity so it won't refetch on its own. On a reconnect (isConnected
@@ -754,6 +774,11 @@ export function Chats() {
     ? (groupedStatuses.find(g => g.contact.id === activeStatusContactId) ?? null)
     : null;
 
+  // The pane heading truncates with an ellipsis, so the untruncated text has to reach the tooltip.
+  const activeStatusTitle = activeStatusGroup
+    ? (activeStatusGroup.contact.name ?? activeStatusGroup.contact.pushName ?? activeStatusGroup.contact.id)
+    : '';
+
   // Same open-at-newest behavior for the status viewer pane, keyed off the active contact and its
   // item list. Declared after activeStatusGroup: the viewer follows refetches because the deps are
   // the derived group's items, not a click-time snapshot.
@@ -893,6 +918,7 @@ export function Chats() {
 
                 {/* Messages body (list, media, reactions, scroll-to-bottom) — components/chats/ChatThread. */}
                 <ChatThread
+                  sessionId={selectedSessionId}
                   activeChat={activeChat}
                   messages={messages}
                   loadingMessages={loadingMessages}
@@ -934,7 +960,7 @@ export function Chats() {
                     <ArrowLeft size={20} />
                   </button>
                   <Megaphone size={20} />
-                  <h2>{activeChannel.name}</h2>
+                  <h2 title={activeChannel.name}>{activeChannel.name}</h2>
                 </header>
                 <div className="messages-list" ref={channelFeedRef}>
                   {channelMessages.isLoading ? (
@@ -976,11 +1002,7 @@ export function Chats() {
                     <ArrowLeft size={20} />
                   </button>
                   <CircleDashed size={20} />
-                  <h2>
-                    {activeStatusGroup.contact.name ??
-                      activeStatusGroup.contact.pushName ??
-                      activeStatusGroup.contact.id}
-                  </h2>
+                  <h2 title={activeStatusTitle}>{activeStatusTitle}</h2>
                 </header>
                 <div className="messages-list" ref={statusFeedRef}>
                   {activeStatusGroup.items.map(item => (

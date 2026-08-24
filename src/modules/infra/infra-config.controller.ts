@@ -11,6 +11,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiPropertyOptional } from '@nestjs/swagger';
+import { InfraConfigResponseDto, InfraConfigSaveResponseDto, InfraRestartResponseDto } from './dto/infra-response.dto';
 import { IsArray, IsOptional, IsString } from 'class-validator';
 import { RequireRole, RequireUnscopedKey } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
@@ -23,7 +24,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { SaveConfigDto } from './dto/save-config.dto';
 import { assertNoDefaultSecretsInProduction } from '../../config/bootstrap-security';
-import { BLANK_SHADOWED_ENV_KEYS, isOsProvidedEnv } from '../../config/env-precedence';
+import { BLANK_SHADOWED_ENV_KEYS, isEnvPinned, isOsProvidedEnv } from '../../config/env-precedence';
 import * as fs from 'fs';
 import * as path from 'path';
 import { generatedEnvPath, readGeneratedEnv } from './generated-env';
@@ -108,50 +109,68 @@ export class InfraConfigController {
 
   @Get('config')
   @RequireRole(ApiKeyRole.ADMIN)
-  @ApiOperation({ summary: 'Read the saved infrastructure configuration for the dashboard form' })
-  @ApiResponse({ status: 200, description: 'Saved configuration (secrets omitted)' })
+  @ApiOperation({ summary: 'Read the effective infrastructure configuration for the dashboard form' })
+  @ApiResponse({ status: 200, description: 'Effective configuration (secrets omitted)', type: InfraConfigResponseDto })
   getConfig(): SavedConfigResponse {
     const saved = readGeneratedEnv();
 
+    // A value supplied by the host environment or the project .env outranks data/.env.generated at
+    // every boot (load-env's override:false order), so the form must read it back instead of the
+    // first-run defaults — otherwise a compose `environment:` deployment shows whatsapp-web.js/sqlite
+    // while the process actually runs baileys/postgres (#1313). isEnvPinned's boot snapshot excludes
+    // file-sourced keys, so a value that only ever lived in data/.env.generated is NOT pinned and the
+    // freshly-saved file still wins over process.env's stale boot-time copy — keeping the
+    // "saved, pending restart" form state intact until the reboot applies it (#226/#1082). The blank
+    // rule is the same one the save guard's bootValue applies: a blank counts as unset only for the
+    // blank-forwarded keys boot's clearBlankEnv clears; elsewhere the runtime reads the blank as-is
+    // (configuration.ts's `=== 'true'` checks), so the read must not fall through to the file there.
+    const effective = (key: string): string | undefined => {
+      const envValue = isEnvPinned(key) ? process.env[key] : undefined;
+      if (envValue !== undefined && (envValue.trim() !== '' || !BLANK_SHADOWED_ENV_KEYS.includes(key))) {
+        return envValue;
+      }
+      return saved[key];
+    };
+
     // Secrets (passwords, S3 keys) are never returned; the form shows a "set" indicator
-    // and an empty submission preserves the stored value (see saveConfig). This lets the
-    // dashboard hydrate the form so a save no longer overwrites unseen fields (#226).
+    // and an empty submission preserves the stored value (see saveConfig). This lets
+    // the dashboard hydrate the form so a save no longer overwrites unseen fields (#226).
     return {
       database: {
-        type: saved.DATABASE_TYPE === 'postgres' ? 'postgres' : 'sqlite',
-        builtIn: saved.POSTGRES_BUILTIN === 'true',
-        host: saved.DATABASE_HOST || '',
-        port: saved.DATABASE_PORT || '',
-        username: saved.DATABASE_USERNAME || '',
-        database: saved.DATABASE_NAME || '',
-        schema: saved.POSTGRES_SCHEMA || 'public',
-        poolSize: Number(saved.DATABASE_POOL_SIZE) || 10,
-        sslEnabled: saved.DATABASE_SSL === 'true',
-        sslRejectUnauthorized: saved.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false',
-        passwordSet: Boolean(saved.DATABASE_PASSWORD),
+        type: effective('DATABASE_TYPE') === 'postgres' ? 'postgres' : 'sqlite',
+        builtIn: effective('POSTGRES_BUILTIN') === 'true',
+        host: effective('DATABASE_HOST') || '',
+        port: effective('DATABASE_PORT') || '',
+        username: effective('DATABASE_USERNAME') || '',
+        database: effective('DATABASE_NAME') || '',
+        schema: effective('POSTGRES_SCHEMA') || 'public',
+        poolSize: Number(effective('DATABASE_POOL_SIZE')) || 10,
+        sslEnabled: effective('DATABASE_SSL') === 'true',
+        sslRejectUnauthorized: effective('DATABASE_SSL_REJECT_UNAUTHORIZED') !== 'false',
+        passwordSet: Boolean(effective('DATABASE_PASSWORD')),
       },
       redis: {
-        enabled: saved.REDIS_ENABLED === 'true',
-        builtIn: saved.REDIS_BUILTIN === 'true',
-        host: saved.REDIS_HOST || '',
-        port: saved.REDIS_PORT || '',
-        passwordSet: Boolean(saved.REDIS_PASSWORD),
+        enabled: effective('REDIS_ENABLED') === 'true',
+        builtIn: effective('REDIS_BUILTIN') === 'true',
+        host: effective('REDIS_HOST') || '',
+        port: effective('REDIS_PORT') || '',
+        passwordSet: Boolean(effective('REDIS_PASSWORD')),
       },
-      queue: { enabled: saved.QUEUE_ENABLED === 'true' },
+      queue: { enabled: effective('QUEUE_ENABLED') === 'true' },
       storage: {
-        type: saved.STORAGE_TYPE === 's3' ? 's3' : 'local',
-        builtIn: saved.MINIO_BUILTIN === 'true',
-        localPath: saved.STORAGE_LOCAL_PATH || '',
-        s3Bucket: saved.S3_BUCKET || '',
-        s3Region: saved.S3_REGION || '',
-        s3Endpoint: saved.S3_ENDPOINT || '',
-        s3CredentialsSet: Boolean(saved.S3_ACCESS_KEY_ID && saved.S3_SECRET_ACCESS_KEY),
+        type: effective('STORAGE_TYPE') === 's3' ? 's3' : 'local',
+        builtIn: effective('MINIO_BUILTIN') === 'true',
+        localPath: effective('STORAGE_LOCAL_PATH') || '',
+        s3Bucket: effective('S3_BUCKET') || '',
+        s3Region: effective('S3_REGION') || '',
+        s3Endpoint: effective('S3_ENDPOINT') || '',
+        s3CredentialsSet: Boolean(effective('S3_ACCESS_KEY_ID') && effective('S3_SECRET_ACCESS_KEY')),
       },
       engine: {
-        type: saved.ENGINE_TYPE || 'whatsapp-web.js',
-        headless: saved.PUPPETEER_HEADLESS !== 'false',
-        sessionDataPath: saved.SESSION_DATA_PATH || '',
-        browserArgs: saved.PUPPETEER_ARGS || '',
+        type: effective('ENGINE_TYPE') || 'whatsapp-web.js',
+        headless: effective('PUPPETEER_HEADLESS') !== 'false',
+        sessionDataPath: effective('SESSION_DATA_PATH') || '',
+        browserArgs: effective('PUPPETEER_ARGS') || '',
       },
     };
   }
@@ -159,7 +178,11 @@ export class InfraConfigController {
   @Put('config')
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Save infrastructure configuration to .env file' })
-  @ApiResponse({ status: 200, description: 'Configuration saved' })
+  @ApiResponse({
+    status: 200,
+    description: 'Save outcome. A failed write also answers 200 with `saved: false` — read the flag, not the status.',
+    type: InfraConfigSaveResponseDto,
+  })
   @ApiBody({ description: 'Configuration to save', type: SaveConfigDto })
   saveConfig(@Body() config: SaveConfigDto): { message: string; saved: boolean; envPath: string; profiles: string[] } {
     try {
@@ -354,7 +377,7 @@ export class InfraConfigController {
   @HttpCode(HttpStatus.OK)
   @RequireRole(ApiKeyRole.ADMIN)
   @ApiOperation({ summary: 'Request server restart with Docker orchestration' })
-  @ApiResponse({ status: 200, description: 'Server will restart with new profiles' })
+  @ApiResponse({ status: 200, description: 'Server will restart with new profiles', type: InfraRestartResponseDto })
   @ApiBody({ required: false, type: RestartDto })
   async requestRestart(@Body() body?: RestartDto): Promise<{
     message: string;

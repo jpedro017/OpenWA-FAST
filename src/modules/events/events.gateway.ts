@@ -10,11 +10,13 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AuthService } from '../auth/auth.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { resolveCorsPolicy } from '../../config/bootstrap-security';
 import { resolveClientIp as resolveRequestClientIp, type RequestLike } from '../../common/utils/ip';
+import { DEFAULT_WEBHOOK_MEDIA_INLINE_MAX_BYTES, shedInlineMedia } from '../../common/utils/inline-media';
 import type { ApiKey } from '../auth/entities/api-key.entity';
 import {
   readWsRateLimitConfig,
@@ -129,6 +131,7 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   constructor(
     private readonly authService: AuthService,
     private readonly auditService: AuditService,
+    private readonly configService: ConfigService,
   ) {
     this.rateLimits = readWsRateLimitConfig();
     this.frameLimiter = new TokenBucketLimiter(this.rateLimits.framePerSecond, this.rateLimits.frameBurst);
@@ -585,17 +588,32 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   }
 
   /**
+   * Cap for inline base64 media on the message events, shared with the webhook delivery path so
+   * both outbound sinks emit the same omitted-marker contract for an over-cap blob. Without this,
+   * every subscribed socket (and, with the Redis adapter, every replica's pub/sub link) receives a
+   * full copy of a payload that can carry media up to MEDIA_DOWNLOAD_MAX_BYTES (~67 MB base64 for
+   * the 50 MiB cap); status.received already keeps its events media-free.
+   */
+  private messageMediaInlineMaxBytes(): number {
+    return this.configService.get<number>('webhook.mediaInlineMaxBytes', DEFAULT_WEBHOOK_MEDIA_INLINE_MAX_BYTES);
+  }
+
+  /**
    * Emit new message notification
    */
   emitMessage(sessionId: string, message: Record<string, unknown>) {
-    this.emitToRooms(sessionId, 'message.received', message);
+    this.emitToRooms(sessionId, 'message.received', this.shedMessageMedia(message));
   }
 
   /**
    * Emit message sent notification
    */
   emitMessageSent(sessionId: string, message: Record<string, unknown>) {
-    this.emitToRooms(sessionId, 'message.sent', message);
+    this.emitToRooms(sessionId, 'message.sent', this.shedMessageMedia(message));
+  }
+
+  private shedMessageMedia(message: Record<string, unknown>): Record<string, unknown> {
+    return shedInlineMedia(message, this.messageMediaInlineMaxBytes());
   }
 
   /**
@@ -650,6 +668,16 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    */
   emitGroupUpdate(sessionId: string, data: Record<string, unknown>) {
     this.emitToRooms(sessionId, 'group.update', data);
+  }
+
+  /**
+   * Emit a pending join request (someone asked to join a group the account admins, join-approval
+   * on). Payload mirrors the `group.join_request` webhook:
+   * `{ groupId, participantIds, timestamp, actorId? }` — participantIds are the users asking to
+   * join; actorId is who created the request when the engine reports one.
+   */
+  emitGroupJoinRequest(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'group.join_request', data);
   }
 
   /**

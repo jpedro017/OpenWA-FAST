@@ -267,7 +267,11 @@ describe('BulkMessageService.processBatch', () => {
     }) as unknown as MessageBatch;
 
   beforeEach(async () => {
-    engine = { sendTextMessage: jest.fn().mockResolvedValue({ id: 'wa1', timestamp: 111 }) };
+    engine = {
+      sendTextMessage: jest.fn().mockResolvedValue({ id: 'wa1', timestamp: 111 }),
+      sendImageMessage: jest.fn().mockResolvedValue({ id: 'wa1', timestamp: 111 }),
+      sendAudioMessage: jest.fn().mockResolvedValue({ id: 'wa1', timestamp: 111 }),
+    };
     engines = new EngineRegistry();
     engines.set('s1', engine as unknown as IWhatsAppEngine);
     messageService = { saveOutgoingMessage: jest.fn().mockResolvedValue(undefined) };
@@ -320,6 +324,133 @@ describe('BulkMessageService.processBatch', () => {
       if (prev === undefined) delete process.env.BULK_MAX_CONCURRENT_BATCHES;
       else process.env.BULK_MAX_CONCURRENT_BATCHES = prev;
     }
+  });
+
+  // `content.text` is @MaxLength(4096)-validated BEFORE substitution, and the single-send template
+  // path caps its FINAL render at template.renderMaxChars — the bulk path capped neither, so
+  // caller-supplied variables inflated each item without bound.
+  const batchWithVariables = (text: string, variables: Record<string, string>): MessageBatch => ({
+    ...makeBatch(1),
+    messages: [{ chatId: 'c0@c.us', type: 'text', content: { text }, variables }],
+  });
+
+  // The cap must bound the MESSAGE, not the payload. `variables` is a sibling of the media fields on
+  // the same DTO, so personalised media is a supported bulk request — and a 100 KB image is ~137,000
+  // base64 characters, twice the 64 KiB text cap. Capping every string in the content tree failed
+  // exactly the requests this endpoint exists for.
+  // The gate has TWO copies (see applySendingGate's doc); the envelope check landed on one of them.
+  // A handler returning a truthy object without `input` fed `undefined` into every send below.
+  it('fails an item when a message:sending handler returns a payload with no usable input', async () => {
+    repo.findOne.mockResolvedValue(makeBatch(1));
+    hookManager.execute.mockResolvedValue({ continue: true, data: { notInput: 1 } });
+
+    await runProcessBatch();
+
+    expect(engine.sendTextMessage).not.toHaveBeenCalled();
+    const finalPartial = (repo.update.mock.calls as Array<[unknown, { results: BatchMessageResult[] }]>).at(-1)![1];
+    expect(finalPartial.results[0].status).toBe(BatchMessageStatus.FAILED);
+    expect(finalPartial.results[0].error?.message).toMatch(/message:sending/);
+  });
+
+  /**
+   * The ONLY reason this second copy of the gate exists is that it must flag a plugin refusal apart
+   * from a delivery failure, so the per-item `message:failed` hook is skipped. Nothing bound that:
+   * deleting the flag on the envelope-refusal branch left the whole suite green, which means the
+   * refusal would have been reported to every plugin as a failed delivery with no test noticing.
+   */
+  it('does not report an unusable envelope to plugins as a delivery failure', async () => {
+    repo.findOne.mockResolvedValue(makeBatch(1));
+    hookManager.execute.mockResolvedValue({ continue: true, data: { notInput: 1 } });
+
+    await runProcessBatch();
+
+    expect(hookManager.execute).not.toHaveBeenCalledWith('message:failed', expect.anything(), expect.anything());
+  });
+
+  // Negative twin: a chain that returns nothing is the ordinary no-plugin path.
+  it('keeps the original content when the hook chain returns no data', async () => {
+    repo.findOne.mockResolvedValue(makeBatch(1));
+    hookManager.execute.mockResolvedValue({ continue: true });
+
+    await runProcessBatch();
+
+    expect(engine.sendTextMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a media item with variables even when its base64 exceeds the text cap', async () => {
+    const bigBase64 = 'A'.repeat(137_000);
+    repo.findOne.mockResolvedValue({
+      ...makeBatch(1),
+      messages: [
+        {
+          chatId: 'c0@c.us',
+          type: 'image',
+          content: { image: { base64: bigBase64, mimetype: 'image/jpeg' }, caption: 'Hi {{name}}' },
+          variables: { name: 'Alice' },
+        },
+      ],
+    });
+    engine.sendImageMessage = jest.fn().mockResolvedValue({ id: 'wa1', timestamp: 1 });
+
+    await runProcessBatch();
+
+    expect(engine.sendImageMessage).toHaveBeenCalledTimes(1);
+    const finalPartial = (repo.update.mock.calls as Array<[unknown, { results: BatchMessageResult[] }]>).at(-1)![1];
+    expect(finalPartial.results[0].status).not.toBe(BatchMessageStatus.FAILED);
+  });
+
+  it('fails an item whose rendered text exceeds the cap instead of sending it', async () => {
+    // Comfortably over the 64 KiB default the un-configured service falls back to.
+    const huge = 'x'.repeat(70 * 1024);
+    repo.findOne.mockResolvedValue(batchWithVariables('{{v}}', { v: huge }));
+
+    await runProcessBatch();
+
+    expect(engine.sendTextMessage).not.toHaveBeenCalled();
+    const finalPartial = (
+      repo.update.mock.calls as Array<[unknown, { status: BatchStatus; results: BatchMessageResult[] }]>
+    ).at(-1)![1];
+    expect(finalPartial.results[0].status).toBe(BatchMessageStatus.FAILED);
+    expect(finalPartial.results[0].error?.message).toMatch(/character limit/i);
+  });
+
+  /**
+   * The cap covers text AND caption — a caption is the other caller-supplied string a template can
+   * inflate without bound, and it lands in the same `messages.body` column. Only the text half was
+   * bound: narrowing the loop to `['text']` left the suite green, so the caption half was a claim
+   * with nothing behind it.
+   */
+  it('fails an item whose rendered CAPTION exceeds the cap', async () => {
+    const huge = 'x'.repeat(70 * 1024);
+    repo.findOne.mockResolvedValue({
+      ...makeBatch(1),
+      messages: [
+        {
+          chatId: 'c0@c.us',
+          type: 'image',
+          content: { image: { base64: 'AAAA', mimetype: 'image/jpeg' }, caption: '{{v}}' },
+          variables: { v: huge },
+        },
+      ],
+    });
+
+    await runProcessBatch();
+
+    const finalPartial = (
+      repo.update.mock.calls as Array<[unknown, { status: BatchStatus; results: BatchMessageResult[] }]>
+    ).at(-1)![1];
+    expect(finalPartial.results[0].status).toBe(BatchMessageStatus.FAILED);
+    expect(finalPartial.results[0].error?.message).toMatch(/caption/i);
+  });
+
+  it('still sends an item whose render stays under the cap', async () => {
+    repo.findOne.mockResolvedValue(batchWithVariables('hello {{v}}', { v: 'world' }));
+
+    await runProcessBatch();
+
+    expect(engine.sendTextMessage).toHaveBeenCalledTimes(1);
+    const sendArgs = engine.sendTextMessage.mock.calls[0] as [string, string];
+    expect(sendArgs[1]).toBe('hello world');
   });
 
   it('releases the in-flight marker when the engine is missing (no processingBatches leak)', async () => {
@@ -643,6 +774,76 @@ describe('BulkMessageService.processBatch', () => {
     await runProcessBatch();
 
     expect(engine.sendTextMessage).toHaveBeenCalledWith('c0@c.us', 'Hi Sam');
+  });
+
+  it('tags participants per item, on the text body and on a media caption alike', async () => {
+    // Each item names its own list: a batch fans out to many chats, and a WID is only taggable in a
+    // chat the participant is actually in.
+    const batch = makeBatch(1);
+    batch.messages[0].content = { text: 'Hi @62811', mentions: ['62811@c.us'] };
+    repo.findOne.mockResolvedValue(batch);
+
+    await runProcessBatch();
+
+    expect(engine.sendTextMessage).toHaveBeenCalledWith('c0@c.us', 'Hi @62811', ['62811@c.us']);
+
+    const media = makeBatch(1);
+    media.messages[0].type = 'image';
+    media.messages[0].content = {
+      image: { base64: 'AAAA', mimetype: 'image/jpeg' },
+      caption: 'look @62811',
+      mentions: ['62811@c.us'],
+    };
+    repo.findOne.mockResolvedValue(media);
+
+    await runProcessBatch();
+
+    expect(engine.sendImageMessage).toHaveBeenCalledWith(
+      'c0@c.us',
+      expect.objectContaining({ caption: 'look @62811', mentions: ['62811@c.us'] }),
+    );
+  });
+
+  it('substitutes variables inside mentions, so a campaign can tag a different participant per item', async () => {
+    // applyVariables walks the whole content tree, so a placeholder in a WID is rendered like one in
+    // the body. That is load-bearing for a personalised batch, and nothing else pins it: a future
+    // rewrite of applyVariables that rebuilt the object field by field would drop mentions silently.
+    const batch = makeBatch(1);
+    batch.messages[0].content = { text: 'Hi @{{num}}', mentions: ['{{num}}@c.us'] };
+    batch.messages[0].variables = { num: '62811' };
+    repo.findOne.mockResolvedValue(batch);
+
+    await runProcessBatch();
+
+    expect(engine.sendTextMessage).toHaveBeenCalledWith('c0@c.us', 'Hi @62811', ['62811@c.us']);
+  });
+
+  it('tags an audio item too, which has no caption to anchor a visible @token', async () => {
+    // Audio carries no caption, but a mention still tags through contextInfo, which is why the
+    // single-send audio route accepts the field. Skipping it here would accept the list and deliver
+    // an untagged voice note, turning a clear 400 into a silent no-op for one bulk type only.
+    const batch = makeBatch(1);
+    batch.messages[0].type = 'audio';
+    batch.messages[0].content = { audio: { base64: 'AAAA', mimetype: 'audio/mpeg' }, mentions: ['62811@c.us'] };
+    repo.findOne.mockResolvedValue(batch);
+
+    await runProcessBatch();
+
+    expect(engine.sendAudioMessage).toHaveBeenCalledWith(
+      'c0@c.us',
+      expect.objectContaining({ mentions: ['62811@c.us'] }),
+    );
+  });
+
+  it('leaves an untagged batch item on its two-argument send', async () => {
+    // Control: without a list the call shape every existing batch makes is untouched.
+    const batch = makeBatch(1);
+    batch.messages[0].content = { text: 'Hi there', mentions: [] };
+    repo.findOne.mockResolvedValue(batch);
+
+    await runProcessBatch();
+
+    expect(engine.sendTextMessage).toHaveBeenCalledWith('c0@c.us', 'Hi there');
   });
 
   it('fails an item whose rendered variables grow its base64 media past the cap (no send, explicit failure)', async () => {

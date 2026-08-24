@@ -29,7 +29,7 @@ import { BadRequestException } from '@nestjs/common';
 import { InfraStorageController } from './infra-storage.controller';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 
-describe('InfraStorageController.importStorage filePath validation (Vuln 3)', () => {
+describe('InfraStorageController.importStorage filePath validation', () => {
   function buildController(storage: Partial<{ importFromStream: jest.Mock; getCurrentStorageType: jest.Mock }>) {
     return new InfraStorageController(storage as never);
   }
@@ -246,9 +246,9 @@ describe('InfraStorageController storage stream failures surface as request erro
   });
 });
 
-// C002: the infra module exposed sensitive ADMIN operations (credential config write, restart/Docker
-// orchestration, full-DB + storage export/import) with no audit trail. Each now emits an AuditAction.
-describe('InfraStorageController C002 audit trail (light-dependency handlers)', () => {
+// The infra module's sensitive ADMIN operations (credential config write, restart/Docker
+// orchestration, full-DB + storage export/import) must leave an audit trail — each emits an AuditAction.
+describe('InfraStorageController audit trail (light-dependency handlers)', () => {
   const makeAudit = (): { logInfo: jest.Mock } => ({ logInfo: jest.fn().mockResolvedValue(null) });
 
   // Positional constructor: (storageService, auditService?). auditService is the last @Optional arg.

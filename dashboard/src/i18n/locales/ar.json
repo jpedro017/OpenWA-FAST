@@ -150,7 +150,8 @@
       "orLabel": "أو",
       "post": "نشر",
       "posted": "تم نشر الحالة",
-      "postFailed": "تعذر نشر الحالة"
+      "postFailed": "تعذر نشر الحالة",
+      "imageFile": "صورة الحالة"
     },
     "channels": {
       "notSupported": "القنوات غير مدعومة على محرك Baileys.",
@@ -168,9 +169,17 @@
       "markRead": "فشل تعليم المحادثة كمقروءة",
       "send": "فشل إرسال الرسالة",
       "react": "فشل التفاعل مع الرسالة",
-      "delete": "فشل حذف الرسالة"
+      "delete": "فشل حذف الرسالة",
+      "fileTooLarge": "الملف كبير جدًا (الحد الأقصى 18 ميغابايت)"
     },
-    "loadMessagesError": "تعذّر تحميل الرسائل. تحقّق من سجلّات الخادم."
+    "loadMessagesError": "تعذّر تحميل الرسائل. تحقّق من سجلّات الخادم.",
+    "messageStatus": {
+      "pending": "قيد الانتظار",
+      "sent": "تم الإرسال",
+      "delivered": "تم التسليم",
+      "read": "تمت القراءة",
+      "failed": "فشل"
+    }
   },
   "errorBoundary": {
     "title": "حدث خطأ ما",
@@ -301,7 +310,9 @@
       "phone": "رقم الهاتف",
       "phoneNone": "غير متصل",
       "created": "تاريخ الإنشاء",
-      "lastActive": "آخر نشاط"
+      "lastActive": "آخر نشاط",
+      "autoRejectCalls": "الرفض التلقائي للمكالمات",
+      "autoRejectCallsHint": "يتم رفض المكالمات الواردة فور رنينها. ولا يزال الويب هوك call.received يُرسل قبل ذلك. يسري على المكالمة التالية — دون الحاجة إلى إعادة التشغيل."
     },
     "actions": {
       "view": "عرض",
@@ -425,7 +436,10 @@
         "isNot": "ليس",
         "contains": "يحتوي على",
         "equals": "يساوي"
-      }
+      },
+      "fieldLabel": "حقل التصفية",
+      "operatorLabel": "عامل التصفية",
+      "valueLabel": "قيمة التصفية"
     },
     "columns": {
       "url": "الرابط",
@@ -506,7 +520,8 @@
       "deleted": "تم حذف القالب بنجاح",
       "deleteFailed": "فشل حذف القالب: {{message}}",
       "copied": "تم نسخ اسم القالب"
-    }
+    },
+    "sessionSelect": "الجلسة"
   },
   "apiKeys": {
     "title": "مفاتيح API",
@@ -578,7 +593,10 @@
     },
     "empty": {
       "title": "لا توجد سجلات",
-      "description": "ستظهر سجلات التدقيق هنا عند تنفيذ الإجراءات"
+      "description": "ستظهر سجلات التدقيق هنا عند تنفيذ الإجراءات",
+      "filteredTitle": "لا نتائج مطابقة في هذه الصفحة",
+      "filteredDescription": "يبحث حقل البحث في الصفحة الحالية فقط. امسحه أو تنقّل بين الصفحات أو استخدم مرشح الخطورة للتصفية من الخادم.",
+      "filteredServerDescription": "لا سجلات تطابق هذه المرشحات. عدّل مرشح الخطورة لتوسيع البحث."
     }
   },
   "messageTester": {
@@ -794,6 +812,8 @@
       "export": "تصدير البيانات",
       "import": "استيراد البيانات",
       "exportFailed": "تعذّر تصدير البيانات",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "تعذّر استيراد البيانات",
       "importOk": "تمّ استيراد البيانات",
       "importConfirm": "سيؤدّي الاستيراد إلى استبدال جميع البيانات الحالية بالنسخة الاحتياطية ({{rows}} صفًّا). لا يمكن التراجع عن هذا الإجراء. هل تريد المتابعة؟",
@@ -837,6 +857,7 @@
     "installModal": {
       "title": "تثبيت إضافة",
       "hint": "ارفع إضافة معبّأة بصيغة .zip (تحتوي على manifest.json). تعمل في بيئة معزولة بعد تمكينها.",
+      "trustWarning": "تعمل الإضافات بكامل صلاحيات عملية البوابة — البيئة المعزولة تحتوي الأعطال فقط، لا الشيفرة الخبيثة. ثبّت فقط الإضافات التي تثق بها.",
       "choose": "اختر ملف .zip…",
       "tooLarge": "يتجاوز الملف الحد الأقصى البالغ 5 MB.",
       "catalogHint": "ثبّت مباشرة من كتالوج إضافات OpenWA. يتم جلب ملف .zip من جانب الخادم عبر حماية SSRF، ثم يُتحقق منه ويُشغَّل في وضع الحماية.",

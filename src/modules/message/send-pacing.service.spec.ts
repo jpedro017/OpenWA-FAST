@@ -15,7 +15,7 @@ import { MessageDirection, type Message } from './entities/message.entity';
 import type { Session } from '../session/entities/session.entity';
 import type { Repository } from 'typeorm';
 import type { ConfigService } from '@nestjs/config';
-import { MessageService } from './message.service';
+import { MessageSendService } from './message-send.service';
 import { BulkMessageService } from './bulk-message.service';
 import { StatusService } from '../status/status.service';
 import { CatalogService } from '../catalog/catalog.service';
@@ -299,17 +299,15 @@ describe('send paths consult the governor', () => {
     assertSendAllowed: jest.fn().mockRejectedValue(new HttpException({ code: SEND_PACING_LIMITED }, 429)),
   });
 
-  it('MessageService refuses before the plugin gate runs and before the engine is asked', async () => {
+  it('MessageSendService refuses before the plugin gate runs and before the engine is asked', async () => {
     const hookManager = { execute: jest.fn() };
     const engine = { sendTextMessage: jest.fn() };
     const pacing = refusing();
-    const service = new MessageService(
+    const service = new MessageSendService(
       { save: jest.fn() } as never,
       { isActive: () => true } as never,
       { get: () => engine, require: () => engine } as never,
-      {} as never,
       hookManager as never,
-      {} as never,
       {} as never,
       pacing as never,
     );
@@ -368,11 +366,16 @@ describe('send paths consult the governor', () => {
     };
     const service = new GroupService({ require: () => engine } as never, pacing as never);
 
-    await expect(service.addParticipants('s1', 'g@g.us', ['a@c.us', 'b@c.us'])).rejects.toBeInstanceOf(HttpException);
-    await expect(service.createGroup('s1', 'New', ['a@c.us'])).rejects.toBeInstanceOf(HttpException);
+    // Addressable ids on purpose: the participant guard runs BEFORE pacing, so a placeholder like
+    // `a@c.us` would 400 first and the governor would never be consulted — this test would then
+    // pass for the wrong reason while asserting nothing about pacing.
+    await expect(service.addParticipants('s1', 'g@g.us', ['628111111@c.us', '628222222@c.us'])).rejects.toBeInstanceOf(
+      HttpException,
+    );
+    await expect(service.createGroup('s1', 'New', ['628111111@c.us'])).rejects.toBeInstanceOf(HttpException);
 
-    expect(pacing.assertReachoutAllowed).toHaveBeenNthCalledWith(1, 's1', ['a@c.us', 'b@c.us']);
-    expect(pacing.assertReachoutAllowed).toHaveBeenNthCalledWith(2, 's1', ['a@c.us']);
+    expect(pacing.assertReachoutAllowed).toHaveBeenNthCalledWith(1, 's1', ['628111111@c.us', '628222222@c.us']);
+    expect(pacing.assertReachoutAllowed).toHaveBeenNthCalledWith(2, 's1', ['628111111@c.us']);
     expect(engine.addParticipants).not.toHaveBeenCalled();
     expect(engine.createGroup).not.toHaveBeenCalled();
   });

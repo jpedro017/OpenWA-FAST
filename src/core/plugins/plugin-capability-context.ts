@@ -3,14 +3,14 @@ import { AsyncLocalStorage } from 'async_hooks';
 import type { HookManager, HookEvent } from '../hooks';
 import type { LidMappingStore } from '../../engine/identity/lid-mapping-store.service';
 import type { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
-import { toNeutralJid, userPart } from '../../engine/identity/wa-id';
+import { toNeutralJid } from '../../engine/identity/wa-id';
 import { ConversationMappingConflict } from '../../modules/integration/conversation-mapping.service';
 import { createLogger } from '../../common/services/logger.service';
-import type { MessageService } from '../../modules/message/message.service';
 import { isPluginActiveForSession, resolvePluginConfig } from './plugin-activation';
 import { effectiveNetAllow, isNetHostAllowed, performPluginFetch } from './plugin-net';
 import { buildConversationSendFacade, type ConversationMediaType } from './conversation-send-facade';
 import { PluginHostServices } from './plugin-host-services';
+import type { PluginMessagePort } from './plugin-host-ports';
 import { PluginStorageService } from './plugin-storage.service';
 import {
   PluginCapabilityError,
@@ -25,6 +25,7 @@ import {
   type PluginMappingsCapability,
   type PluginMessagingCapability,
   type PluginNetCapability,
+  type PluginStorage,
 } from './plugin.interfaces';
 
 /**
@@ -34,7 +35,7 @@ import {
  * compile error here rather than a silent runtime fall-through.
  */
 export function dispatchConversationMedia(
-  svc: Pick<MessageService, 'sendImage' | 'sendVideo' | 'sendAudio' | 'sendDocument'>,
+  svc: Pick<PluginMessagePort, 'sendImage' | 'sendVideo' | 'sendAudio' | 'sendDocument'>,
   sessionId: string,
   opts: { chatId: string; url: string; type: ConversationMediaType; caption?: string },
 ): Promise<unknown> {
@@ -88,11 +89,18 @@ export class PluginCapabilityContext {
    * use a capability whose permission string it declares in `manifest.permissions`; anything else
    * (including a manifest with no permissions) is denied. Runs first in each capability verb so a
    * missing grant fails fast and uniformly as a PluginCapabilityError.
+   *
+   * The message names the fix, not just the fault. A denial surfaces mid-run — the capability is
+   * checked when the verb is called, not at load — so it reaches the operator as a log line detached
+   * from whatever upgrade caused it, and it is the only text about the problem that arrives at the
+   * same time as the symptom. Naming `permissions` in the plugin's manifest.json turns "why is this
+   * plugin broken" into a one-line edit.
    */
   private assertPermission(manifest: PluginManifest, permission: PluginCapabilityPermission): void {
     if (!(manifest.permissions ?? []).includes(permission)) {
       throw new PluginCapabilityError(
-        `Plugin ${manifest.id} is missing the '${permission}' permission required for this capability`,
+        `Plugin ${manifest.id} is missing the '${permission}' permission required for this capability. ` +
+          `Add "${permission}" to the "permissions" array in the plugin's manifest.json, then reload the plugin.`,
       );
     }
   }
@@ -135,7 +143,7 @@ export class PluginCapabilityContext {
    */
   private resolveEngine(plugin: PluginInstance, sessionId: string): IWhatsAppEngine {
     this.assertSessionActive(plugin, sessionId);
-    const engine = this.hostServices.getSessionService().getEngine(sessionId);
+    const engine = this.hostServices.getSessionPort().getEngine(sessionId);
     if (!engine) {
       throw new PluginCapabilityError(`Session ${sessionId} has no active engine (unknown or not started)`);
     }
@@ -157,7 +165,7 @@ export class PluginCapabilityContext {
    */
   private async isSessionGone(sessionId: string): Promise<boolean> {
     try {
-      await this.hostServices.getSessionService().findOne(sessionId);
+      await this.hostServices.getSessionPort().findOne(sessionId);
       return false;
     } catch (error) {
       return error instanceof NotFoundException;
@@ -180,7 +188,7 @@ export class PluginCapabilityContext {
       },
       hookManager: this.hookManager,
       logger: this.buildPluginLogger(plugin),
-      storage: this.pluginStorage.createPluginStorage(plugin.manifest.id),
+      storage: this.buildStorageCapability(plugin),
       registerHook: (event, handler, priority) => {
         // Wrap with the per-session activation gate so an in-process plugin only handles events for
         // the sessions it is activated for (mirrors the sandboxed shim), and scope the firing
@@ -238,12 +246,12 @@ export class PluginCapabilityContext {
         // assertSessionActive.
         this.assertPermission(plugin.manifest, PluginCapabilityPermission.MESSAGES_SEND);
         this.resolveEngine(plugin, sessionId);
-        return this.hostServices.getMessageService().sendText(sessionId, { chatId, text });
+        return this.hostServices.getMessagePort().sendText(sessionId, { chatId, text });
       },
       reply: async (sessionId, chatId, quotedMessageId, text) => {
         this.assertPermission(plugin.manifest, PluginCapabilityPermission.MESSAGES_SEND);
         this.resolveEngine(plugin, sessionId);
-        return this.hostServices.getMessageService().reply(sessionId, { chatId, quotedMessageId, text });
+        return this.hostServices.getMessagePort().reply(sessionId, { chatId, quotedMessageId, text });
       },
     } satisfies PluginMessagingCapability;
   }
@@ -269,9 +277,62 @@ export class PluginCapabilityContext {
         // itself is a synchronous host lid->phone lookup, not an engine call, mirroring the webhook
         // from-filter. Not `async` (nothing to await) — a resolved promise satisfies the signature.
         this.resolveEngineRead(plugin, sessionId);
-        return Promise.resolve(toNeutralJid(chatId, jid => this.lidMappingStore?.getCached(userPart(jid)) ?? null));
+        return Promise.resolve(toNeutralJid(chatId, jid => this.lidMappingStore?.resolveLid(jid) ?? null));
       },
     } satisfies PluginEngineReadCapability;
+  }
+
+  /**
+   * Per-plugin persistence, behind the permission its manifest must declare. The gate goes on all
+   * four verbs rather than on the factory, because the sandbox bridge routes a worker's `storage.*`
+   * through this same object — gating only the in-process handle would leave the sandboxed path,
+   * the one that actually runs untrusted code, ungated.
+   *
+   * No session gate: storage is keyed by plugin, not by session, so there is no session to check.
+   *
+   * Every verb is `async` so a denial arrives as a REJECTION. The backing implementation in
+   * PluginStorageService never throws synchronously — an unsafe key and an exceeded quota both come
+   * back as a rejected promise — so a synchronous gate would have been the only sync throw on this
+   * surface, escaping a plugin that handles failure with `.catch()` alone and taking down the caller
+   * instead of failing the capability.
+   */
+  private buildStorageCapability(plugin: PluginInstance): PluginStorage {
+    const storage = this.pluginStorage.createPluginStorage(plugin.manifest.id);
+    const gate = (): void => this.assertPermission(plugin.manifest, PluginCapabilityPermission.STORAGE_USE);
+    return {
+      get: async <T = unknown>(key: string): Promise<T | null> => {
+        gate();
+        return storage.get<T>(key);
+      },
+      set: async <T = unknown>(key: string, value: T): Promise<void> => {
+        gate();
+        return storage.set<T>(key, value);
+      },
+      delete: async (key: string): Promise<void> => {
+        gate();
+        return storage.delete(key);
+      },
+      list: async (prefix?: string): Promise<string[]> => {
+        gate();
+        return storage.list(prefix);
+      },
+    } satisfies PluginStorage;
+  }
+
+  /**
+   * Config of every ENABLED instance of a plugin, for the outbound-host allowlist. A disabled
+   * instance is not a tenant the operator is running, so its host is not admitted.
+   *
+   * Best-effort: a plugin may be loaded in a host that exposes no instance service (and the store
+   * can fail), and neither is a reason to refuse a fetch the base config already allows.
+   */
+  private async enabledInstanceConfigs(pluginId: string): Promise<Record<string, unknown>[]> {
+    try {
+      const rows = await this.hostServices.getPluginInstancePort().list(pluginId);
+      return rows.filter(row => row.enabled).map(row => row.config ?? {});
+    } catch {
+      return [];
+    }
   }
 
   private buildNetCapability(plugin: PluginInstance): PluginNetCapability {
@@ -284,7 +345,16 @@ export class PluginCapabilityContext {
         // rather than resolving a single, possibly wrong (base-only), one. The SSRF guard inside
         // performPluginFetch still blocks internal IPs even when the host is allowlisted.
         this.assertPermission(plugin.manifest, PluginCapabilityPermission.NET_FETCH);
-        const netConfigs = [plugin.config ?? {}, ...Object.values(plugin.sessionConfig ?? {})];
+        const netConfigs = [
+          plugin.config ?? {},
+          ...Object.values(plugin.sessionConfig ?? {}),
+          // The instance rows, because the scope-keyed store above holds only the LAST instance
+          // projected onto a scope. Dispatch hands each instance its own config, so without this a
+          // second instance sharing that scope is told to call a host the allowlist never saw and
+          // its fetch is refused — a config that is correct and unusable. Same policy as the slice:
+          // an operator-provisioned tenant host, still gated by allowConfigHosts and the SSRF guard.
+          ...(await this.enabledInstanceConfigs(plugin.manifest.id)),
+        ];
         const allow = [
           ...new Set(
             netConfigs.flatMap(cfg =>
@@ -314,7 +384,7 @@ export class PluginCapabilityContext {
           );
         }
         const mapping = await this.hostServices
-          .getConversationMappingService()
+          .getConversationMappingPort()
           .getByProvider(plugin.manifest.id, env.instanceId, env.source.externalConversationId);
         if (!mapping) {
           throw new PluginCapabilityError(
@@ -334,7 +404,7 @@ export class PluginCapabilityContext {
           // dead session's rows bricked conversation.send permanently. A mapping owned by another
           // EXISTING session is a genuine cross-session violation and still throws.
           if (await this.isSessionGone(mapping.sessionId)) {
-            await this.hostServices.getConversationMappingService().rebindSession(mapping.id, env.sessionId);
+            await this.hostServices.getConversationMappingPort().rebindSession(mapping.id, env.sessionId);
             this.logger.warn(
               `Rebound conversation mapping for instance ${env.instanceId} / ${env.source.externalConversationId} ` +
                 `from deleted session ${mapping.sessionId} to ${env.sessionId}`,
@@ -357,10 +427,10 @@ export class PluginCapabilityContext {
         (events as HookEvent[]).some(e => this.hookManager.isInFlight(e))
           ? this.hookManager.runInFlight(events as HookEvent[], run)
           : run(),
-      sendText: (sessionId, opts) => this.hostServices.getMessageService().sendText(sessionId, opts),
-      reply: (sessionId, opts) => this.hostServices.getMessageService().reply(sessionId, opts),
-      sendMedia: (sessionId, opts) => dispatchConversationMedia(this.hostServices.getMessageService(), sessionId, opts),
-      sendLocation: (sessionId, opts) => this.hostServices.getMessageService().sendLocation(sessionId, opts),
+      sendText: (sessionId, opts) => this.hostServices.getMessagePort().sendText(sessionId, opts),
+      reply: (sessionId, opts) => this.hostServices.getMessagePort().reply(sessionId, opts),
+      sendMedia: (sessionId, opts) => dispatchConversationMedia(this.hostServices.getMessagePort(), sessionId, opts),
+      sendLocation: (sessionId, opts) => this.hostServices.getMessagePort().sendLocation(sessionId, opts),
     } satisfies Parameters<typeof buildConversationSendFacade>[0]) satisfies PluginConversationsCapability;
   }
 
@@ -371,7 +441,7 @@ export class PluginCapabilityContext {
         // it reuses CONVERSATION_SEND rather than adding a new permission.
         this.assertPermission(plugin.manifest, PluginCapabilityPermission.CONVERSATION_SEND);
         this.assertSessionActive(plugin, key.sessionId);
-        const mapping = await this.hostServices.getConversationMappingService().get({
+        const mapping = await this.hostServices.getConversationMappingPort().get({
           sessionId: key.sessionId,
           chatId: key.chatId,
           pluginId: plugin.manifest.id,
@@ -382,7 +452,7 @@ export class PluginCapabilityContext {
             `Plugin ${plugin.manifest.id}: no conversation mapping for session ${key.sessionId} / chat ${key.chatId} / instance ${key.instanceId}`,
           );
         }
-        await this.hostServices.getConversationMappingService().setHandover(mapping.id, state);
+        await this.hostServices.getConversationMappingPort().setHandover(mapping.id, state);
       },
     } satisfies PluginHandoverCapability;
   }
@@ -399,7 +469,7 @@ export class PluginCapabilityContext {
           instanceId: key.instanceId,
         };
         try {
-          await this.hostServices.getConversationMappingService().upsert(mappingKey, providerConversationId);
+          await this.hostServices.getConversationMappingPort().upsert(mappingKey, providerConversationId);
         } catch (error) {
           if (!(error instanceof ConversationMappingConflict)) throw error;
           // The reverse unique key is held by another row. If that row's session was DELETED
@@ -408,17 +478,17 @@ export class PluginCapabilityContext {
           // the stale row and retry once. A row owned by an EXISTING session is a genuine conflict
           // and rethrows.
           const stale = await this.hostServices
-            .getConversationMappingService()
+            .getConversationMappingPort()
             .getByProvider(plugin.manifest.id, key.instanceId, providerConversationId);
           if (!stale || !(await this.isSessionGone(stale.sessionId))) throw error;
-          await this.hostServices.getConversationMappingService().delete(stale.id);
-          await this.hostServices.getConversationMappingService().upsert(mappingKey, providerConversationId);
+          await this.hostServices.getConversationMappingPort().delete(stale.id);
+          await this.hostServices.getConversationMappingPort().upsert(mappingKey, providerConversationId);
         }
       },
       get: async key => {
         this.assertPermission(plugin.manifest, PluginCapabilityPermission.CONVERSATION_SEND);
         this.assertSessionActive(plugin, key.sessionId);
-        const m = await this.hostServices.getConversationMappingService().get({
+        const m = await this.hostServices.getConversationMappingPort().get({
           sessionId: key.sessionId,
           chatId: key.chatId,
           pluginId: plugin.manifest.id,
@@ -429,7 +499,7 @@ export class PluginCapabilityContext {
       getByProvider: async (instanceId, providerConversationId) => {
         this.assertPermission(plugin.manifest, PluginCapabilityPermission.CONVERSATION_SEND);
         const m = await this.hostServices
-          .getConversationMappingService()
+          .getConversationMappingPort()
           .getByProvider(plugin.manifest.id, instanceId, providerConversationId);
         // Parity with get/upsert: a plugin may only read a mapping for a session it is activated for.
         if (m) this.assertSessionActive(plugin, m.sessionId);

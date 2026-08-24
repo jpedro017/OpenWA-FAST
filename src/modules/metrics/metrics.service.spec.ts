@@ -114,3 +114,51 @@ describe('MetricsService', () => {
     });
   });
 });
+
+// The scrape had a hard runtime dependency on the data database: render() awaited
+// StatsService.getOverview() unguarded, so once the stats memo lapsed during a database problem
+// EVERY scrape answered 500 and Prometheus lost the whole target — including the process and HTTP
+// series that need no database at all, during the exact incident they exist for.
+describe('MetricsService.render survives a failing stats query', () => {
+  const healthyOverview: OverviewStats = {
+    sessions: { active: 2, total: 3, byStatus: { ready: 2, failed: 1 } },
+    messages: { sent: 100, received: 50, failed: 3, today: { sent: 10, received: 5 } },
+  };
+
+  const failing = (): MetricsService => {
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const stats = {
+      getOverview: jest.fn().mockRejectedValue(new Error('SQLITE_BUSY: database is locked')),
+    } as unknown as StatsService;
+    return new MetricsService(config, stats);
+  };
+
+  it('still serves the series that need no database', async () => {
+    const text = await failing().render();
+
+    expect(text).toContain('openwa_up 1');
+    expect(text).toContain('openwa_process_uptime_seconds');
+    expect(text).toContain('openwa_process_resident_memory_bytes');
+    expect(text).toContain('openwa_webhook_delivery_failures_total');
+  });
+
+  it('signals that the database-derived series are missing rather than reporting them as zero', async () => {
+    const text = await failing().render();
+
+    expect(text).toContain('openwa_stats_available 0');
+    // A stale or invented 0 would be worse than an absent series: an alert on
+    // openwa_sessions_active would fire as if every session had dropped.
+    expect(text).not.toContain('openwa_sessions_active');
+    expect(text).not.toContain('openwa_messages_total');
+  });
+
+  // Negative twin: a healthy scrape must still carry the database-derived series and say so.
+  it('reports the stats source as available on a healthy scrape', async () => {
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const stats = { getOverview: jest.fn().mockResolvedValue(healthyOverview) } as unknown as StatsService;
+    const text = await new MetricsService(config, stats).render();
+
+    expect(text).toContain('openwa_stats_available 1');
+    expect(text).toContain('openwa_sessions_active 2');
+  });
+});

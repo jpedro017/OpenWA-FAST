@@ -5,6 +5,7 @@ import { Loader2, Paperclip, Send, Smile, X } from 'lucide-react';
 import { messageApi, type Chat, type MessageType } from '../../services/api';
 import { mergeOrAppend, type ChatMessageView } from '../../utils/chatMessages';
 import { promoteChatWithSnippet } from '../../utils/chatList';
+import { buildMediaSendPayload, buildOptimisticMetadata, quotedIdOf } from '../../utils/composerSend';
 import { messagesQueryKey, useChatMessagesActions } from '../../hooks/useChatMessages';
 import { useRole } from '../../hooks/useRole';
 import { useToast } from '../../hooks/useToast';
@@ -18,6 +19,11 @@ const messageTypeFromMime = (mimetype: string): MessageType => {
   if (mimetype.startsWith('audio/')) return 'audio';
   return 'document';
 };
+
+// Client pre-check before base64-encoding an upload, same cap as the message tester: base64
+// inflates ~1.33x, so ~18 MiB raw stays under the backend's default 25 MiB body limit and the
+// pick fails here with a toast instead of OOMing the tab on the FileReader.
+const MEDIA_UPLOAD_MAX_BYTES = 18 * 1024 * 1024;
 
 /** A picked-but-unsent file, staged until send, removal, or a move to another chat. */
 export interface StagedAttachment {
@@ -111,7 +117,15 @@ function ChatComposer({
   // 5. Handle file selection & base64 conversion
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-picking the same file after a rejection or removal
     if (!file) return;
+
+    // Reject before base64-encoding: an oversized pick would inflate ~1.33x into the backend body
+    // cap, and the 413 only applies after the whole body is uploaded — surface the toast now.
+    if (file.size > MEDIA_UPLOAD_MAX_BYTES) {
+      showErrorToast(t('chats.errors.fileTooLarge'));
+      return;
+    }
 
     if (file.type.startsWith('image/')) {
       setPreviewUrl(URL.createObjectURL(file));
@@ -175,22 +189,7 @@ function ChatComposer({
       direction: 'outgoing',
       status: 'pending',
       createdAt: new Date().toISOString(),
-      metadata: attachment
-        ? {
-            media: {
-              mimetype: attachment.mimetype,
-              filename: attachment.filename,
-              data: attachment.base64,
-            },
-          }
-        : replyingTo
-          ? {
-              quotedMessage: {
-                id: replyingTo.waMessageId || replyingTo.id,
-                body: replyingTo.type !== 'text' ? `[${replyingTo.type}]` : replyingTo.body,
-              },
-            }
-          : undefined,
+      metadata: buildOptimisticMetadata(attachment, replyingTo),
     };
 
     appendMessage(selectedSessionId, activeChat.id, tempMessage);
@@ -211,16 +210,18 @@ function ChatComposer({
         else if (mime.startsWith('video/')) mediaType = 'video';
         else if (mime.startsWith('audio/')) mediaType = 'audio';
 
-        result = await messageApi.sendMedia(selectedSessionId, activeChat.id, mediaType, {
-          base64: currentAttachment.base64,
-          mimetype: currentAttachment.mimetype,
-          filename: currentAttachment.filename,
-          caption: mediaType !== 'audio' ? textToSend : undefined,
-        });
+        // A reply that carries an attachment takes this branch, so the quote has to travel with the
+        // media — the `else if` below never sees it.
+        result = await messageApi.sendMedia(
+          selectedSessionId,
+          activeChat.id,
+          mediaType,
+          buildMediaSendPayload(currentAttachment, mediaType !== 'audio' ? textToSend : undefined, currentReplyingTo),
+        );
       } else if (currentReplyingTo) {
         result = await messageApi.reply(selectedSessionId, {
           chatId: activeChat.id,
-          quotedMessageId: currentReplyingTo.waMessageId || currentReplyingTo.id,
+          quotedMessageId: quotedIdOf(currentReplyingTo)!,
           text: textToSend,
         });
       } else {
@@ -230,9 +231,9 @@ function ChatComposer({
       // Race guard: the realtime `message.sent` echo can arrive before this response and already
       // append the message by its real WA id (the dedup at receive time misses because the
       // optimistic placeholder still carries the temp id). If so, fold the placeholder INTO the
-      // echo's row via mergeOrAppend instead of just dropping it — the echo carries no media
-      // payload (engine parity marker), so dropping the placeholder would erase the attachment's
-      // base64 and leave a bare "📎 Media" bubble until the next refetch.
+      // echo's row via mergeOrAppend instead of just dropping it — the echo may carry no media
+      // payload (a Baileys API send echoes only a marker), so dropping the placeholder would erase
+      // the attachment's base64 and leave a bare "📎 Media" bubble until the next refetch.
       const sendKey = messagesQueryKey(selectedSessionId, activeChat.id);
       queryClient.setQueryData<ChatMessageView[]>(sendKey, (prev = []) => {
         const reconciled: ChatMessageView = {

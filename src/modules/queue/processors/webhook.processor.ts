@@ -10,8 +10,9 @@ import { WebhookJobData, WebhookPayload } from '../../webhook/webhook.service';
 import { Webhook } from '../../webhook/entities/webhook.entity';
 import { WebhookDeliveryFailure } from '../../webhook/entities/webhook-delivery-failure.entity';
 import { recordWebhookDeliveryFailure, statusCodeFromError } from '../../webhook/utils/record-delivery-failure';
+import { postWebhookPayload } from '../../webhook/utils/deliver-once';
 import { HookManager } from '../../../core/hooks';
-import { withSafeFetch, isSsrfProtectionEnabled, redactSsrfError } from '../../../common/security/ssrf-guard';
+import { redactSsrfError } from '../../../common/security/ssrf-guard';
 import { incrementWebhookDeliveryFailures } from '../../../common/metrics/webhook-delivery-metrics';
 
 export interface WebhookJobResult {
@@ -107,25 +108,15 @@ export class WebhookProcessor extends WorkerHost {
     requestHeaders: Record<string, string>,
   ): Promise<{ status: number; responseTime: number }> {
     const { url, payload, startTime } = ctx;
-    const { status, statusText, ok } = await withSafeFetch(
+    const { status } = await postWebhookPayload(
       url,
-      {
-        method: 'POST',
-        headers: requestHeaders,
-        body: JSON.stringify(payload),
-        // Honor WEBHOOK_TIMEOUT on the primary (queued) path too — not just the deprecated direct one.
-        signal: AbortSignal.timeout(this.configService.get<number>('webhook.timeout', 10000)),
-      },
-      response => ({ status: response.status, statusText: response.statusText, ok: response.ok }),
-      { guard: isSsrfProtectionEnabled() },
+      JSON.stringify(payload),
+      requestHeaders,
+      // Honor WEBHOOK_TIMEOUT on the primary (queued) path too — not just the deprecated direct one.
+      this.configService.get<number>('webhook.timeout', 10000),
     );
 
     const responseTime = Date.now() - startTime;
-
-    if (!ok) {
-      throw new Error(`HTTP ${status}: ${statusText}`);
-    }
-
     return { status, responseTime };
   }
 
@@ -223,7 +214,7 @@ export class WebhookProcessor extends WorkerHost {
         },
         { sessionId, source: 'WebhookProcessor' },
       );
-      await recordWebhookDeliveryFailure(this.failureRepository, this.logger, {
+      const recorded = await recordWebhookDeliveryFailure(this.failureRepository, this.logger, {
         webhookId,
         sessionId,
         event,
@@ -234,7 +225,9 @@ export class WebhookProcessor extends WorkerHost {
         lastStatusCode: statusCodeFromError(errorMessage),
         lastError: clientError,
       });
-      incrementWebhookDeliveryFailures();
+      if (recorded) {
+        incrementWebhookDeliveryFailures();
+      }
     }
   }
 
@@ -279,7 +272,7 @@ export class WebhookProcessor extends WorkerHost {
       { sessionId, source: 'WebhookProcessor' },
     );
 
-    await recordWebhookDeliveryFailure(this.failureRepository, this.logger, {
+    const recorded = await recordWebhookDeliveryFailure(this.failureRepository, this.logger, {
       webhookId,
       sessionId,
       event,
@@ -290,6 +283,8 @@ export class WebhookProcessor extends WorkerHost {
       lastStatusCode: null, // no HTTP exchange completed on the stalled attempts
       lastError: error.message,
     });
-    incrementWebhookDeliveryFailures();
+    if (recorded) {
+      incrementWebhookDeliveryFailures();
+    }
   }
 }

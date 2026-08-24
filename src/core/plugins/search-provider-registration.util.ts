@@ -1,14 +1,14 @@
 import { PluginSearchProvider } from '../../modules/search/providers/plugin-search-provider';
 import type { PluginSearchTransport } from '../../modules/search/providers/plugin-search-provider';
-import type { SearchProviderRegistry } from '../../modules/search/search-provider.registry';
+import type { PluginSearchRegistryPort } from './plugin-host-ports';
 
 export interface RegisterPluginSearchProviderDeps {
   pluginId: string;
   label: string;
   transport: PluginSearchTransport;
   timeoutMs: number;
-  /** The live SearchProviderRegistry, or undefined when the search module isn't loaded (SEARCH_ENABLED=false). */
-  registry: SearchProviderRegistry | undefined;
+  /** The live search registry port, or undefined when the search module isn't loaded (SEARCH_ENABLED=false). */
+  registry: PluginSearchRegistryPort | undefined;
   /** Resolved SEARCH_PROVIDER mode: 'auto' | 'builtin-fts' | 'none'. */
   mode: string;
   /** manifest declares search:provide */
@@ -51,6 +51,6 @@ export function registerPluginSearchProvider(deps: RegisterPluginSearchProviderD
 }
 
 /** Drop a plugin's SearchProvider entry on disable/uninstall so queries don't route to a dead worker. */
-export function unregisterPluginSearchProvider(registry: SearchProviderRegistry | undefined, pluginId: string): void {
+export function unregisterPluginSearchProvider(registry: PluginSearchRegistryPort | undefined, pluginId: string): void {
   registry?.unregister(`plugin:${pluginId}`);
 }

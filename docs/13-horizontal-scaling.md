@@ -474,6 +474,10 @@ spec:
 
 ### Deploy to Kubernetes
 
+The maintained chart is [`charts/openwa`](../charts/openwa), a single-instance StatefulSet that
+already encodes the `replicaCount: 1` constraint below; prefer it over hand-applied manifests. The
+raw manifests here stay for operators who do not use Helm.
+
 ```bash
 # Apply all manifests
 kubectl apply -f k8s/
@@ -649,7 +653,7 @@ groups:
 
 | Endpoint            | Purpose                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `/api/health`       | Basic health check — returns `status`, `timestamp`, `version`                                                |
+| `/api/health`       | Basic health check — returns `status` and `timestamp`; `version` only for an authenticated caller            |
 | `/api/health/live`  | Liveness probe (static `ok`; reflects process liveness only)                                                 |
 | `/api/health/ready` | Readiness probe — verifies the main + data databases respond (returns 503 while draining or if a DB is down) |
 

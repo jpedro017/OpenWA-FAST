@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { ConfigService } from '@nestjs/config';
 import { createLogger } from '../../common/services/logger.service';
 import { HookManager, HookEvent, KNOWN_HOOK_EVENTS, isKnownHookEvent } from '../hooks';
@@ -5,7 +6,7 @@ import { PluginCapabilityPermission, PluginContext, PluginInstance, PluginStatus
 import { PluginStorageService } from './plugin-storage.service';
 import { PluginHostServices } from './plugin-host-services';
 import { PluginCapabilityContext } from './plugin-capability-context';
-import { isPluginActiveForSession, resolvePluginConfig } from './plugin-activation';
+import { isPluginActiveForSession, resolveInstanceConfig, resolvePluginConfig } from './plugin-activation';
 import { PluginWorkerHost } from './sandbox/plugin-worker-host';
 import { dispatchCapabilityVerb } from './sandbox/capability-router';
 import { PluginLogLevel } from './sandbox/protocol';
@@ -183,13 +184,43 @@ export class PluginSandboxBridge {
     // explicitly configured with scheme:none is unauthenticated and must never be labelled verified.
     // Missing/hot-swapped route metadata fails closed.
     const verified = route ? route.signature.scheme !== 'none' : false;
-    const instance = await this.hostServices.getPluginInstanceService().resolve(d.pluginId, d.instanceId);
+    const instance = await this.hostServices.getPluginInstancePort().resolve(d.pluginId, d.instanceId);
+    // Three layers, most specific last: the base ('*') config, then the operator's per-session
+    // override from PUT /plugins/:id/sessions/:sessionId/config, then THIS instance's own config.
+    // The instance layer is what keeps two instances sharing one session scope apart — provisioning
+    // projects both onto the same scope key, so the scope-keyed store alone would hand a delivery
+    // whichever instance was provisioned last. It applies even for a non-session-scoped plugin,
+    // whose instances are otherwise indistinguishable here.
+    //
+    // PRECEDENCE NOTE: this puts the instance row above the operator's per-session override from
+    // PUT /plugins/:id/sessions/:sessionId/config, for the keys the instance itself defines. That is
+    // deliberate and cannot be otherwise: provisioning PROJECTS each instance's config into the
+    // scope-keyed store, so for two instances sharing a scope that slice holds whichever was written
+    // last — applying it on top would hand a delivery the other tenant's credentials again. The
+    // override still decides every key the instance does not define, and still decides everything on
+    // the hook path. To change an instance's own config, use the instance route.
+    // The scope slice is consulted only while it can be ATTRIBUTED to this instance. Layering the row
+    // on top corrects the keys the row defines; every key it leaves unset — the normal shape when an
+    // instance relies on a plugin default — falls through to that slice, which for two instances
+    // sharing a scope holds the other tenant's projected value. So a sparse row was still handed a
+    // sibling's live endpoint or token.
+    //
+    // KNOWN RESIDUE: a WILDCARD instance is projected into the BASE config instead
+    // (scope-binding.service.ts, `updatePluginConfig`), and that merge is not separable per instance
+    // by design — its own comment says so. Attribution there needs the projection re-keyed by
+    // instance, which is a storage change, not a resolution one.
+    const scopeIsAttributable = await this.scopeHasAtMostOneInstance(d.pluginId, instance?.sessionScope ?? undefined);
     const config = plugin
-      ? resolvePluginConfig(
-          plugin.config,
-          plugin.sessionConfig,
-          instance?.sessionScope ?? undefined,
-          plugin.manifest.sessionScoped !== false,
+      ? resolveInstanceConfig(
+          scopeIsAttributable
+            ? resolvePluginConfig(
+                plugin.config,
+                plugin.sessionConfig,
+                instance?.sessionScope ?? undefined,
+                plugin.manifest.sessionScoped !== false,
+              )
+            : plugin.config,
+          instance?.config,
         )
       : undefined;
     const result = await host.dispatchWebhook({
@@ -212,6 +243,35 @@ export class PluginSandboxBridge {
   }
 
   /**
+   * Whether the scope-keyed config slice can be attributed to the instance being dispatched.
+   *
+   * Provisioning projects each instance's config into that slice keyed by SCOPE, so with siblings it
+   * holds whichever was written last and says nothing about whose delivery this is. With one enabled
+   * instance it is either that instance's own projection or an operator's deliberate per-session
+   * override — both of which must keep applying, so a single-instance deployment is unchanged.
+   *
+   * A lookup failure is treated as NOT attributable: the instance's own config still applies, and the
+   * cost of being wrong that way is a missing default rather than another tenant's credential.
+   */
+  private async scopeHasAtMostOneInstance(pluginId: string, scope: string | undefined): Promise<boolean> {
+    if (!scope) return false;
+    try {
+      const rows = await this.hostServices.getPluginInstancePort().list(pluginId);
+      return rows.filter(row => row.enabled && row.sessionScope === scope).length <= 1;
+    } catch (error) {
+      // Logged rather than swallowed: this drops the operator's per-session override for the
+      // deliveries it affects, and a silent config change is exactly what made the original
+      // collapse hard to see.
+      this.logger.warn('Could not count instances on the scope; withholding the per-session config slice', {
+        pluginId,
+        scope,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  /**
    * Untrusted enable: load the plugin in an isolated worker and drive its lifecycle there. Capability
    * calls and hooks round-trip to the host, which enforces permission + session scope. A failure
    * tears the worker back down.
@@ -224,7 +284,15 @@ export class PluginSandboxBridge {
     // than repeated on each way a generation can end.
     this.lastSandboxHookError.delete(pluginId);
     // Containment guard: reject a manifest.main that escapes the plugin dir.
-    const mainPath = this.resolvePluginMainPath(this.pluginsDir, pluginId, plugin.manifest.main);
+    // Anchored to the directory the package was loaded from, which is not necessarily
+    // <plugins.dir>/<id>: the loader also scans the legacy plugins directory, and the worker's
+    // require() of a path in the wrong tree fails with MODULE_NOT_FOUND.
+    const packageDir = plugin.packageDir ?? path.join(this.pluginsDir, pluginId);
+    const mainPath = this.resolvePluginMainPath(
+      path.dirname(packageDir),
+      path.basename(packageDir),
+      plugin.manifest.main,
+    );
     // The capability dispatcher runs a worker request through the SAME context an in-process plugin
     // gets, so permission + session-scope checks (assertPermission / assertSessionActive) apply
     // identically. The worker can only ask; the host is the gatekeeper.
@@ -276,7 +344,7 @@ export class PluginSandboxBridge {
       // Drop a search provider registered mid-onEnable before the failure: without this, a plugin that
       // registers then throws leaves a dead provider as the ACTIVE registry entry in auto mode, so every
       // /search routes to a terminated worker → outage. Mirrors disablePlugin's cleanup.
-      unregisterPluginSearchProvider(this.hostServices.getSearchRegistry(), pluginId);
+      unregisterPluginSearchProvider(this.hostServices.getSearchRegistryPort(), pluginId);
       await host.terminate().catch(() => undefined);
       throw error;
     }
@@ -380,7 +448,7 @@ export class PluginSandboxBridge {
               const chatId = (hookCtx.data as { chatId?: string } | undefined)?.chatId;
               if (chatId && hookCtx.sessionId) {
                 const handover = await this.hostServices
-                  .getConversationMappingService()
+                  .getConversationMappingPort()
                   .findHandoverForChat(hookCtx.sessionId, chatId);
                 if (!shouldDispatchToPlugin(handover, pluginId)) return { continue: true };
               }
@@ -481,7 +549,7 @@ export class PluginSandboxBridge {
         label: `${plugin.manifest.name} (plugin)`,
         transport: liveHost,
         timeoutMs: SANDBOX_SEARCH_TIMEOUT_MS,
-        registry: this.hostServices.getSearchRegistry(),
+        registry: this.hostServices.getSearchRegistryPort(),
         mode: this.configService.get<string>('search.provider', 'auto'),
         hasPermission: (plugin.manifest.permissions ?? []).includes(PluginCapabilityPermission.SEARCH_PROVIDE),
         warn: (message, meta) => this.logger.warn(message, meta),
@@ -512,7 +580,7 @@ export class PluginSandboxBridge {
       // Always release the search-provider slot so the registry can fall back to builtin-fts. On a crash
       // this is the only cleanup; on a deliberate disable/enable-failure the explicit unregister already
       // ran, making this a harmless no-op.
-      unregisterPluginSearchProvider(this.hostServices.getSearchRegistry(), pluginId);
+      unregisterPluginSearchProvider(this.hostServices.getSearchRegistryPort(), pluginId);
       if (intentional) return; // routine disable/enable-failure already logged and expected
       // Unexpected crash after a successful enable: the worker is gone. Drop the dead host +
       // unregister the hook shims (so they don't keep dispatching into the dead worker) + mark the

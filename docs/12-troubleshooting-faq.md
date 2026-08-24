@@ -250,13 +250,13 @@ Proxy egress (if WhatsApp is blocked on your network) is configured **per sessio
 unreachable proxy silently blocks the WhatsApp WebSocket (see the _No QR code appears, or `/start`
 returns `504`_ entry below).
 
-### Issue: No QR code appears, or `POST /api/sessions/:id/start` returns `504`
+### Issue: No QR code appears, or `POST /api/sessions/:sessionId/start` returns `504`
 
 **Symptoms:**
 
-- `POST /api/sessions/:id/start` returns `504 Gateway Timeout`
+- `POST /api/sessions/:sessionId/start` returns `504 Gateway Timeout`
   (`WhatsApp Web authentication timed out...`)
-- No QR code is ever produced — `GET /api/sessions/:id/qr` never has one
+- No QR code is ever produced — `GET /api/sessions/:sessionId/qr` never has one
 - Engine log shows `Session engine failed: auth timeout` after ~30s
 
 **Cause:** The session was created with a `proxyUrl` that doesn't resolve to a real, reachable proxy
@@ -278,10 +278,10 @@ curl -X POST "$BASE/api/sessions" -H "X-API-Key: $API_KEY" -H "Content-Type: app
 
 ### Issue: Session stuck at `authenticating`, never reaches `ready`
 
-> **Engine:** This issue applies to the `whatsapp-web.js` engine only. If you are using `ENGINE_TYPE=baileys`, skip this section.
+> **Engine:** This stall applies to the `whatsapp-web.js` engine only. Baileys also reports `authenticating`, but only for the seconds between WhatsApp accepting the link and the restart it requests; it cannot park there, so if you are using `ENGINE_TYPE=baileys`, skip this section.
 
 **Symptoms:** After scanning the QR the phone links the device, but the session stays at
-`authenticating` indefinitely and never becomes `ready`. `GET /sessions/:id/qr` returns 400 while
+`authenticating` indefinitely and never becomes `ready`. `GET /sessions/:sessionId/qr` returns 400 while
 stuck. Often seen on ARM64 (e.g. Raspberry Pi) after upgrading to v0.2.x.
 
 **Cause:** whatsapp-web.js auto-selects a WhatsApp Web client version, and an incompatible version
@@ -294,12 +294,14 @@ environment still hits a WA-Web compatibility hang, pin a known-good WA-Web vers
 `WWEBJS_WEB_VERSION`:
 
 ```bash
-# Optional workaround:
-WWEBJS_WEB_VERSION=2.3000.1040641150-alpha
+# Optional workaround — substitute a build that the registry currently serves:
+WWEBJS_WEB_VERSION=<a build from that registry's html/ folder>
 ```
 
-Restart the container after changing it. Browse newer versions at
-[wppconnect-team/wa-version](https://github.com/wppconnect-team/wa-version) (the `html/` folder). With
+Restart the container after changing it. Pick the build from
+[wppconnect-team/wa-version](https://github.com/wppconnect-team/wa-version) (the `html/` folder) — a
+build the registry no longer serves is fetched, missed, and silently ignored, leaving you on the
+default behaviour rather than the pin you asked for. With
 `WWEBJS_WEB_VERSION` unset, `latest`, or `auto` (the default), OpenWA auto-resolves a settled build
 from that registry and pins its HTML — note this HTML is fetched from a third-party repository and
 executed inside the `web.whatsapp.com` origin without an integrity check. Set
@@ -509,7 +511,11 @@ once, so the session stops instead of being silently unlinked by WhatsApp about 
 > a container stops Chromium launching at all). If your deployment does get a
 > localised modal, it is **not** auto-dismissed and the session never reaches `action_required` —
 > instead it links normally, then drops to `disconnected` with reason `LOGOUT` a few minutes later and
-> the device disappears from the phone's Linked devices list. Because that path wipes the stored
+> the device disappears from the phone's Linked devices list. That miss is no longer silent: when the
+> watcher finds a visible dialog it cannot match, it logs a warning (`action:
+onboarding_dialog_unrecognized`) carrying the dialog's heading and button labels — the label to add
+> via `WWEBJS_ONBOARDING_CONTINUE_LABELS`, and the heading worth reporting — minutes before the unlink
+> would happen. Because that path wipes the stored
 > credentials, the automatic reconnect comes back with a fresh QR on its own, so the session is
 > usually already sitting at `qr_ready` rather than needing a manual start. Acknowledge the modal once
 > in a browser signed in as that account, then scan the QR. It does not recur — the modal is shown
@@ -522,8 +528,8 @@ once, so the session stops instead of being silently unlinked by WhatsApp about 
 > that warning, the page is gone and the stop → start below is required rather than optional.
 
 **Fix:** acknowledge the modal once (open WhatsApp Web in the account holder's own browser and click
-through the "What's new" screen), **then restart the session** (`POST /sessions/:id/stop` →
-`POST /sessions/:id/start`). Acknowledging alone does not return the session to `ready` — the status
+through the "What's new" screen), **then restart the session** (`POST /sessions/:sessionId/stop` →
+`POST /sessions/:sessionId/start`). Acknowledging alone does not return the session to `ready` — the status
 is deliberately sticky — but the restart re-drives the engine from the stored credentials, so no new
 QR scan is needed. If the modal never actually appeared (a false trip is possible but rare), the
 same stop → start clears it.
@@ -682,6 +688,11 @@ BODY_SIZE_LIMIT=25mb
 # is refused with 415 — the aggregate in-flight cap counts bytes on the wire, so a compressed
 # body would be admitted small and then inflated past the memory that cap exists to bound.
 
+# Note: one client IP may hold at most half the aggregate in-flight budget, and is refused with
+# 503 + Retry-After past that even while the gateway as a whole has room. Behind a reverse proxy,
+# set TRUSTED_PROXIES: without it every caller resolves to the proxy's own address and shares a
+# single half, which looks like a 503 at half the budget you configured.
+
 # Supported formats
 # Images: jpg, jpeg, png, gif, webp
 # Videos: mp4, 3gp
@@ -713,11 +724,20 @@ curl -X POST http://localhost:2785/api/sessions/{id}/messages/send-image \
 **Diagnostic:**
 
 ```bash
-# Check webhook configuration
+# Check webhook configuration — `active` must be true, `events` must list the event (or "*"),
+# and `filters` must not exclude it. `lastTriggeredAt` stays null until a real 2xx delivery:
+# the Test button never sets it, so a green Test proves nothing about real events.
 curl -H "X-API-Key: $API_KEY" \
   http://localhost:2785/api/sessions/{sessionId}/webhooks
 
-# No webhook-delivery log API — check the server logs / audit trail instead
+# Abandoned deliveries, most recent first: those that exhausted every retry, plus those never
+# attempted at all (recorded with `attempts: 0`). Requires an ADMIN key — an OPERATOR key gets
+# a 403, which reads like the endpoint does not exist. Rows older than
+# WEBHOOK_FAILURE_RETENTION_DAYS (default 90) are pruned.
+curl -H "X-API-Key: $ADMIN_API_KEY" \
+  "http://localhost:2785/api/webhooks/delivery-failures?sessionId={sessionId}&limit=20"
+
+# Attempts still in flight (not yet exhausted) appear only in the server logs:
 docker compose logs openwa-api 2>&1 | grep -i webhook
 
 # Test webhook endpoint
@@ -727,6 +747,12 @@ curl -X POST http://your-webhook-url \
 ```
 
 **Solutions:**
+
+Read the two lists together before changing anything. A delivery-failure row carrying an HTTP
+`lastStatusCode` means the gateway delivered and your receiver rejected it — fix the receiver. An
+empty list with `lastTriggeredAt` still null means nothing has ever been delivered and nothing has
+permanently failed: the event either never matched this webhook (`active`, `events`, `filters`) or
+was never emitted for the session at all.
 
 Webhooks are rows created through the API — there is no webhook config file:
 
@@ -750,6 +776,35 @@ variables:
 WEBHOOK_TIMEOUT=10000      # per-attempt HTTP timeout in ms (default 10000)
 WEBHOOK_RETRY_DELAY=5000   # base retry backoff in ms (default 5000)
 ```
+
+### Issue: An inbound sender arrives as an `@lid` id instead of a phone number
+
+**Symptoms:**
+
+- `message.received` carries `from` (or `author`, in a group) as `162878178984075@lid` rather than `628123456789@c.us`
+- The number cannot be matched against your own contact records, and replies have to be addressed by the `@lid` id
+- `contact.number` on the payload repeats the lid digits, so it is not the phone number either
+
+**Cause:** WhatsApp identifies some accounts by a privacy id (`@lid`) instead of their phone number,
+and the message itself carries no phone number to read. Mapping one back costs a lookup against the
+engine, so the gateway does not do it on every message unless you ask for it.
+
+**Solution:**
+
+```bash
+# Resolve a single id on demand — works whether or not the flag below is set
+curl -H "X-API-Key: $API_KEY" \
+  http://localhost:2785/api/sessions/{sessionId}/contacts/{contactId}/phone
+
+# Or have every inbound message carry it: adds `senderPhone` to the message.received webhook
+# and the websocket event. Set it in the `.env` next to docker-compose.yml (both compose files
+# already forward the variable), then restart the process — an env change is not picked up by a
+# session reload.
+RESOLVE_LID_TO_PHONE=true
+```
+
+`senderPhone` is `null` when the engine cannot map the id — an `@lid` the account has never seen has
+no mapping to return. Both engines support the lookup.
 
 ## 12.5 Performance Issues
 
@@ -995,6 +1050,13 @@ docker exec openwa-api curl http://host.docker.internal:8080
 >
 > With `ENGINE_TYPE=baileys` (browser-free), RAM per session is significantly lower — you can run more sessions on the same hardware. Exact figures depend on message volume and group membership.
 
+**Q: Can I run 10+ sessions in one container? Will they get banned for sharing one IP?**
+
+> A: Yes — there is no hard session limit; the practical ceiling is RAM/CPU (see the table above). Sharing one IP across sessions is not itself a ban trigger: carrier NAT already puts hundreds of ordinary users on a single IP, so WhatsApp cannot treat a shared IP as a violation. Ten sessions on one residential IP behave like ten phones on one home WiFi. What actually matters:
+>
+> - **IP reputation** — cheap datacenter IPs are flagged more aggressively than residential ones. A residential proxy (per-session, via the proxy settings) can help; it is not a license to spam.
+> - **Sending behavior** — bans follow message patterns (volume, identical templates, cold reachouts), not session count. See "How to avoid getting banned?" below.
+
 **Q: Can I use WhatsApp Business account?**
 
 > A: Yes, OpenWA works with both personal and WhatsApp Business accounts. Note that WhatsApp Business API (official Meta API) is different and not supported.
@@ -1016,7 +1078,7 @@ docker exec openwa-api curl http://host.docker.internal:8080
 ```bash
 # Get group list
 curl -H "X-API-Key: $API_KEY" \
-  http://localhost:2785/api/sessions/{id}/groups
+  http://localhost:2785/api/sessions/{sessionId}/groups
 
 # Send to group
 curl -X POST http://localhost:2785/api/sessions/{id}/messages/send-text \
@@ -1077,6 +1139,16 @@ server {
     }
 }
 ```
+
+**Then set `TRUSTED_PROXIES` in your `.env`.** With it empty, OpenWA correctly refuses to trust the
+spoofable `X-Forwarded-For` header, which has a side effect worth knowing: every client appears as
+the proxy's address, so ALL traffic shares one rate-limit bucket (a single abuser rate-limits
+everyone) and per-key IP allowlists (`allowedIps`) evaluate the proxy for every caller. Name the
+proxy to key limits per client. For the bundled compose (whose published port traverses Docker's
+NAT, so the container sees the bridge gateway, not 127.0.0.1) use the compose network subnet, e.g.
+`TRUSTED_PROXIES=172.18.0.0/16`; a bare-metal nginx talking to the process directly can name
+`127.0.0.1`. OpenWA logs a one-time warning at the first proxied request when the header is present
+but the list is empty.
 
 **Q: How to run behind Traefik / Coolify?**
 
@@ -1164,6 +1236,7 @@ available_events:
   - group.join # Participant(s) added/joined
   - group.leave # Participant(s) left/removed
   - group.update # Group subject/description/announce/locked changed
+  - group.join_request # Someone asked to join a group this session administers
 
   # Calls
   - call.received # Incoming call ringing (payload: callId, from, isVideo, isGroup, timestamp)

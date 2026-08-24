@@ -12,9 +12,10 @@ import { type WwebjsEngineHost } from './wwebjs-host';
 
 /**
  * Message-domain client events (message, message_create, ack, revoke, reaction, edit) extracted
- * from the adapter's setupEventHandlers: pure mapping from wwebjs payloads to neutral events fired
+ * from the adapter's event wiring: pure mapping from wwebjs payloads to neutral events fired
  * through the engine callbacks. Connection-state events (qr/authenticated/ready/disconnected/
- * auth_failure) stay in the adapter — they drive the lifecycle latches this file never touches.
+ * auth_failure) stay in the lifecycle module (./wwebjs-lifecycle) — they drive the lifecycle
+ * latches this file never touches.
  */
 export function registerWwebjsMessageEvents(client: Client, host: WwebjsEngineHost): void {
   // eslint-disable-next-line @typescript-eslint/no-misused-promises

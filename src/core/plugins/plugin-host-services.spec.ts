@@ -5,11 +5,11 @@ import type { ModuleRef } from '@nestjs/core';
 const hostServices = (get: jest.Mock): PluginHostServices => new PluginHostServices({ get } as unknown as ModuleRef);
 
 describe('PluginHostServices', () => {
-  describe('getSearchRegistry', () => {
+  describe('getSearchRegistryPort', () => {
     it('returns the registry when ModuleRef has it', () => {
       const registry = new SearchProviderRegistry();
 
-      expect(hostServices(jest.fn().mockReturnValue(registry)).getSearchRegistry()).toBe(registry);
+      expect(hostServices(jest.fn().mockReturnValue(registry)).getSearchRegistryPort()).toBe(registry);
     });
 
     it('returns undefined when ModuleRef has no registry (search disabled)', () => {
@@ -19,7 +19,7 @@ describe('PluginHostServices', () => {
         throw new Error('not found');
       });
 
-      expect(hostServices(get).getSearchRegistry()).toBeUndefined();
+      expect(hostServices(get).getSearchRegistryPort()).toBeUndefined();
     });
   });
 });

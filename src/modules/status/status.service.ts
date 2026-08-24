@@ -10,8 +10,14 @@ import { SendPacingService, countsTowardSendBreaker } from '../message/send-paci
 /** Stored status media is only ever an image, a video or a voice note; a sender-declared mimetype
  * outside that is served as inert octet-stream so the media endpoint can't be turned into active
  * content (HTML/JS) on the API origin. Audio belongs here because a voice status is a first-class
- * status type — without it the dashboard's audio player is handed an octet-stream it cannot play. */
+ * status type — without it the dashboard's audio player is handed an octet-stream it cannot play.
+ * `image/svg+xml` is excluded despite the image/ prefix: SVG is scriptable, so serving it with its
+ * declared Content-Type would make the endpoint stored-XSS material — same exclusion the chat-media
+ * path applies. The stored mimetype is engine-reported verbatim, so the exclusion matches what a
+ * browser will parse it as: MIME parameters (`;charset=…`) and trailing whitespace are stripped by
+ * the Content-Type parser, and `image/svg+xml;charset=utf-8` still renders as SVG. */
 const SAFE_STATUS_MIMETYPE = /^(image|video|audio)\//;
+const SCRIPTABLE_SVG_MIMETYPE = /^image\/svg\+xml\s*(;|$)/;
 
 @Injectable()
 export class StatusService {
@@ -76,7 +82,10 @@ export class StatusService {
     }
     try {
       const buffer = await this.storageService.getFile(media.path);
-      const mimetype = SAFE_STATUS_MIMETYPE.test(media.mimetype) ? media.mimetype : 'application/octet-stream';
+      const mimetype =
+        SAFE_STATUS_MIMETYPE.test(media.mimetype) && !SCRIPTABLE_SVG_MIMETYPE.test(media.mimetype)
+          ? media.mimetype
+          : 'application/octet-stream';
       return { buffer, mimetype };
     } catch (error) {
       // The row outlived its file: purgeExpired (or a concurrent delete) removed it between the

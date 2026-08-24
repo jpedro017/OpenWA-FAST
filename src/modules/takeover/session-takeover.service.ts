@@ -1,9 +1,11 @@
 import { ConflictException, Injectable, OnApplicationBootstrap, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { setTimeout } from 'node:timers/promises';
 import { createLogger } from '../../common/services/logger.service';
 import { resolveFeatureFlags } from '../../config/feature-flags';
 import { Session, SessionStatus } from '../session/entities/session.entity';
 import { SessionOwnershipService } from '../session/session-ownership.service';
+import { ShutdownService } from '../../common/services/shutdown.service';
 import { SessionService } from '../session/session.service';
 import { BulkMessageService } from '../message/bulk-message.service';
 
@@ -43,6 +45,14 @@ export class SessionTakeoverService implements OnApplicationBootstrap, OnModuleD
   private readonly logger = createLogger('SessionTakeoverService');
   private sweepTimer?: ReturnType<typeof setInterval>;
   private sweepInFlight = false;
+  /**
+   * Set by onModuleDestroy. Clearing the interval stops the NEXT sweep; it does nothing about one
+   * already running, which is neither aborted nor awaited. Without this signal a sweep mid-flight
+   * during a rolling restart could construct and register an engine after the shutdown path had
+   * already emptied the registry — nothing would tear it down — and claim the ownership lease for a
+   * process about to exit, pinning the session to a dead node until the lease lapsed.
+   */
+  private shuttingDown = false;
 
   constructor(
     private readonly sessionService: SessionService,
@@ -50,7 +60,18 @@ export class SessionTakeoverService implements OnApplicationBootstrap, OnModuleD
     private readonly bulkMessages: BulkMessageService,
     @Optional()
     private readonly configService?: ConfigService,
+    // The drain signal, not module destruction. `onModuleDestroy` runs at app.close(), AFTER the
+    // bounded shutdown delay — throughout that window the timer is still armed, so without this a
+    // tick could launch an engine and claim an ownership lease for a process about to exit. Same
+    // source session-engine-lifecycle and the liveness watchdog already consult.
+    @Optional()
+    private readonly shutdownService?: ShutdownService,
   ) {}
+
+  /** True once EITHER the drain has begun or Nest has torn this module down. */
+  private get stopping(): boolean {
+    return this.shuttingDown || this.shutdownService?.isShuttingDown() === true;
+  }
 
   onApplicationBootstrap(): void {
     // The same flag that governs boot auto-start: a deployment that opted out of automatic engine
@@ -76,6 +97,7 @@ export class SessionTakeoverService implements OnApplicationBootstrap, OnModuleD
   }
 
   onModuleDestroy(): void {
+    this.shuttingDown = true;
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer);
       this.sweepTimer = undefined;
@@ -84,12 +106,17 @@ export class SessionTakeoverService implements OnApplicationBootstrap, OnModuleD
 
   /** One pass: adopt every eligible lapsed session. Exposed for the spec; the timer drives it. */
   async sweep(): Promise<void> {
+    if (this.stopping) return;
     const lapsed = await this.ownership.lapsedHeldByOthers();
     const eligible = lapsed.filter(session => this.isEligible(session));
     if (eligible.length === 0) return;
 
     for (let i = 0; i < eligible.length; i++) {
       const session = eligible[i];
+      // Re-checked per iteration, not just at entry: each adoption costs a browser launch plus a
+      // stagger, so the loop spans a large part of the sweep interval and shutdown can begin partway
+      // through. Everything already adopted is left to the normal teardown; nothing further starts.
+      if (this.stopping) return;
       try {
         await this.sessionService.start(session.id);
         this.logger.log(`Adopted session ${session.name} from lapsed node ${session.nodeId ?? '?'}`, {
@@ -112,7 +139,7 @@ export class SessionTakeoverService implements OnApplicationBootstrap, OnModuleD
         }
       }
       if (i < eligible.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, TAKEOVER_START_STAGGER_MS));
+        await setTimeout(TAKEOVER_START_STAGGER_MS);
       }
     }
   }

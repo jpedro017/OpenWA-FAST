@@ -142,7 +142,8 @@
       "orLabel": "ou",
       "post": "Publicar",
       "posted": "Status publicado",
-      "postFailed": "Não foi possível publicar o status"
+      "postFailed": "Não foi possível publicar o status",
+      "imageFile": "Imagem do status"
     },
     "channels": {
       "notSupported": "Os canais não são compatíveis com o mecanismo Baileys.",
@@ -157,9 +158,17 @@
       "markRead": "Erro ao marcar o chat como lido",
       "send": "Erro ao enviar a mensagem",
       "react": "Erro ao reagir à mensagem",
-      "delete": "Erro ao excluir a mensagem"
+      "delete": "Erro ao excluir a mensagem",
+      "fileTooLarge": "O arquivo é muito grande (máx. 18 MB)"
     },
-    "loadMessagesError": "Não foi possível carregar as mensagens. Verifique os registros do servidor."
+    "loadMessagesError": "Não foi possível carregar as mensagens. Verifique os registros do servidor.",
+    "messageStatus": {
+      "pending": "Pendente",
+      "sent": "Enviado",
+      "delivered": "Entregue",
+      "read": "Lido",
+      "failed": "Falhou"
+    }
   },
   "errorBoundary": {
     "title": "Algo deu errado",
@@ -290,7 +299,9 @@
       "phone": "Número de telefone",
       "phoneNone": "Não conectado",
       "created": "Criado em",
-      "lastActive": "Última atividade"
+      "lastActive": "Última atividade",
+      "autoRejectCalls": "Rejeitar chamadas automaticamente",
+      "autoRejectCallsHint": "As chamadas recebidas são recusadas assim que tocam. O webhook call.received continua sendo enviado antes. Vale a partir da próxima chamada — sem reiniciar."
     },
     "actions": {
       "view": "Ver",
@@ -410,7 +421,10 @@
         "isNot": "não é",
         "contains": "contém",
         "equals": "é igual a"
-      }
+      },
+      "fieldLabel": "Campo do filtro",
+      "operatorLabel": "Operador do filtro",
+      "valueLabel": "Valor do filtro"
     },
     "columns": {
       "url": "URL",
@@ -518,7 +532,10 @@
     },
     "empty": {
       "title": "Nenhum registro encontrado",
-      "description": "Os registros de auditoria aparecerão aqui quando ações forem realizadas"
+      "description": "Os registros de auditoria aparecerão aqui quando ações forem realizadas",
+      "filteredTitle": "Nenhuma correspondência nesta página",
+      "filteredDescription": "A busca filtra apenas a página atual. Limpe-a, navegue pelas páginas ou use o filtro de severidade no servidor.",
+      "filteredServerDescription": "Nenhum log corresponde a estes filtros. Ajuste o filtro de severidade para ampliar a busca."
     }
   },
   "messageTester": {
@@ -662,7 +679,8 @@
       "deleted": "Modelo excluído com sucesso",
       "deleteFailed": "Erro ao excluir o modelo: {{message}}",
       "copied": "Nome do modelo copiado"
-    }
+    },
+    "sessionSelect": "Sessão"
   },
   "infrastructure": {
     "title": "Infraestrutura",
@@ -779,6 +797,8 @@
       "export": "Exportar dados",
       "import": "Importar dados",
       "exportFailed": "Não foi possível exportar os dados",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "Não foi possível importar os dados",
       "importOk": "Dados importados",
       "importConfirm": "A importação IRÁ SUBSTITUIR todos os dados atuais pelo backup ({{rows}} linhas). Isso não pode ser desfeito. Continuar?",
@@ -822,6 +842,7 @@
     "installModal": {
       "title": "Instalar um plugin",
       "hint": "Envie um plugin empacotado como .zip (com um manifest.json). É executado em modo isolado quando habilitado.",
+      "trustWarning": "Plugins são executados com todos os privilégios do processo do gateway — o modo isolado contém falhas, não código malicioso. Instale apenas plugins em que você confia.",
       "choose": "Escolha um arquivo .zip…",
       "tooLarge": "O arquivo excede o limite de 5 MB.",
       "catalogHint": "Instale diretamente do catálogo de plugins do OpenWA. O .zip é baixado no servidor através da proteção SSRF, depois validado e executado em sandbox.",

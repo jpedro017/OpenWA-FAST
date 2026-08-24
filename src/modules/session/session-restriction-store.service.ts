@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import type { AccountRestriction } from '../../engine/interfaces/whatsapp-engine.interface';
-import { setRestrictedSessionCount } from '../../common/metrics/session-restriction-metrics';
+import {
+  setRestrictedSessionCount,
+  registerRestrictedSessionRecount,
+} from '../../common/metrics/session-restriction-metrics';
 import { Session } from './entities/session.entity';
 
 /**
@@ -19,6 +22,22 @@ import { Session } from './entities/session.entity';
 @Injectable()
 export class SessionRestrictionStore {
   private readonly restrictions = new Map<string, AccountRestriction>();
+
+  constructor() {
+    // The mirrored gauge is refreshed on every mutation, but an expiry is not a mutation: a timelock
+    // that lapses on its own left the gauge claiming a session was restricted while get/size/attachTo
+    // all reported it was not. Registering the recount makes the gauge read what the API would say.
+    registerRestrictedSessionRecount(() => this.countInForce());
+  }
+
+  /** How many stored restrictions are still in force right now. */
+  private countInForce(): number {
+    let inForce = 0;
+    for (const sessionId of this.restrictions.keys()) {
+      if (this.inForce(sessionId)) inForce++;
+    }
+    return inForce;
+  }
 
   /**
    * Record a restriction the engine reported.
@@ -44,11 +63,7 @@ export class SessionRestrictionStore {
    * read says it is not.
    */
   private publishCount(): void {
-    let inForce = 0;
-    for (const sessionId of this.restrictions.keys()) {
-      if (this.inForce(sessionId)) inForce++;
-    }
-    setRestrictedSessionCount(inForce);
+    setRestrictedSessionCount(this.countInForce());
   }
 
   /** The restriction in force, if any. `attachTo` is the projection; this is the raw read. */

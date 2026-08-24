@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { invokeTool } from '../tool-invoker';
 import { sessionTools } from './session.tools';
 import type { AnyToolDescriptor } from '../tool-descriptor';
@@ -90,8 +91,39 @@ describe('sessionTools', () => {
       sessionId: 's1',
       chatId: '628111@c.us',
     });
-    expect(sendSeen).toHaveBeenCalledWith('s1', '628111@c.us');
+    expect(sendSeen).toHaveBeenCalledWith('s1', '628111@c.us', undefined);
     expect(out).toEqual({ success: true });
+  });
+
+  it('SessionMarkChatRead forwards the message ids it was given', async () => {
+    const sendSeen = jest.fn().mockResolvedValue(true);
+    await run(makeTools({ sendSeen } as unknown as SessionService).get('SessionMarkChatRead')!, {
+      sessionId: 's1',
+      chatId: '628111@c.us',
+      messageIds: ['M1', 'M2'],
+    });
+    expect(sendSeen).toHaveBeenCalledWith('s1', '628111@c.us', ['M1', 'M2']);
+  });
+
+  // The REST body rejects a whitespace-only id, and this path never sees that DTO: invokeTool parses
+  // the tool's own schema and calls the service directly, so an id the schema accepts is sent as a
+  // receipt key. Asserting the service was not reached is the point; a 400 that still delegated
+  // would leave the defect in place.
+  it('SessionMarkChatRead refuses a whitespace-only message id instead of sending it as a key', async () => {
+    const sendSeen = jest.fn().mockResolvedValue(true);
+    const tool = makeTools({ sendSeen } as unknown as SessionService).get('SessionMarkChatRead')!;
+
+    const failure = await run(tool, { sessionId: 's1', chatId: '628111@c.us', messageIds: ['  '] }).catch(
+      (e: unknown) => e,
+    );
+    expect(failure).toBeInstanceOf(BadRequestException);
+    expect(JSON.stringify((failure as BadRequestException).getResponse())).toContain('no whitespace');
+    expect(sendSeen).not.toHaveBeenCalled();
+
+    // Control: a well-formed id still reaches the service, so the refusal above is this rule and not
+    // a schema that turns everything away.
+    await run(tool, { sessionId: 's1', chatId: '628111@c.us', messageIds: ['3EB0C767D26B8A3F1A2B'] });
+    expect(sendSeen).toHaveBeenCalledWith('s1', '628111@c.us', ['3EB0C767D26B8A3F1A2B']);
   });
 
   it('SessionMarkChatUnread maps the markUnread result to a success field', async () => {

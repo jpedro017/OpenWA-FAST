@@ -7,6 +7,7 @@ import { AuditService } from '../../modules/audit/audit.service';
 import { AuditAction } from '../../modules/audit/entities/audit-log.entity';
 import { KeyRateLimiter, readIpRateLimitConfig } from '../../modules/mcp/mcp-rate-limit';
 import { resolveClientIp } from '../utils/ip';
+import { setRequestActor } from '../services/request-context';
 
 /**
  * Protects the Bull Board UI (/admin/queues).
@@ -69,6 +70,16 @@ export class BullBoardAuthMiddleware implements NestMiddleware {
       }
 
       const apiKey = await this.authService.validateApiKey(rawKey, clientIp);
+
+      // Stamp the resolved actor before the two authorization checks below, matching ApiKeyGuard.
+      // Both of those throw, and the catch that audits the denial cannot see `apiKey` — it is a const
+      // inside this try. Without the stamp, a denial on the most privileged UI in the deployment was
+      // recorded against an IP alone, so the operator could not tell which key had tried to reach the
+      // queue dashboard without ADMIN, or which confined key had tried to escape its session fence.
+      // This mount runs inside the request-context scope (requestContextMiddleware is installed
+      // ahead of it in main.ts), so the stamp reaches AuditService.
+      setRequestActor({ apiKeyId: apiKey.id, apiKeyName: apiKey.name, ipAddress: clientIp });
+
       if (!this.authService.hasPermission(apiKey, ApiKeyRole.ADMIN)) {
         throw new ForbiddenException('Admin role required to access the queue dashboard');
       }

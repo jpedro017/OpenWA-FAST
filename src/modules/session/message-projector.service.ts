@@ -11,7 +11,7 @@ import { SessionLidResolver } from './session-lid-resolver.service';
 import { buildMessageMetadata, storableWaMessageId } from './message-row.mapper';
 import { MessageMutationProjector } from './message-mutation-projector';
 import { persistHistoryMessages } from './message-history-projector';
-import { isUniqueConstraintError } from '../../common/utils/unique-constraint.util';
+import { isUniqueViolation } from '../../common/utils/db-errors';
 import { resolveFeatureFlags } from '../../config/feature-flags';
 import { StatusStoreService } from '../status-store/status-store.service';
 import { ChatMediaArchiveService } from '../chat-media/chat-media-archive.service';
@@ -292,7 +292,7 @@ export class MessageProjector {
       Object.assign(dbMessage, result.identifiers[0] ?? {}, result.generatedMaps?.[0] ?? {});
       persisted = true;
     } catch (err) {
-      if (isUniqueConstraintError(err)) {
+      if (isUniqueViolation(err)) {
         isNewMessage = false;
       } else {
         this.logger.error(`Failed to save incoming message ${incoming.id} to database`, String(err));
@@ -421,7 +421,7 @@ export class MessageProjector {
             // Unique violation = the REST send path already persisted this API-originated send —
             // the dedup oracle working as intended, not an error. Anything else is a real DB
             // failure; fail open so a real send is never dropped on a transient DB fault.
-            if (!isUniqueConstraintError(err)) {
+            if (!isUniqueViolation(err)) {
               this.logger.error(`Failed to save outgoing message ${outgoing.id} to database`, String(err));
             }
           }
@@ -435,6 +435,14 @@ export class MessageProjector {
                 { sessionId: id, source: 'SessionService' },
               )
               .catch(() => undefined);
+
+            // Archive this send's media, mirroring onMessage. This is the ONLY path a phone-composed
+            // send takes, so the REST-side chokepoint would never see it. Opt-in twice over
+            // (CHAT_MEDIA_ARCHIVE_ENABLED + _OUTBOUND) and a no-op otherwise; archive() itself
+            // refuses a row that is already archived, so the REST writer racing us costs nothing.
+            if (this.configService?.get<boolean>('chatMedia.archiveOutbound', false) === true) {
+              void this.chatMediaArchive?.archive(dbMessage).catch(() => undefined);
+            }
           }
         }
 

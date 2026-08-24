@@ -122,9 +122,16 @@ Alongside that:
 - A single bulk request carries at most 100 messages (`@ArrayMaxSize(100)` on
   `SendBulkMessageDto.messages`); a 101st entry is rejected by the global `ValidationPipe` with HTTP 400.
 
-Not implemented: there are no per-minute / per-hour / per-day send caps, no media-specific delay and
-no new-number warmup enforcement. The guidelines below are operator discipline, not something the
-gateway enforces.
+Opt-in: `SEND_PACING_ENABLED=true` adds a per-UTC-day send cap whose allowance grows with the
+session's age (`SEND_PACING_WARMUP_SCHEDULE`), a separate cap on new conversations
+(`SEND_PACING_COLD_DAILY_CAP`) and a consecutive-failure breaker — see
+[06 §Send pacing](./06-api-specification.md). It is **off by default**, and it counts only sends that
+write a `messages` row, so status posts, catalog sends and message edits are checked against the cap
+without counting into it.
+
+Still not implemented: there are no per-minute or per-hour caps and no media-specific delay. With
+pacing off — the default — the guidelines below are operator discipline, not something the gateway
+enforces.
 
 **User Guidelines:**
 
@@ -305,7 +312,7 @@ Dependencies (`whatsapp-web.js`, Puppeteer, NestJS, etc.) may have vulnerabiliti
 
 **Mitigation Strategies:**
 
-> **Current state:** the real dependency check is a dedicated `audit` job in `ci.yml` running `npm audit --audit-level=high` (on push / PR — not on a daily schedule); it is deliberately split out of the `Lint` job so a newly published advisory cannot abort the other quality gates. `release.yml` repeats the same `npm audit --audit-level=high` and additionally runs a Trivy image scan (`CRITICAL,HIGH`, `ignore-unfixed`) against an explicit `.trivyignore` before the release tags are promoted. Dependabot PRs cover npm for `/` and `/dashboard` (weekly), GitHub Actions (monthly) and Docker base/compose images (weekly), with version-pinned ignores for `typescript >=7` and `better-sqlite3 >=13`. There is **no** standalone `security.yml` and **no** Snyk integration. The workflow below is a recommended enhancement to add scheduled scanning.
+> **Current state:** the real dependency check is a dedicated `audit` job in `ci.yml` running `npm run check:audit` over the root tree and `npm audit --audit-level=high` over `dashboard/` (on push / PR — not on a daily schedule); it is deliberately split out of the `Lint` job so a newly published advisory cannot abort the other quality gates. `check:audit` keeps the `high` threshold but applies it per advisory, so one with no patched version can be excused by id in `scripts/check-audit.mjs` — with its reason and removal condition recorded, and a stale entry failing the job — instead of lowering the bar for everything. `release.yml` repeats both and additionally runs a Trivy image scan (`CRITICAL,HIGH`, `ignore-unfixed`) against an explicit `.trivyignore` before the release tags are promoted. Dependabot PRs cover npm for `/` and `/dashboard` (weekly), GitHub Actions (monthly) and Docker base/compose images (weekly), with version-pinned ignores for `typescript >=7` and `better-sqlite3 >=13`. There is **no** standalone `security.yml` and **no** Snyk integration. The workflow below is a recommended enhancement to add scheduled scanning.
 
 ```yaml
 # .github/workflows/security.yml
@@ -334,15 +341,15 @@ jobs:
 
 **Dependency Management Policy:**
 
-| Action                                                        | Frequency                |
-| ------------------------------------------------------------- | ------------------------ |
-| npm audit (`--audit-level=high`, dedicated `audit` job in CI) | Every push / PR          |
-| Trivy image scan (`CRITICAL,HIGH`, `.trivyignore`)            | Every release            |
-| Snyk scan                                                     | Not configured (planned) |
-| Dependabot PRs (npm: `/` and `/dashboard`; docker)            | Weekly                   |
-| Dependabot PRs (github-actions)                               | Monthly                  |
-| Major updates                                                 | Reviewed manually        |
-| Security patches                                              | Immediate                |
+| Action                                                                                    | Frequency                |
+| ----------------------------------------------------------------------------------------- | ------------------------ |
+| npm audit (`high`, per-advisory allowlist via `check:audit`; dedicated `audit` job in CI) | Every push / PR          |
+| Trivy image scan (`CRITICAL,HIGH`, `.trivyignore`)                                        | Every release            |
+| Snyk scan                                                                                 | Not configured (planned) |
+| Dependabot PRs (npm: `/` and `/dashboard`; docker)                                        | Weekly                   |
+| Dependabot PRs (github-actions)                                                           | Monthly                  |
+| Major updates                                                                             | Reviewed manually        |
+| Security patches                                                                          | Immediate                |
 
 ---
 
@@ -544,9 +551,10 @@ The gateway enforces HTTP request throttling (`@nestjs/throttler`, registered gl
 | `SIMULATE_TYPING` / `SIMULATE_TYPING_MAX_MS`          | on / 5000 ms               | Typing pause, text sends only (`send-text` / `send-template`) |
 
 These bound API traffic and bulk pacing — they are **not** per-session WhatsApp send caps. The
-gateway does not count messages per minute, hour or day per session, so staying inside WhatsApp's
-undocumented limits remains the operator's responsibility. The thresholds below are targets for
-operator-side monitoring, not values the gateway enforces.
+gateway counts no messages per minute or hour, and counts per UTC day only when
+`SEND_PACING_ENABLED=true`, which is off by default; with it off, staying inside WhatsApp's
+undocumented limits remains entirely the operator's responsibility. The thresholds below are targets
+for operator-side monitoring, not values the gateway enforces.
 
 **Monitoring Metrics:**
 

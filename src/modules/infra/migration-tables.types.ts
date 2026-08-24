@@ -19,8 +19,10 @@ export interface WebhookRow {
   sessionId: string;
   url: string;
   events: string | string[];
-  secret: string | null;
-  headers: string | Record<string, string>;
+  // Credentials. export-data omits both (see exportData), so an exported row may not carry them;
+  // the importer restores them as null/{} in that case.
+  secret?: string | null;
+  headers?: string | Record<string, string>;
   filters: string | Record<string, unknown> | null;
   active: boolean | number;
   retryCount: number;
@@ -171,6 +173,20 @@ export interface WebhookDeliveryFailureRow {
   createdAt: string;
 }
 
+export interface WebhookOutboxEventRow {
+  id: string;
+  webhookId: string;
+  sessionId: string;
+  event: string;
+  idempotencyKey: string;
+  deliveryId: string;
+  payload: string | null;
+  state: string | null;
+  attempts: number;
+  lastAttemptAt: string | null;
+  createdAt: string;
+}
+
 export interface IntegrationDeliveryFailureRow {
   id: string;
   direction: string;
@@ -238,6 +254,7 @@ export interface MigrationTables {
   conversationMappings: ConversationMappingRow[];
   ingressEvents: IngressEventRow[];
   webhookDeliveryFailures: WebhookDeliveryFailureRow[];
+  webhookOutboxEvents: WebhookOutboxEventRow[];
   integrationDeliveryFailures: IntegrationDeliveryFailureRow[];
   statusUpdates: StatusUpdateRow[];
   automationRules: AutomationRuleRow[];

@@ -33,8 +33,11 @@ export class CreateApiKeyDto {
   allowedIps?: string[];
 
   @ApiPropertyOptional({
-    description: 'Allowed session IDs this key can access',
-    example: ['session-uuid-1', 'session-uuid-2'],
+    description:
+      'Session **ids** this key may act on — the server-generated UUIDs, not session names. Matched by ' +
+      'exact equality against the id in the request path, so a name never matches and would silently ' +
+      'scope the key to nothing. Omit or leave empty to let the key reach every session.',
+    example: ['0a941dac-a965-45e7-b318-74ae8be134f0', '8f3c2b1a-9d4e-4c7a-8b2f-1e6d5a4c3b2a'],
   })
   @IsOptional()
   @IsArray()
@@ -93,6 +96,15 @@ export class ApiKeyCreatedResponseDto extends ApiKeyResponseDto {
     example: 'owa_k1_abc123...',
   })
   apiKey!: string;
+}
+
+/** Result of `POST /auth/validate` — the guard's verdict on the presented key. */
+export class ValidateApiKeyResponseDto {
+  @ApiProperty({ description: 'Whether the presented API key is valid.', example: true })
+  valid!: boolean;
+
+  @ApiPropertyOptional({ enum: ApiKeyRole, description: "The key's role; present only when valid." })
+  role?: ApiKeyRole;
 }
 
 export class UpdateApiKeyDto {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, CornerUpLeft, Loader2, MessageSquare, Smile, Trash2 } from 'lucide-react';
-import type { Chat } from '../../services/api';
+import { sessionApi, type Chat } from '../../services/api';
 import { getMediaSrc, senderKey, type ChatMessageView } from '../../utils/chatMessages';
 import MessageBody from './MessageBody';
 
@@ -16,6 +16,8 @@ const senderColor = (name: string): string => {
 };
 
 interface ChatThreadProps {
+  /** Needed to fetch a message's media on demand; null before a session is chosen. */
+  sessionId: string | null;
   activeChat: Chat;
   messages: ChatMessageView[];
   loadingMessages: boolean;
@@ -33,6 +35,7 @@ interface ChatThreadProps {
 // scroll-position hook (its containerRef is handed down); reply/react/delete/lightbox intents go
 // back up as callbacks.
 function ChatThread({
+  sessionId,
   activeChat,
   messages,
   loadingMessages,
@@ -45,6 +48,47 @@ function ChatThread({
   onDelete,
 }: ChatThreadProps) {
   const { t } = useTranslation();
+
+  // Media the message list did not inline. The route serves the bytes as an attachment
+  // (Content-Disposition), and the list only carries payloads up to
+  // MESSAGE_LIST_INLINE_MEDIA_BUDGET_BYTES — past that a row arrives as `{ omitted: true }`. Without
+  // this fetch the placeholder is terminal: this thread requests the largest page size and caches it
+  // with staleTime Infinity, so an older attachment in a media-heavy chat has no other route to it.
+  // Keyed by message id, not one shared slot: a viewer can click a second placeholder before the
+  // first resolves, and each download owns its own lifecycle. Sharing one slot let the second click
+  // overwrite the first, after which whichever settled first cleared the other's state — re-enabling
+  // a button whose fetch was still open, and landing a failure marker on the wrong bubble.
+  const [mediaFetch, setMediaFetch] = useState<Record<string, 'loading' | 'failed'>>({});
+  const downloadMedia = useCallback(
+    async (message: ChatMessageView) => {
+      const messageId = message.waMessageId;
+      if (!sessionId || !messageId) return;
+      setMediaFetch(prev => ({ ...prev, [messageId]: 'loading' }));
+      let objectUrl: string | null = null;
+      try {
+        const blob = await sessionApi.getMessageMediaBlob(sessionId, activeChat.id, messageId);
+        objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        // The stored filename when there is one; the message id is a unique fallback that keeps two
+        // downloads from the same thread apart.
+        link.download = message.metadata?.media?.filename || messageId;
+        link.click();
+        setMediaFetch(prev => {
+          const next = { ...prev };
+          delete next[messageId];
+          return next;
+        });
+      } catch {
+        // 404 covers every "there are no bytes" case the route documents (URL-based send, media
+        // download disabled, over the inbound cap). Say so on the bubble rather than failing mutely.
+        setMediaFetch(prev => ({ ...prev, [messageId]: 'failed' }));
+      } finally {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      }
+    },
+    [sessionId, activeChat.id],
+  );
 
   // Scroll-to-bottom button visibility. The main scroll-position memory is owned by
   // useChatScrollPosition, which doesn't expose its pin state (intentionally — that would re-render
@@ -142,14 +186,7 @@ function ChatThread({
               const thumb = msg.body && msg.body.length > 100 ? `data:image/jpeg;base64,${msg.body}` : '';
               return (
                 <div className="message-location">
-                  {thumb && (
-                    <img
-                      src={thumb}
-                      alt=""
-                      onLoad={onMediaLoad}
-                      style={{ maxWidth: 220, borderRadius: 8, display: 'block', marginBottom: 4 }}
-                    />
-                  )}
+                  {thumb && <img src={thumb} alt="" onLoad={onMediaLoad} className="chat-location-media" />}
                   <span className="message-media-omitted">📍 {t('chats.media.location')}</span>
                 </div>
               );
@@ -171,7 +208,23 @@ function ChatThread({
             }
             if (!mediaInfo) return null;
             if (mediaInfo.omitted) {
-              return <div className="message-media-omitted">📎 {t('chats.media.omitted')}</div>;
+              // Not a plain label: the bytes exist behind the per-message media route, so this is the
+              // only handle the viewer has on them.
+              const fetchState = msg.waMessageId ? mediaFetch[msg.waMessageId] : undefined;
+              return (
+                <button
+                  type="button"
+                  className="message-media-omitted"
+                  onClick={() => void downloadMedia(msg)}
+                  disabled={!sessionId || !msg.waMessageId || fetchState === 'loading'}
+                >
+                  {fetchState === 'loading' ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : (
+                    <>📎 {t(fetchState === 'failed' ? 'chats.status.mediaUnavailable' : 'chats.media.omitted')}</>
+                  )}
+                </button>
+              );
             }
             const mediaSrc = getMediaSrc(mediaInfo);
             if (!mediaSrc) return null;
@@ -264,8 +317,16 @@ function ChatThread({
 
                   <div className="message-meta">
                     <span className="message-time">{formattedTime}</span>
+                    {/* delivered and read render the SAME glyph and differ only in colour, which
+                        carries the meaning nowhere a screen reader or a colour-blind reader can
+                        reach it. The status is spelled out for both. */}
                     {isMe && (
-                      <span className={`message-status-icon ${msg.status}`}>
+                      <span
+                        className={`message-status-icon ${msg.status}`}
+                        role="img"
+                        aria-label={t(`chats.messageStatus.${msg.status}`)}
+                        title={t(`chats.messageStatus.${msg.status}`)}
+                      >
                         {msg.status === 'pending' && '🕒'}
                         {msg.status === 'sent' && '✓'}
                         {msg.status === 'delivered' && '✓✓'}

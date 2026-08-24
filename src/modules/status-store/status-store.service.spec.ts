@@ -8,6 +8,7 @@ jest.mock('archiver', () => ({ default: jest.fn() }));
 
 import { StorageService } from '../../common/storage/storage.service';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
+import { userPart } from '../../engine/identity/wa-id';
 import { StatusUpdate } from './entities/status-update.entity';
 import { StatusStoreService } from './status-store.service';
 
@@ -408,14 +409,17 @@ describe('StatusStoreService contact identity (read-time lid resolution)', () =>
     fs.rmSync(baseDir, { recursive: true, force: true });
   });
 
-  const lidStore = (mappings: Record<string, string | null>): LidMappingStoreService =>
-    ({
-      getCached: (lid: string) => (lid in mappings ? mappings[lid] : undefined),
+  const lidStore = (mappings: Record<string, string | null>): LidMappingStoreService => {
+    const getCached = (lid: string): string | null | undefined => (lid in mappings ? mappings[lid] : undefined);
+    return {
+      getCached,
+      resolveLid: (jid: string) => getCached(userPart(jid)) ?? null,
       lidsForPhone: (phone: string) =>
         Object.entries(mappings)
           .filter(([, p]) => p === phone)
           .map(([l]) => l),
-    }) as unknown as LidMappingStoreService;
+    } as unknown as LidMappingStoreService;
+  };
 
   it('resolves a @lid contact to the mapped phone at read time, so both forms group together', async () => {
     const svc = new StatusStoreService(repository, storageService, fakeConfigService(), lidStore({ '111': '628111' }));

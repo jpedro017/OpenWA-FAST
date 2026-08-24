@@ -28,7 +28,7 @@ import { InfraStorageController } from './infra-storage.controller';
 import { REQUIRED_ROLE_KEY } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
 
-describe('Infra controllers access control (Vuln 2)', () => {
+describe('Infra controllers access control', () => {
   const reflector = new Reflector();
 
   // Every mutating, data-exfiltration, and operational-read endpoint must require
@@ -39,7 +39,7 @@ describe('Infra controllers access control (Vuln 2)', () => {
     [InfraConfigController, 'getConfig'], // GET  /infra/config (returns saved config; secrets omitted but still ADMIN-only)
     [InfraConfigController, 'saveConfig'], // PUT  /infra/config
     [InfraConfigController, 'requestRestart'], // POST /infra/restart
-    [InfraDataController, 'exportData'], // GET  /infra/export-data  (exposes webhook secrets)
+    [InfraDataController, 'exportData'], // GET  /infra/export-data  (dumps every data-DB table)
     [InfraDataController, 'importData'], // POST /infra/import-data  (DELETEs all rows)
     [InfraStorageController, 'exportStorage'], // GET  /infra/storage/export
     [InfraStorageController, 'importStorage'], // POST /infra/storage/import

@@ -14,10 +14,16 @@ import { readWsRateLimitConfig } from '../modules/events/ws-rate-limit';
  * from an unrelated string. Deriving both from one value is what keeps a plugin's code and its
  * registry entry in the same tree.
  *
- * Deliberately NOT env-overridable: every other data path (DATABASE_NAME, MAIN_DATABASE_NAME,
+ * There is deliberately no DATA_DIR knob: every other data path (DATABASE_NAME, MAIN_DATABASE_NAME,
  * SESSION_DATA_PATH, BAILEYS_AUTH_DIR, STORAGE_LOCAL_PATH) carries its own override and none of them
- * would follow a DATA_DIR knob, so such a knob would move part of the state while looking like it
- * moved all of it.
+ * would follow it, so a knob by that name would move part of the state while looking like it moved
+ * all of it.
+ *
+ * PLUGIN_STATE_DIR is that objection answered rather than repeated: this value reaches exactly one
+ * consumer, PluginStorageService, so the knob is named for the registry and per-plugin storage it
+ * actually moves and claims nothing about the rest of the tree. Without it the plugin registry is
+ * the one piece of state a test lane cannot redirect, which is why every e2e suite in a run shares
+ * one registry file and rewrites the developer's copy of it.
  */
 export const DEFAULT_DATA_DIR = './data';
 
@@ -74,7 +80,7 @@ export default () => ({
 
   // Root of the persistent state tree (see DEFAULT_DATA_DIR). Read by PluginStorageService for the
   // plugin registry and per-plugin storage; the other data paths keep their own env-specific keys.
-  dataDir: DEFAULT_DATA_DIR,
+  dataDir: process.env.PLUGIN_STATE_DIR || DEFAULT_DATA_DIR,
 
   // HTTP server timeouts (Node http.Server). Pinned explicitly so they are operator-tunable and
   // observable at boot rather than left at Node's implicit defaults. requestTimeout defaults to
@@ -374,6 +380,11 @@ export default () => ({
   chatMedia: {
     // Off by default: archiving doubles storage for media under the cap, since the inline copy stays.
     archiveEnabled: process.env.CHAT_MEDIA_ARCHIVE_ENABLED === 'true',
+    // Extend archiving to media this account SENT. A sub-flag rather than a mode of its own, so what
+    // it writes lands under the same prefix and is maintained by the same retention purge and orphan
+    // sweep. Off by default because it doubles storage again for the outbound half, and because a
+    // URL-based send stores no bytes to archive in the first place.
+    archiveOutbound: process.env.CHAT_MEDIA_ARCHIVE_OUTBOUND === 'true',
     // Per-file cap on archived chat media (default 25 MiB). Media above it is simply not archived —
     // the message row and its inline copy are unaffected.
     maxBytes: (() => {

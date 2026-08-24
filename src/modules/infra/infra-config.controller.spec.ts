@@ -28,7 +28,7 @@ import { validate } from 'class-validator';
 import { InfraConfigController } from './infra-config.controller';
 import { SaveConfigDto } from './dto/save-config.dto';
 import { AuditAction } from '../audit/entities/audit-log.entity';
-import { recordOsEnvKeys } from '../../config/env-precedence';
+import { recordOsEnvKeys, recordPinnedEnvKeys } from '../../config/env-precedence';
 
 describe('InfraConfigController.saveConfig SSL reject-unauthorized', () => {
   function writtenEnv(config: unknown): string {
@@ -1007,6 +1007,92 @@ describe('InfraConfigController.getConfig (#226)', () => {
   });
 });
 
+describe('InfraConfigController.getConfig reflects environment-pinned values (#1313)', () => {
+  // A compose `environment:` value outranks data/.env.generated at every boot, so the form must
+  // read it back instead of the first-run defaults the file still holds.
+  const newController = () => new InfraConfigController({} as never, {} as never, {} as never);
+  const PINNED_KEYS = ['ENGINE_TYPE', 'DATABASE_TYPE', 'REDIS_ENABLED', 'QUEUE_ENABLED'];
+  let savedEnv: Array<[string, string | undefined]>;
+
+  beforeEach(() => {
+    savedEnv = PINNED_KEYS.map(k => [k, process.env[k]]);
+    for (const k of PINNED_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const [k, v] of savedEnv) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    // Restore the permissive snapshot the rest of the file assumes (no snapshot = isEnvPinned
+    // false everywhere, which is what the other describes rely on).
+    recordPinnedEnvKeys(process.env);
+  });
+
+  it('reports host-provided engine/database/redis values over the first-run file defaults', () => {
+    // The exact #1313 deployment: everything set via compose environment:, no .env, and the
+    // first-run data/.env.generated holding sqlite/false with no ENGINE_TYPE line at all.
+    (fs.existsSync as jest.Mock).mockReturnValue(true);
+    (fs.readFileSync as jest.Mock).mockReturnValue('DATABASE_TYPE=sqlite\nREDIS_ENABLED=false\n');
+
+    process.env.ENGINE_TYPE = 'baileys';
+    process.env.DATABASE_TYPE = 'postgres';
+    process.env.REDIS_ENABLED = 'true';
+    recordPinnedEnvKeys(process.env);
+
+    const cfg = newController().getConfig();
+    (fs.existsSync as jest.Mock).mockReturnValue(false);
+    (fs.readFileSync as jest.Mock).mockReturnValue('');
+
+    expect(cfg.engine.type).toBe('baileys');
+    expect(cfg.database.type).toBe('postgres');
+    expect(cfg.redis.enabled).toBe(true);
+  });
+
+  it('a saved-but-not-yet-restarted file value wins over the stale process.env copy', () => {
+    // Boot loaded the OLD file value into process.env (override:false), then the dashboard saved a
+    // new one. The key is not pinned (it never came from the host or .env), so the freshly saved
+    // file must hydrate the form — otherwise it flips back to the pre-save value (#226/#1082).
+    recordPinnedEnvKeys({}); // the host supplied nothing; ENGINE_TYPE below came from the file
+    process.env.ENGINE_TYPE = 'whatsapp-web.js';
+    (fs.existsSync as jest.Mock).mockReturnValue(true);
+    (fs.readFileSync as jest.Mock).mockReturnValue('ENGINE_TYPE=baileys\n');
+
+    expect(newController().getConfig().engine.type).toBe('baileys');
+
+    (fs.existsSync as jest.Mock).mockReturnValue(false);
+    (fs.readFileSync as jest.Mock).mockReturnValue('');
+  });
+
+  it('a blank pinned forward counts as unset, so the file value applies', () => {
+    // Compose renders `- KEY=${KEY:-}` as an empty value when the operator set nothing; boot's
+    // clearBlankEnv treats it as unset, and the read must agree or the blank would shadow the file.
+    recordPinnedEnvKeys({ ENGINE_TYPE: '' });
+    process.env.ENGINE_TYPE = '';
+    (fs.existsSync as jest.Mock).mockReturnValue(true);
+    (fs.readFileSync as jest.Mock).mockReturnValue('ENGINE_TYPE=baileys\n');
+
+    expect(newController().getConfig().engine.type).toBe('baileys');
+
+    (fs.existsSync as jest.Mock).mockReturnValue(false);
+    (fs.readFileSync as jest.Mock).mockReturnValue('');
+  });
+
+  it('a blank pinned value on a key boot does NOT clear still wins as blank, mirroring the runtime read', () => {
+    // QUEUE_ENABLED is not blank-forwarded by compose, so clearBlankEnv leaves a blank host/.env
+    // value in place: configuration.ts's `process.env.QUEUE_ENABLED === 'true'` then reads false,
+    // and the form must agree instead of falling through to a contradicting file value.
+    recordPinnedEnvKeys({ QUEUE_ENABLED: '' });
+    process.env.QUEUE_ENABLED = '';
+    (fs.existsSync as jest.Mock).mockReturnValue(true);
+    (fs.readFileSync as jest.Mock).mockReturnValue('QUEUE_ENABLED=true\n');
+
+    expect(newController().getConfig().queue.enabled).toBe(false);
+
+    (fs.existsSync as jest.Mock).mockReturnValue(false);
+    (fs.readFileSync as jest.Mock).mockReturnValue('');
+  });
+});
+
 describe('InfraConfigController.requestRestart constrains teardown to managed profiles', () => {
   const buildController = (dockerService: Record<string, unknown>) =>
     new InfraConfigController(
@@ -1088,9 +1174,9 @@ describe('InfraConfigController.requestRestart constrains teardown to managed pr
   });
 });
 
-// C002: the infra module exposed sensitive ADMIN operations (credential config write, restart/Docker
-// orchestration, full-DB + storage export/import) with no audit trail. Each now emits an AuditAction.
-describe('InfraConfigController C002 audit trail (light-dependency handlers)', () => {
+// The infra module's sensitive ADMIN operations (credential config write, restart/Docker
+// orchestration, full-DB + storage export/import) must leave an audit trail — each emits an AuditAction.
+describe('InfraConfigController audit trail (light-dependency handlers)', () => {
   const makeAudit = (): { logInfo: jest.Mock } => ({ logInfo: jest.fn().mockResolvedValue(null) });
 
   // Positional constructor: (engineFactory, dockerService, shutdownService, auditService?).

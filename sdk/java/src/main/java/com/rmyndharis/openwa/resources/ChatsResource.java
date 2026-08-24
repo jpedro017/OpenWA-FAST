@@ -9,7 +9,11 @@ import com.rmyndharis.openwa.model.ChatPresence;
 import com.rmyndharis.openwa.model.ChatSummary;
 import com.rmyndharis.openwa.model.DeleteChatRequest;
 import com.rmyndharis.openwa.model.ListChatsQuery;
+import com.rmyndharis.openwa.model.MarkChatReadRequest;
 import com.rmyndharis.openwa.model.MarkChatRequest;
+import com.rmyndharis.openwa.model.SubscribePresenceRequest;
+import com.rmyndharis.openwa.model.MuteChatRequest;
+import com.rmyndharis.openwa.model.PinChatRequest;
 import com.rmyndharis.openwa.model.SendChatStateRequest;
 import com.rmyndharis.openwa.model.SuccessResult;
 import java.util.List;
@@ -47,7 +51,7 @@ public final class ChatsResource {
      * reconnect, so re-issue it when the session comes back. Subscribe per chat: WhatsApp emits an
      * update on every transition. whatsapp-web.js answers {@code 501}.
      */
-    public SuccessResult subscribePresence(String sessionId, MarkChatRequest body) {
+    public SuccessResult subscribePresence(String sessionId, SubscribePresenceRequest body) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/presence/subscribe",
@@ -70,7 +74,7 @@ public final class ChatsResource {
     }
 
     /** Mark a chat as read/seen. */
-    public SuccessResult markRead(String sessionId, MarkChatRequest body) {
+    public SuccessResult markRead(String sessionId, MarkChatReadRequest body) {
         return client.request(
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/read", null, body, SuccessResult.class);
     }
@@ -98,6 +102,27 @@ public final class ChatsResource {
     public SuccessResult archive(String sessionId, ArchiveChatRequest body) {
         return client.request(
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/archive", null, body, SuccessResult.class);
+    }
+
+    /**
+     * Pin a chat to the top of the list, or unpin it. A false success means WhatsApp declined —
+     * an account may pin only three chats at a time.
+     */
+    public SuccessResult pin(String sessionId, PinChatRequest body) {
+        return client.request(
+            HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/pin", null, body, SuccessResult.class);
+    }
+
+    /**
+     * Mute a chat until an absolute timestamp, or unmute it with a null {@code muteUntil}.
+     *
+     * <p>{@code muteUntil} is epoch MILLISECONDS. Passing seconds points at an instant in 1970, so
+     * the mute expires the moment it is set while the call still succeeds — nothing in the response
+     * distinguishes that from a mute that took effect.
+     */
+    public SuccessResult mute(String sessionId, MuteChatRequest body) {
+        return client.request(
+            HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/mute", null, body, SuccessResult.class);
     }
 
     /** Delete a chat from the chat list. */

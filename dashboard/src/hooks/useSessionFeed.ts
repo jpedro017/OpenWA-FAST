@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { RefObject } from 'react';
 import type { Session } from '../services/api';
 import { useWebSocket } from './useWebSocket';
@@ -40,14 +40,22 @@ export function useSessionFeed({
   // so the fallback runs after `subscribe` exists — the handler can't reference it directly).
   const [feedErrorFrame, setFeedErrorFrame] = useState<{ code: string } | null>(null);
 
-  const { isConnected, subscribe } = useWebSocket({
-    onQRCode,
-    onSessionStatus,
-    onSessionRestriction,
-    onServerError: useCallback((frame: { code: string }) => {
-      setFeedErrorFrame(frame);
-    }, []),
-  });
+  const handleServerError = useCallback((frame: { code: string }) => {
+    setFeedErrorFrame(frame);
+  }, []);
+
+  // The events object must be referentially stable: useWebSocket re-registers its socket handler
+  // on every identity change, so an inline literal would tear down and re-attach per render.
+  const wsEvents = useMemo(
+    () => ({
+      onQRCode,
+      onSessionStatus,
+      onSessionRestriction,
+      onServerError: handleServerError,
+    }),
+    [onQRCode, onSessionStatus, onSessionRestriction, handleServerError],
+  );
+  const { isConnected, subscribe } = useWebSocket(wsEvents);
 
   // Fold a server error frame into the feed state: a session-scoped key may not join the '*'
   // room — silently fall back to one subscription per listed session (the list endpoint is

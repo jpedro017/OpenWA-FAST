@@ -142,7 +142,8 @@
       "orLabel": "ou",
       "post": "Publier",
       "posted": "Statut publié",
-      "postFailed": "Impossible de publier le statut"
+      "postFailed": "Impossible de publier le statut",
+      "imageFile": "Image de statut"
     },
     "channels": {
       "notSupported": "Les chaînes ne sont pas prises en charge par le moteur Baileys.",
@@ -157,9 +158,17 @@
       "markRead": "Échec du marquage de la discussion comme lue",
       "send": "Échec de l'envoi du message",
       "react": "Échec de la réaction au message",
-      "delete": "Échec de la suppression du message"
+      "delete": "Échec de la suppression du message",
+      "fileTooLarge": "Le fichier est trop volumineux (max 18 Mo)"
     },
-    "loadMessagesError": "Impossible de charger les messages. Vérifiez les journaux du serveur."
+    "loadMessagesError": "Impossible de charger les messages. Vérifiez les journaux du serveur.",
+    "messageStatus": {
+      "pending": "En attente",
+      "sent": "Envoyé",
+      "delivered": "Remis",
+      "read": "Lu",
+      "failed": "Échec"
+    }
   },
   "errorBoundary": {
     "title": "Une erreur est survenue",
@@ -290,7 +299,9 @@
       "phone": "Numéro de téléphone",
       "phoneNone": "Non connecté",
       "created": "Créé le",
-      "lastActive": "Dernière activité"
+      "lastActive": "Dernière activité",
+      "autoRejectCalls": "Rejeter automatiquement les appels",
+      "autoRejectCallsHint": "Les appels entrants sont refusés dès qu'ils sonnent. Le webhook call.received est tout de même émis avant. S'applique au prochain appel — aucun redémarrage nécessaire."
     },
     "actions": {
       "view": "Voir",
@@ -410,7 +421,10 @@
         "isNot": "n'est pas",
         "contains": "contient",
         "equals": "est égal à"
-      }
+      },
+      "fieldLabel": "Champ de filtre",
+      "operatorLabel": "Opérateur de filtre",
+      "valueLabel": "Valeur de filtre"
     },
     "columns": {
       "url": "URL",
@@ -491,7 +505,8 @@
       "deleted": "Template supprimé avec succès",
       "deleteFailed": "Échec de la suppression du template : {{message}}",
       "copied": "Nom du template copié"
-    }
+    },
+    "sessionSelect": "Session"
   },
   "apiKeys": {
     "title": "Clés API",
@@ -563,7 +578,10 @@
     },
     "empty": {
       "title": "Aucun journal trouvé",
-      "description": "Les journaux d'audit apparaîtront ici au fur et à mesure des actions"
+      "description": "Les journaux d'audit apparaîtront ici au fur et à mesure des actions",
+      "filteredTitle": "Aucune correspondance sur cette page",
+      "filteredDescription": "La recherche ne filtre que la page actuelle. Effacez-la, naviguez entre les pages ou utilisez le filtre de gravité côté serveur.",
+      "filteredServerDescription": "Aucun journal ne correspond à ces filtres. Ajustez le filtre de gravité pour élargir la recherche."
     }
   },
   "messageTester": {
@@ -779,6 +797,8 @@
       "export": "Exporter les données",
       "import": "Importer les données",
       "exportFailed": "Impossible d'exporter les données",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "Impossible d'importer les données",
       "importOk": "Données importées",
       "importConfirm": "L'importation REMPLACERA toutes les données actuelles par la sauvegarde ({{rows}} lignes). Cette action est irréversible. Continuer ?",
@@ -822,6 +842,7 @@
     "installModal": {
       "title": "Installer un plugin",
       "hint": "Téléversez un plugin empaqueté au format .zip (avec un manifest.json). Il s'exécute en bac à sable une fois activé.",
+      "trustWarning": "Les plugins s'exécutent avec tous les privilèges du processus de la passerelle — le bac à sable contient les plantages, pas le code malveillant. N'installez que des plugins de confiance.",
       "choose": "Choisir un fichier .zip…",
       "tooLarge": "Le fichier dépasse la limite de 5 MB.",
       "catalogHint": "Installez directement depuis le catalogue de plugins OpenWA. Le .zip est récupéré côté serveur via la protection SSRF, puis validé et exécuté en sandbox.",
