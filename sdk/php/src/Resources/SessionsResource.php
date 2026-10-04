@@ -21,7 +21,7 @@ class SessionsResource
     }
 
     /**
-     * @param array<string,mixed> $query Optional pagination: `limit`, `offset`.
+     * @param array<string,mixed> $query Optional pagination `limit`, `offset`, and `name` for an exact, case-sensitive session name.
      *
      * @return array<int,array<string,mixed>>
      */
@@ -41,8 +41,9 @@ class SessionsResource
     }
 
     /**
-     * Update a RUNNING session's configuration — no re-link and no QR scan. All three fields were
-     * fixed at creation before this route existed.
+     * Update a session's configuration, in any state, without a restart, re-link or QR scan (all three
+     * fields were fixed at creation before this route existed). `autoRejectCalls` applies immediately;
+     * `maxReconnectAttempts` and `reconnectBaseDelay` apply on the next start.
      *
      * @param array<string,mixed> $body autoRejectCalls, maxReconnectAttempts, reconnectBaseDelay
      *
@@ -53,6 +54,28 @@ class SessionsResource
         return $this->http->request('PATCH', "/api/sessions/{$this->http->encodeSegment($id)}/config", [], $body);
     }
 
+    /**
+     * Read a session's masked proxy configuration (credentials never returned).
+     *
+     * @return array{enabled: bool, proxyType: ?string, proxyHost: ?string, hasCredentials: bool}
+     */
+    public function getProxy(string $id): array
+    {
+        return $this->http->request('GET', "/api/sessions/{$this->http->encodeSegment($id)}/proxy");
+    }
+
+    /**
+     * Update per-session proxy settings. No restart — changes apply on the next start.
+     * Send proxyUrl: null to clear. Unscoped ADMIN key required.
+     *
+     * @param array{proxyUrl?: ?string} $body
+     * @return array{enabled: bool, proxyType: ?string, proxyHost: ?string, hasCredentials: bool}
+     */
+    public function updateProxy(string $id, array $body): array
+    {
+        return $this->http->request('PATCH', "/api/sessions/{$this->http->encodeSegment($id)}/proxy", [], $body);
+    }
+
     /** @return array<string,mixed> */
     public function get(string $id): array
     {
@@ -60,11 +83,18 @@ class SessionsResource
     }
 
     /**
+     * Create a session. Requires an OPERATOR-level key; setting proxyUrl requires an ADMIN key.
+     *
      * @param array<string,mixed> $body
      * @return array<string,mixed>
      */
     public function create(array $body): array
     {
+        // config is a map: an empty PHP array would serialize as a JSON list [] and be rejected by the
+        // gateway's object validation. Cast the empty map to stdClass so it encodes as {}.
+        if (isset($body['config']) && $body['config'] === []) {
+            $body['config'] = new \stdClass();
+        }
         return $this->http->request('POST', '/api/sessions', [], $body);
     }
 
@@ -113,7 +143,15 @@ class SessionsResource
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($id)}/logout");
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Force-kill a stuck session (SIGKILL + teardown). Throws with HTTP 502 and
+     * getErrorCode() 'SESSION_FORCE_KILL_INCOMPLETE' when the session was stopped
+     * locally but the force-destroy threw or timed out, so the engine process may
+     * still be running; the status is settled to disconnected and a retry answers 400
+     * because no engine is left to kill. Restart the node to reap a leaked process.
+     *
+     * @return array<string,mixed>
+     */
     public function forceKill(string $id): array
     {
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($id)}/force-kill");

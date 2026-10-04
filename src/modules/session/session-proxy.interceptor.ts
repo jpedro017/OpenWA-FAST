@@ -19,8 +19,11 @@ import { SESSION_SCOPED_KEY } from '../auth/decorators/auth.decorators';
 import { createLogger } from '../../common/services/logger.service';
 import { normalizeIp } from '../../common/utils/ip';
 
-/** The request headers a forwarded call carries over. Everything else is this hop's business. */
-const FORWARDED_REQUEST_HEADERS = ['x-api-key', 'authorization', 'content-type', 'accept'] as const;
+/**
+ * The request headers a forwarded call carries over. Everything else is this hop's business.
+ * content-type is not among them: forward() sends every body as JSON and labels it so itself.
+ */
+const FORWARDED_REQUEST_HEADERS = ['x-api-key', 'authorization', 'accept'] as const;
 
 /** The response headers relayed back. Deliberately short: hop-by-hop headers must not leak through. */
 const RELAYED_RESPONSE_HEADERS = [
@@ -28,8 +31,9 @@ const RELAYED_RESPONSE_HEADERS = [
   'content-disposition',
   'x-content-type-options',
   // Throttle answers come from the OWNER's counters, so the client must be told what the owner
-  // said: without these a forwarded 429 arrives with no indication of when to retry. The suffixed
-  // names are the ones the throttler actually sets (there is no bare Retry-After).
+  // said: without these a forwarded 429 arrives with no indication of when to retry.
+  // ProxyAwareThrottlerGuard sets the plain Retry-After that HTTP clients read; the base throttler
+  // adds the per-tier Retry-After-<name> and X-RateLimit-* headers. All of them are relayed.
   'retry-after',
   'retry-after-short',
   'retry-after-medium',
@@ -45,11 +49,25 @@ const RELAYED_RESPONSE_HEADERS = [
   'x-ratelimit-reset-long',
 ] as const;
 
+/**
+ * Connection-stage failure codes: the owner never received the request, so nothing ran there and a
+ * retry cannot repeat an action. Any other failure may come after the owner started acting on it.
+ */
+const NOT_DISPATCHED_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
 /** Marks a request as already forwarded once. Whatever happens, it is never forwarded again. */
 export const FORWARDED_HEADER = 'x-openwa-forwarded';
 
 /**
- * The URL to forward to: ALWAYS the owner's origin, carrying only the request's path and query.
+ * The URL to forward to: ALWAYS the owner's origin (under its NODE_URL path, if it has one),
+ * carrying only the request's path and query.
  *
  * The request target is caller-controlled. HTTP/1.1 allows the absolute form
  * (`GET http://elsewhere/api/sessions/x HTTP/1.1`), Express matches the route for it, and
@@ -72,7 +90,8 @@ export function forwardTarget(originalUrl: string, ownerNodeUrl: string): string
   const base = new URL(ownerNodeUrl);
   const requested = new URL(originalUrl, base);
   const target = new URL(base.toString());
-  target.pathname = requested.pathname;
+  // Joined, not replaced: an owner behind a path-prefixed reverse proxy is reachable only under it.
+  target.pathname = base.pathname.replace(/\/$/, '') + requested.pathname;
   target.search = requested.search;
   return target.toString();
 }
@@ -84,8 +103,8 @@ export function forwardTarget(originalUrl: string, ownerNodeUrl: string): string
  * landing on the wrong node — a load balancer round-robining across replicas knows nothing about
  * session placement — is forwarded to the owner's `nodeUrl` and the owner's response is relayed
  * back. Interceptor rather than middleware so it runs AFTER the API-key guard: a node only spends
- * outbound work on requests that authenticated here first (the owner authenticates them again —
- * both nodes share the auth database).
+ * outbound work on requests that authenticated here first (the owner authenticates them again
+ * against its own key store; API keys live in each node's main SQLite file and are not shared).
  *
  * Entirely inert unless the operator configured routing: without NODE_URL on this node the
  * interceptor never even looks up the session, so single-node deployments pay nothing.
@@ -180,11 +199,15 @@ export class SessionProxyInterceptor implements NestInterceptor {
   ): Promise<void> {
     const timeoutMs = this.configService?.get<number>('session.proxyTimeoutMs', 60_000) ?? 60_000;
 
+    const hasBody = !['GET', 'HEAD'].includes(request.method);
     const headers: Record<string, string> = { [FORWARDED_HEADER]: this.ownership?.nodeId ?? '1' };
     for (const name of FORWARDED_REQUEST_HEADERS) {
       const value = request.headers[name];
       if (typeof value === 'string') headers[name] = value;
     }
+    // Label the bytes actually sent: a form-encoded request, relabelled as the client sent it, would
+    // have the owner's urlencoded parser read the JSON text as one form key and answer 400.
+    if (hasBody) headers['content-type'] = 'application/json';
 
     // The owner re-authenticates the forwarded call (allowedIps) and throttles per client IP, so
     // the chain must carry what this hop observed — without it every forwarded call shows up as
@@ -197,21 +220,25 @@ export class SessionProxyInterceptor implements NestInterceptor {
       headers['x-forwarded-for'] = inboundChain ? `${inboundChain}, ${observedPeer}` : observedPeer;
     }
 
-    const hasBody = !['GET', 'HEAD'].includes(request.method);
+    let target: string | undefined;
     try {
       // Inside the try: a NODE_URL that is not a usable absolute URL makes this throw, and that is
-      // an unreachable-owner condition (the 503 below names the node and the setting) — not a 500
+      // an unreachable-owner condition (the 503 below names the node and the setting), not a 500
       // on a request that had nothing wrong with it. Boot validation rejects such a value too.
-      const target = forwardTarget(request.originalUrl, ownerNodeUrl);
+      target = forwardTarget(request.originalUrl, ownerNodeUrl);
       const upstream = await fetch(target, {
         method: request.method,
         headers,
-        // The body has already been parsed by this hop's JSON body-parser; re-serialising it is
-        // byte-equivalent for the JSON API surface (there are no multipart session routes).
+        // The body has already been parsed by this hop's JSON or urlencoded body-parser; re-serialising
+        // it as JSON keeps the parsed values the owner's DTOs would have seen (there are no multipart
+        // session routes).
         body: hasBody ? JSON.stringify(request.body ?? {}) : undefined,
         signal: AbortSignal.timeout(timeoutMs),
         redirect: 'manual',
       });
+      // Read the whole body before touching the response, so a read that fails midway leaves no
+      // relayed status or headers behind on the error answer below.
+      const body = Buffer.from(await upstream.arrayBuffer());
 
       response.status(upstream.status);
       for (const name of RELAYED_RESPONSE_HEADERS) {
@@ -219,20 +246,45 @@ export class SessionProxyInterceptor implements NestInterceptor {
         if (value) response.setHeader(name, value);
       }
       response.setHeader('x-openwa-served-by', ownerNodeId);
-      const body = Buffer.from(await upstream.arrayBuffer());
       if (body.length > 0) response.send(body);
       else response.end();
     } catch (error) {
+      // Duck-typed rather than `instanceof`: fetch rejects with a DOMException on timeout, and its
+      // errors are not guaranteed to share this context's Error class.
+      const failure = (error ?? {}) as { name?: unknown; cause?: { code?: unknown } };
+      const code = failure.cause?.code;
+      // fetch reports every network failure as 'fetch failed'; the cause code (a TLS certificate
+      // error, a DNS failure) is what tells the operator what went wrong.
       this.logger.warn(`Forwarding to session owner '${ownerNodeId}' failed`, {
         ownerNodeUrl,
         error: error instanceof Error ? error.message : String(error),
+        cause: code,
       });
-      response.status(503).json({
-        statusCode: 503,
-        message:
-          `this session is hosted on node '${ownerNodeId}', which could not be reached from this node — ` +
-          'check the owner node and its NODE_URL',
-        error: 'Service Unavailable',
+      if (target === undefined || (typeof code === 'string' && NOT_DISPATCHED_CODES.has(code))) {
+        // Nothing reached the owner: 503 is the honest, retryable answer.
+        response.status(503).json({
+          statusCode: 503,
+          message:
+            `this session is hosted on node '${ownerNodeId}', which could not be reached from this node — ` +
+            'check the owner node and its NODE_URL',
+          error: 'Service Unavailable',
+        });
+        return;
+      }
+      // Anything else may have happened after the request was sent (an unlisted error such as a TLS
+      // handshake failure happens before it, but cannot be told apart), so the owner may have acted
+      // on it. Never 503 here: clients treat 503 as declined-before-acting and replay non-idempotent
+      // sends on it.
+      const timedOut = failure.name === 'TimeoutError' || failure.name === 'AbortError';
+      const status = timedOut ? 504 : 502;
+      response.status(status).json({
+        statusCode: status,
+        message: timedOut
+          ? `node '${ownerNodeId}', which hosts this session, did not answer within ${timeoutMs}ms; ` +
+            'the request may still have been carried out there'
+          : `forwarding to node '${ownerNodeId}', which hosts this session, failed, possibly after the request ` +
+            'was sent; it may have been carried out there, check the owner node and its NODE_URL',
+        error: timedOut ? 'Gateway Timeout' : 'Bad Gateway',
       });
     }
   }

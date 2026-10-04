@@ -3,18 +3,24 @@ import * as path from 'path';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { IWhatsAppEngine } from './interfaces/whatsapp-engine.interface';
-import { WhatsAppWebJsAdapter } from './adapters/whatsapp-web-js.adapter';
 import { PluginLoaderService, PluginType, IEnginePlugin, PluginManifest } from '../core/plugins';
 import { WhatsAppWebJsPlugin } from './builtin/whatsapp-web-js';
 import { BaileysPlugin } from './builtin/baileys';
 import { createLogger } from '../common/services/logger.service';
 import { BaileysMessageStoreService } from './adapters/baileys-message-store.service';
 import { LidMappingStoreService } from './identity/lid-mapping-store.service';
+import { ChatStateStoreService } from './adapters/baileys-chat-state-store.service';
 import { isSafeSessionName } from '../common/utils/path-safety';
 import { ensurePrivateDir } from '../common/utils/private-dir.util';
+import { baileysAuthDir, readAuthDirEntries, wwjsAuthDir } from './auth-dir-paths';
 
 export interface EngineCreateOptions {
-  /** Session NAME — the on-disk auth-directory key (matches the dirs purgeSessionData removes). */
+  /**
+   * Session UUID (Session.id): the on-disk auth-directory key (matches the dirs purgeSessionData
+   * removes), and what the adapters stamp on their per-session rows and logs. Carries the same value
+   * as `dbSessionId`; both stay in the per-call config because an out-of-tree engine plugin reads
+   * them by name.
+   */
   sessionId: string;
   /** Session UUID (Session.id) — the DB-row key for FK-bound stores (e.g. baileys_stored_messages). */
   dbSessionId: string;
@@ -32,6 +38,7 @@ export class EngineFactory implements OnModuleInit {
     private readonly pluginLoader: PluginLoaderService,
     private readonly baileysMessageStore: BaileysMessageStoreService,
     private readonly lidMappingStore: LidMappingStoreService,
+    private readonly chatStateStore: ChatStateStoreService,
   ) {
     this.engineType = this.configService.get<string>('engine.type') ?? 'whatsapp-web.js';
   }
@@ -75,7 +82,7 @@ export class EngineFactory implements OnModuleInit {
     };
     this.pluginLoader.registerBuiltInPlugin(
       baileysManifest,
-      new BaileysPlugin(this.baileysMessageStore, engineConfig, this.lidMappingStore),
+      new BaileysPlugin(this.baileysMessageStore, engineConfig, this.lidMappingStore, this.chatStateStore),
       engineConfig,
     );
 
@@ -97,18 +104,17 @@ export class EngineFactory implements OnModuleInit {
 
   create(options: EngineCreateOptions): IWhatsAppEngine {
     // The sessionId becomes the engine's on-disk auth-directory key (path.join(authDir, sessionId) /
-    // session-${sessionId}), so a name containing '.', '/' or '\\' could traverse outside it. Normal
-    // creation validates via CreateSessionDto, but alternate paths (data import, seed) can reach this
-    // sink with a raw name — assert here so the traversal can never materialize regardless of source.
+    // session-${sessionId}), so a value containing '.', '/' or '\\' could traverse outside it. It is a
+    // Session.id (a UUID) on every in-tree path, but a restored/imported row carries whatever its
+    // archive held — assert here so the traversal can never materialize regardless of source.
     if (!isSafeSessionName(options.sessionId)) {
-      throw new Error(`Refusing to create an engine for an unsafe session name: ${JSON.stringify(options.sessionId)}`);
+      throw new Error(`Refusing to create an engine for an unsafe session key: ${JSON.stringify(options.sessionId)}`);
     }
 
     // Both engine shapes' credential dirs are made owner-only up front, whichever engine this
-    // session runs and whichever construction path serves it (plugin or fallback): a whatsapp-web.js
-    // profile and a baileys creds.json each hold everything needed to take over the linked account,
-    // so read access to the data volume must not be enough. Mirrors purgeSessionData, which removes
-    // BOTH shapes for the same engine-switch-residue reason.
+    // session runs: a whatsapp-web.js profile and a baileys creds.json each hold everything needed
+    // to take over the linked account, so read access to the data volume must not be enough.
+    // Mirrors purgeSessionData, which removes BOTH shapes for the same engine-switch-residue reason.
     ensurePrivateDir(this.wwjsAuthDir(options.sessionId));
     ensurePrivateDir(this.baileysAuthDir(options.sessionId));
 
@@ -116,67 +122,83 @@ export class EngineFactory implements OnModuleInit {
     const enginePlugin = this.pluginLoader.getPlugin(this.engineType);
 
     if (enginePlugin?.instance && this.isEnginePlugin(enginePlugin.instance)) {
-      // Engine-neutral per-call config only. Engine-specific config (e.g. Puppeteer for
-      // whatsapp-web.js) is supplied to the plugin as an opaque blob via context.config at
-      // registration, so the factory never assembles browser-shaped fields.
+      // Engine-neutral per-call config, plus the two auth-dir bases. Engine-specific config (e.g.
+      // Puppeteer for whatsapp-web.js) is supplied to the plugin as an opaque blob via context.config
+      // at registration, so the factory never assembles browser-shaped fields. The bases are the
+      // exception: this factory hardens and purges the credential dirs under them, and the boot
+      // migration renames into them, so the engine must write there too. context.config can carry a
+      // persisted plugin-config override that none of those would follow.
       return enginePlugin.instance.createEngine({
         sessionId: options.sessionId,
         dbSessionId: options.dbSessionId,
         proxyUrl: options.proxyUrl,
         proxyType: options.proxyType,
+        sessionDataPath: this.sessionDataPath(),
+        authDir: this.baileysAuthBase(),
       }) as IWhatsAppEngine;
     }
 
-    // Fallback to direct adapter creation (legacy support)
-    this.logger.warn(`Engine plugin ${this.engineType} not available, using fallback`, {
-      action: 'engine_fallback',
-    });
-
-    return this.createFallbackEngine(options);
+    // Both built-ins are registered with an instance in onModuleInit and ENGINE_TYPE is whitelisted at
+    // boot, so this is reached only by a broken host. Never build some other engine in its place.
+    throw new Error(`Engine '${this.engineType}' is not registered; cannot start the session.`);
   }
 
   /**
    * Remove a session's persistent on-disk auth/store directories so deleting a session fully purges
-   * its footprint. The dir is keyed by session NAME — the same key {@link create} uses
-   * (`path.join(authDir, name)` for baileys, `session-${name}` under sessionDataPath for
+   * its footprint. The dir is keyed by session ID — the same key {@link create} uses
+   * (`path.join(authDir, id)` for baileys, `session-${id}` under sessionDataPath for
    * whatsapp-web.js) — and survives independently of any engine instance. On delete the engine is
    * frequently not even loaded (a stopped session has none), so the paths are derived from config
-   * here rather than from a live adapter; otherwise recreating a session under the same name would
-   * reload a stale store.
+   * here rather than from a live adapter; otherwise the residue would sit on the volume forever.
    *
    * BOTH engine shapes are purged, not just the active engine's: ENGINE_TYPE is a deploy-level
    * switch, so a session that ever ran under both engines leaves a live auth dir for each, and
    * removing only the active engine's would strand the other's WhatsApp credentials on disk after
    * "delete" — able to silently re-link if the engine is ever switched back (and carried into
-   * backups). Each rm is isolated best-effort: an unsafe name is refused up front, and one engine's
+   * backups). Each rm is isolated best-effort: an unsafe key is refused up front, and one engine's
    * rm failure is logged per-engine — it neither fails the delete nor skips the other engine's purge.
    *
    * Note: session START deliberately does NOT purge the inactive engine's residue. An operator
    * trialling the other engine keeps the previous engine's link so switching back doesn't force a
    * re-pair; the residue is removed only when the session itself is deleted.
+   *
+   * `legacyName` is the row's name, passed by delete. SessionAuthDirMigration leaves the legacy
+   * name-keyed directory in place whenever it could not rename it (an open profile on Windows, or an
+   * id-keyed directory already there), so purging only the id-keyed dirs would strand a complete
+   * WhatsApp login on the volume and in every backup taken after the delete. It is removed only when
+   * the base directory really holds an entry with that exact name; see readAuthDirEntries.
    */
-  async purgeSessionData(sessionName: string): Promise<void> {
-    if (!isSafeSessionName(sessionName)) {
-      // Same guard as create(): never let a name with '.', '/' or '\\' reach an rm -rf sink.
-      this.logger.warn('Refusing to purge session data for an unsafe session name', {
+  async purgeSessionData(sessionId: string, legacyName?: string): Promise<void> {
+    if (!isSafeSessionName(sessionId)) {
+      // Same guard as create(): never let a key with '.', '/' or '\\' reach an rm -rf sink.
+      this.logger.warn('Refusing to purge session data for an unsafe session key', {
         action: 'engine_purge_unsafe',
-        sessionName: JSON.stringify(sessionName),
+        key: JSON.stringify(sessionId),
       });
       return;
     }
     const dirs: Array<{ engine: string; dir: string }> = [
-      { engine: 'whatsapp-web.js', dir: this.wwjsAuthDir(sessionName) },
-      { engine: 'baileys', dir: this.baileysAuthDir(sessionName) },
+      { engine: 'whatsapp-web.js', dir: this.wwjsAuthDir(sessionId) },
+      { engine: 'baileys', dir: this.baileysAuthDir(sessionId) },
     ];
+    // The caller withholds a name that is another session's id: the dirs it points at are then that
+    // session's live id-keyed credentials, and only the caller can see the table.
+    if (legacyName !== undefined && isSafeSessionName(legacyName)) {
+      const legacyDirs = [
+        { engine: 'whatsapp-web.js', dir: this.wwjsAuthDir(legacyName) },
+        { engine: 'baileys', dir: this.baileysAuthDir(legacyName) },
+      ];
+      dirs.push(...legacyDirs.filter(({ dir }) => this.authDirExists(dir)));
+    }
     for (const { engine, dir } of dirs) {
       try {
         await fs.promises.rm(dir, { recursive: true, force: true });
-        this.logger.log('Purged session auth directory', { action: 'engine_purge', engine, sessionName, dir });
+        this.logger.log('Purged session auth directory', { action: 'engine_purge', engine, sessionId, dir });
       } catch (error) {
         this.logger.warn('Failed to purge session auth directory', {
           action: 'engine_purge_failed',
           engine,
-          sessionName,
+          sessionId,
           dir,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -184,23 +206,33 @@ export class EngineFactory implements OnModuleInit {
     }
   }
 
-  /**
-   * The on-disk auth directory whatsapp-web.js keeps for `sessionName`, matching exactly what the
-   * adapter constructs: sessionDataPath resolved, then `session-${name}` appended (mirrors
-   * WhatsAppWebJsAdapter.clearLocalAuth).
-   */
-  private wwjsAuthDir(sessionName: string): string {
-    const sessionDataPath = this.configService.get<string>('engine.sessionDataPath') ?? './data/sessions';
-    return path.join(path.resolve(sessionDataPath), `session-${sessionName}`);
+  /** The whatsapp-web.js sessionDataPath from config. */
+  private sessionDataPath(): string {
+    return this.configService.get<string>('engine.sessionDataPath') ?? './data/sessions';
   }
 
-  /**
-   * The on-disk auth directory baileys keeps for `sessionName`: `path.join(authDir, name)`, with
-   * authDir left unresolved, as the adapter does.
-   */
-  private baileysAuthDir(sessionName: string): string {
-    const authDir = this.configService.get<string>('engine.baileys.authDir') ?? './data/baileys';
-    return path.join(authDir, sessionName);
+  /** The baileys authDir from config. */
+  private baileysAuthBase(): string {
+    return this.configService.get<string>('engine.baileys.authDir') ?? './data/baileys';
+  }
+
+  /** The whatsapp-web.js LocalAuth profile dir for `sessionId`, with sessionDataPath from config. */
+  private wwjsAuthDir(sessionId: string): string {
+    return wwjsAuthDir(this.sessionDataPath(), sessionId);
+  }
+
+  /** The baileys multi-file auth dir for `sessionId`, with authDir from config. */
+  private baileysAuthDir(sessionId: string): string {
+    return baileysAuthDir(this.baileysAuthBase(), sessionId);
+  }
+
+  /** True when `dir`'s base directory holds an entry with exactly that name (see readAuthDirEntries). */
+  private authDirExists(dir: string): boolean {
+    try {
+      return readAuthDirEntries(path.dirname(dir)).has(path.basename(dir));
+    } catch {
+      return false; // base directory missing or unreadable: nothing of this shape to purge
+    }
   }
 
   private isEnginePlugin(instance: unknown): instance is IEnginePlugin {
@@ -212,35 +244,6 @@ export class EngineFactory implements OnModuleInit {
       'createEngine' in instance &&
       typeof (instance as { createEngine: unknown }).createEngine === 'function'
     );
-  }
-
-  private createFallbackEngine(options: EngineCreateOptions): IWhatsAppEngine {
-    // This legacy fallback can only construct the whatsapp-web.js adapter. If a different engine was
-    // requested (e.g. ENGINE_TYPE=baileys) and its plugin wasn't available, building wwebjs here would
-    // silently run the WRONG engine — fail loudly so the misconfiguration is visible instead.
-    if (this.engineType !== 'whatsapp-web.js') {
-      throw new Error(
-        `Engine '${this.engineType}' is unavailable and has no direct fallback; cannot start the session.`,
-      );
-    }
-
-    // Legacy direct creation (fallback)
-    return new WhatsAppWebJsAdapter({
-      sessionId: options.sessionId,
-      sessionDataPath: this.configService.get<string>('engine.sessionDataPath') ?? './data/sessions',
-      puppeteer: {
-        headless: this.configService.get<boolean>('engine.puppeteer.headless') ?? true,
-        args: this.configService.get<string[]>('engine.puppeteer.args') ?? ['--no-sandbox', '--disable-setuid-sandbox'],
-        executablePath: this.configService.get<string>('engine.puppeteer.executablePath'),
-      },
-      proxy: options.proxyUrl
-        ? {
-            url: options.proxyUrl,
-            type: options.proxyType ?? 'http',
-          }
-        : undefined,
-      lidMappingStore: this.lidMappingStore,
-    });
   }
 
   // ============================================================================

@@ -25,7 +25,8 @@ jest.mock('@aws-sdk/client-s3', () => {
 });
 
 import { S3Client } from '@aws-sdk/client-s3';
-import { StorageService } from './storage.service';
+import { LoggerService } from '../services/logger.service';
+import { S3_CONNECT_TIMEOUT_MS, S3_SOCKET_TIMEOUT_MS, StorageService } from './storage.service';
 
 // The subset of the AWS SDK's S3Client config this service sets — used purely to type the mock's call
 // args so the assertions below are type-checked instead of `any`.
@@ -34,6 +35,7 @@ type S3ClientConfig = {
   region: string;
   forcePathStyle?: boolean;
   credentials: { accessKeyId: string; secretAccessKey: string };
+  requestHandler?: { connectionTimeout?: number; socketTimeout?: number; requestTimeout?: number };
 };
 
 const mockedS3Client = S3Client as unknown as jest.Mock<unknown, [S3ClientConfig]>;
@@ -69,6 +71,10 @@ describe('StorageService (s3) client init', () => {
 
   afterEach(() => {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
+    // The warning below is emitted from the constructor, so it can only be spied on the prototype.
+    // `restoreMocks` is not set for this project, so an assertion that throws before an inline
+    // restore would leave every later LoggerService in this file muted.
+    jest.restoreAllMocks();
   });
 
   // Build a ConfigService scoped to s3 storage; localPath points at the per-test tmp dir so the
@@ -113,13 +119,45 @@ describe('StorageService (s3) client init', () => {
     expect(svc.isS3Available()).toBe(true);
   });
 
-  it('falls back to local (no client) when credentials are missing', async () => {
+  // A store that accepts the connection and never answers would otherwise leave every request (the
+  // availability probe, media reads and archive writes) pending forever.
+  it('bounds every request with a connect and an idle-socket timeout', async () => {
+    new StorageService(makeConfig({ accessKeyId: 'minio', secretAccessKey: 'minio123', region: 'us-east-1' }));
+    await flush();
+
+    expect(lastConfig().requestHandler).toEqual({
+      connectionTimeout: S3_CONNECT_TIMEOUT_MS,
+      socketTimeout: S3_SOCKET_TIMEOUT_MS,
+    });
+  });
+
+  it('falls back to local (no client) when credentials are missing, and says so', async () => {
+    // Without a client none of the S3 logging further down ever runs, so this fallback used to be
+    // the one that produced no output at all: the bucket simply stayed empty. Name the two vars
+    // that fix it, since that is the whole point of warning here.
+    const warn = jest.spyOn(LoggerService.prototype, 'warn').mockImplementation(() => undefined);
     const svc = new StorageService(makeConfig({ region: 'us-east-1' }));
     await flush();
 
     expect(mockedS3Client).not.toHaveBeenCalled();
     expect(svc.isS3Available()).toBe(false);
     expect(svc.getCurrentStorageType()).toBe('s3');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('S3_ACCESS_KEY_ID'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('S3_SECRET_ACCESS_KEY'));
+  });
+
+  it('names only the half of the credential pair that is missing', async () => {
+    // Reaching the fallback with one of the pair set is a typo in the other. A warning that called
+    // every credential absent would point the operator at the one they got right.
+    process.env.S3_ACCESS_KEY_ID = 'ENVKEY';
+    const warn = jest.spyOn(LoggerService.prototype, 'warn').mockImplementation(() => undefined);
+    new StorageService(makeConfig({ region: 'us-east-1' }));
+    await flush();
+
+    expect(mockedS3Client).not.toHaveBeenCalled();
+    const message = String(warn.mock.calls.at(-1)?.[0]);
+    expect(message).toContain('S3_SECRET_ACCESS_KEY');
+    expect(message).not.toContain('S3_ACCESS_KEY_ID');
   });
 
   it('prefers canonical env names (S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY) over config', async () => {

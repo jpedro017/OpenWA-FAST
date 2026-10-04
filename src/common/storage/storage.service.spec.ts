@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as tar from 'tar-stream';
 import { createGzip } from 'zlib';
-import { Readable } from 'stream';
+import { PassThrough, Readable } from 'stream';
 import { ConfigService } from '@nestjs/config';
 
 // `archiver` v8 ships as ESM only, which ts-jest cannot parse when StorageService
@@ -12,6 +12,7 @@ import { ConfigService } from '@nestjs/config';
 jest.mock('archiver', () => ({ default: jest.fn() }));
 
 import { StorageService } from './storage.service';
+import * as transfer from './storage-transfer';
 
 /** Build an in-memory gzipped tar archive from the given entries. */
 function makeTarGz(entries: { name: string; data: string }[]): Promise<Buffer> {
@@ -97,11 +98,11 @@ describe('StorageService (local) path traversal protection', () => {
       { name: '../evil.txt', data: 'bad' },
     ]);
 
-    const count = await service.importFromStream(Readable.from(gz));
+    const result = await service.importFromStream(Readable.from(gz));
 
     expect(fs.readFileSync(path.join(localPath, 'safe.txt'), 'utf8')).toBe('good');
     expect(fs.existsSync(path.join(baseDir, 'evil.txt'))).toBe(false);
-    expect(count).toBe(1);
+    expect(result).toEqual({ imported: 1, failed: 1 });
   });
 });
 
@@ -142,6 +143,29 @@ describe('StorageService put/getFile containment is backend-agnostic', () => {
 
     await expect(service.getFile('../../etc/passwd')).rejects.toThrow();
     expect(sendMock).not.toHaveBeenCalled();
+
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  });
+});
+
+describe('StorageService.openFile (the export read path)', () => {
+  const readAll = async (stream: Readable): Promise<Buffer> => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(chunk as Buffer);
+    return Buffer.concat(chunks);
+  };
+
+  it('streams a local file with its size, and rejects a missing file before any stream exists', async () => {
+    const { service, baseDir, localPath } = makeLocalService();
+    fs.mkdirSync(path.join(localPath, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(localPath, 'sub/a.bin'), 'local-bytes');
+
+    const { stream, size } = await service.openFile('sub/a.bin');
+    expect(size).toBe(11);
+    expect((await readAll(stream)).toString()).toBe('local-bytes');
+    expect((await service.getFile('sub/a.bin')).toString()).toBe('local-bytes');
+    await expect(service.openFile('sub/missing.bin')).rejects.toThrow(/ENOENT/);
+    await expect(service.openFile('../../etc/passwd')).rejects.toThrow(/unsafe storage key/);
 
     fs.rmSync(baseDir, { recursive: true, force: true });
   });
@@ -221,8 +245,8 @@ describe('StorageService import resource caps (decompression-bomb defense)', () 
 
   it('imports normally within the (generous default) caps', async () => {
     const gz = await makeTarGz([{ name: 'ok.txt', data: 'fine' }]);
-    const count = await service.importFromStream(Readable.from(gz));
-    expect(count).toBe(1);
+    const result = await service.importFromStream(Readable.from(gz));
+    expect(result).toEqual({ imported: 1, failed: 0 });
   });
 });
 
@@ -307,20 +331,47 @@ describe('StorageService local traversal (async + bounded)', () => {
  * not a completeness contract" and tells callers needing the whole store to iterate instead.
  */
 describe('StorageService.createExportStream enumerates the whole store', () => {
+  const baseDirs: string[] = [];
+  const makeService = (): ReturnType<typeof makeLocalService> => {
+    const made = makeLocalService();
+    baseDirs.push(made.baseDir);
+    return made;
+  };
+
+  afterEach(() => {
+    for (const dir of baseDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('walks the uncapped iterator rather than the capped listing', async () => {
-    const { service } = makeLocalService();
+    const { service } = makeService();
     const listFiles = jest.spyOn(service, 'listFiles');
     const iterateFiles = jest.spyOn(service, 'iterateFiles').mockImplementation(async function* () {
       yield await Promise.resolve('media/a.bin');
     });
-    jest.spyOn(service, 'getFile').mockResolvedValue(Buffer.from('x'));
-
-    // The enumerator runs before the archive is constructed, so which one was used is settled even
-    // if archiving itself cannot run in this environment. That is the whole claim here.
+    // No read stub: the enumerator runs before the archive is constructed, and `archiver` is mocked
+    // at the top of this file, so the call rejects there and no file is ever opened. Which
+    // enumeration was used is settled by then, and that is the whole claim here.
     await service.createExportStream().catch(() => undefined);
 
     expect(iterateFiles).toHaveBeenCalled();
     expect(listFiles).not.toHaveBeenCalled();
+  });
+
+  // The export fails on any open error other than a missing object, so a listed key openFile always
+  // refuses (an S3 object at the bare key root, or one with a `..` segment) must not reach it.
+  it('leaves out a listed key that openFile would refuse', async () => {
+    const { service } = makeService();
+    jest.spyOn(service, 'iterateFiles').mockImplementation(async function* () {
+      yield await Promise.resolve('media/a.bin');
+      yield '';
+      yield 'media/../x.bin';
+    });
+    const create = jest.spyOn(transfer, 'createExportStream').mockResolvedValue(new PassThrough());
+
+    await service.createExportStream();
+
+    expect(await create.mock.calls[0][0]()).toEqual(['media/a.bin']);
+    create.mockRestore();
   });
 
   /**
@@ -330,7 +381,7 @@ describe('StorageService.createExportStream enumerates the whole store', () => {
    * while agreeing with itself.
    */
   it('counts with the uncapped iterator too, so the pre-check cannot hide the gap', async () => {
-    const { service } = makeLocalService();
+    const { service } = makeService();
     const listFiles = jest.spyOn(service, 'listFiles');
     const iterateFiles = jest.spyOn(service, 'iterateFiles').mockImplementation(async function* () {
       yield await Promise.resolve('media/a.bin');
@@ -356,7 +407,7 @@ describe('StorageService.createExportStream enumerates the whole store', () => {
    * once each stat yields.
    */
   it('does not hold the event loop for the whole walk', async () => {
-    const { service, localPath } = makeLocalService();
+    const { service, localPath } = makeService();
     fs.mkdirSync(localPath, { recursive: true });
     const FILES = 2000;
     for (let i = 0; i < FILES; i++) {

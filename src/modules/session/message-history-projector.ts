@@ -6,6 +6,7 @@ import { buildMessageMetadata } from './message-row.mapper';
 import { resolveFeatureFlags } from '../../config/feature-flags';
 import { IncomingMessage } from '../../engine/interfaces/whatsapp-engine.interface';
 import { LoggerService } from '../../common/services/logger.service';
+import { resolveMessageRetentionCutoff } from '../message/message-retention.service';
 
 /**
  * Persist pre-connection history into the `messages` table for the chat view, without webhook/hook/ws
@@ -17,8 +18,12 @@ export async function persistHistoryMessages(
   id: string,
   messages: IncomingMessage[],
   logger: LoggerService,
+  isLive: () => boolean,
 ): Promise<void> {
   const storeEphemeralMessages = resolveFeatureFlags(configService).storeEphemeralMessages;
+  // Rows are stamped with WhatsApp's own time below, so history older than the retention window
+  // would be written only for the next prune to delete it again.
+  const retentionCutoffMs = resolveMessageRetentionCutoff()?.getTime();
   const byId = new Map<string, IncomingMessage>();
   for (const m of messages) {
     // Need an id to de-dup; chatId/from/to are NOT NULL; status/story posts aren't chats.
@@ -29,6 +34,9 @@ export async function persistHistoryMessages(
     // history backfill can't bypass STORE_EPHEMERAL_MESSAGES=false. No-op when the flag is at its
     // default (true); only a message with a positive timer is dropped, never a regular one.
     if (!storeEphemeralMessages && (m.ephemeralDuration ?? 0) > 0) {
+      continue;
+    }
+    if (retentionCutoffMs !== undefined && m.timestamp && m.timestamp * 1000 < retentionCutoffMs) {
       continue;
     }
     byId.set(m.id, m);
@@ -46,6 +54,10 @@ export async function persistHistoryMessages(
       where: { sessionId: id, waMessageId: In(chunkIds) },
       select: { waMessageId: true },
     });
+    // A delete() can retire the engine while a large batch works through its chunks; its transaction
+    // has then already cleared this session's messages, and a row inserted after it (no FK) would
+    // never be reaped. Same re-check the live inbound path makes after its awaits.
+    if (!isLive()) break;
     const seen = new Set(existing.map(r => r.waMessageId));
     const rows = chunkIds
       .filter(x => !seen.has(x))

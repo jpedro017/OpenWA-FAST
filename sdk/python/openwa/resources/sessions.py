@@ -11,7 +11,9 @@ from .._http import quote_segment
 from ..types import (
     CreateSessionRequest,
     SessionConfig,
+    SessionProxy,
     UpdateSessionConfigRequest,
+    UpdateSessionProxyRequest,
     PairingCodeResponse,
     QrCodeResponse,
     RequestPairingCodeRequest,
@@ -26,10 +28,14 @@ if TYPE_CHECKING:
 
 
 class ListSessionsQuery(TypedDict, total=False):
-    """Pagination for :meth:`SessionsResource.list`. The server applies its own default when omitted."""
+    """Pagination for :meth:`SessionsResource.list`. The server applies its own default when omitted.
+
+    ``name`` returns only the session with exactly that name (case-sensitive).
+    """
 
     limit: int
     offset: int
+    name: str
 
 
 class SessionsResource:
@@ -45,12 +51,26 @@ class SessionsResource:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/config")
 
     def update_config(self, session_id: str, body: UpdateSessionConfigRequest) -> SessionConfig:
-        """Update a RUNNING session's configuration -- no re-link and no QR scan.
+        """Update a session's configuration, in any state, with no restart, re-link or QR scan.
 
-        All three fields were fixed at creation before this route existed.
+        All three fields were fixed at creation before this route existed. ``autoRejectCalls`` applies
+        immediately; ``maxReconnectAttempts`` and ``reconnectBaseDelay`` apply on the next start.
         """
         return self._http.request(
             "PATCH", f"/api/sessions/{quote_segment(session_id)}/config", body=body
+        )
+
+    def get_proxy(self, session_id: str) -> SessionProxy:
+        """Read a session's masked proxy configuration (credentials never returned)."""
+        return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/proxy")
+
+    def update_proxy(self, session_id: str, body: UpdateSessionProxyRequest) -> SessionProxy:
+        """Update per-session proxy settings. No restart — changes apply on the next start.
+
+        Requires an unscoped ADMIN key.
+        """
+        return self._http.request(
+            "PATCH", f"/api/sessions/{quote_segment(session_id)}/proxy", body=body
         )
 
     def get(self, session_id: str) -> SessionResponse:
@@ -58,7 +78,7 @@ class SessionsResource:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}")
 
     def create(self, body: CreateSessionRequest) -> SessionResponse:
-        """Provision a new session."""
+        """Provision a new session. Requires an OPERATOR-level key; setting proxyUrl requires an ADMIN key."""
         return self._http.request("POST", "/api/sessions", body=body)
 
     def delete(self, session_id: str) -> None:
@@ -100,7 +120,13 @@ class SessionsResource:
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/logout")
 
     def force_kill(self, session_id: str) -> SessionResponse:
-        """Terminate a stuck session immediately."""
+        """Terminate a stuck session immediately.
+
+        Raises with HTTP 502 and ``code`` ``SESSION_FORCE_KILL_INCOMPLETE`` when the session was
+        stopped locally but the force-destroy threw or timed out, so the engine process may still be
+        running; the status is settled to disconnected and a retry answers 400 because no engine is
+        left to kill. Restart the node to reap a leaked process.
+        """
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/force-kill")
 
     def get_qr_code(self, session_id: str) -> QrCodeResponse:

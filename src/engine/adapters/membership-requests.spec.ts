@@ -225,16 +225,33 @@ function makeBaileysGroups(): { groups: BaileysGroups; sock: BaileysSockStub } {
   };
   const host: BaileysGroupsHost = {
     ensureReady: jest.fn(),
+    sessionProxyUrl: () => undefined,
     getSocket: () => sock as unknown as WASocket,
     logger,
     toNeutralJid: jid => jid.replace('@s.whatsapp.net', '@c.us'),
     toEngineJid: jid => jid.replace('@c.us', '@s.whatsapp.net'),
     normalizedSelfJid: () => '628999@c.us',
+    addLidMappings: jest.fn(),
   };
   return { groups: new BaileysGroups(host), sock };
 }
 
 describe('BaileysGroups membership requests', () => {
+  it.each([
+    ['listing', (g: BaileysGroups) => g.getGroupMembershipRequests('120363@g.us')],
+    ['acting on every pending request', (g: BaileysGroups) => g.approveGroupMembershipRequests('120363@g.us')],
+    [
+      'acting on named requesters',
+      (g: BaileysGroups) => g.rejectGroupMembershipRequests('120363@g.us', ['628111@c.us']),
+    ],
+  ])('answers GroupNotFoundError when WhatsApp reports the group gone (404) while %s', async (_n, call) => {
+    const { groups, sock } = makeBaileysGroups();
+    const gone = Object.assign(new Error('item-not-found'), { data: 404 });
+    sock.groupRequestParticipantsList.mockRejectedValue(gone);
+    sock.groupRequestParticipantsUpdate.mockRejectedValue(gone);
+    await expect(call(groups)).rejects.toBeInstanceOf(GroupNotFoundError);
+  });
+
   it('lists membership requests, neutralising jids and parsing the stringly wire attrs', async () => {
     const { groups, sock } = makeBaileysGroups();
     sock.groupRequestParticipantsList.mockResolvedValue([

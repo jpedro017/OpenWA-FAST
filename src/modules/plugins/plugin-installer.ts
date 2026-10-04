@@ -49,14 +49,17 @@ export interface ParsedPackage {
  * over-size archives). The caller writes the returned entries; this function decides what is safe.
  */
 export function parsePluginPackage(buffer: Buffer, limits: PackageLimits = DEFAULT_PACKAGE_LIMITS): ParsedPackage {
-  let zip: AdmZip;
+  // The constructor reads only the end-of-central-directory record; the central directory itself is
+  // parsed lazily by getEntries(), so an archive whose trailer parses and whose directory does not
+  // escaped this guard as a plain Error and reached the caller as a 500. Both answer the same
+  // question, "is this a readable archive", so both are caught here.
+  let files: AdmZip.IZipEntry[];
   try {
-    zip = new AdmZip(buffer);
+    files = new AdmZip(buffer).getEntries().filter(e => !e.isDirectory);
   } catch {
     throw new BadRequestException('Uploaded file is not a valid .zip archive');
   }
 
-  const files = zip.getEntries().filter(e => !e.isDirectory);
   if (files.length === 0) throw new BadRequestException('The archive is empty');
   if (files.length > limits.maxEntries) throw new BadRequestException('The archive has too many files');
 
@@ -99,6 +102,12 @@ export function parsePluginPackage(buffer: Buffer, limits: PackageLimits = DEFAU
   if (declared > limits.maxTotalBytes) throw new BadRequestException('The archive contents exceed the size limit');
 
   const entries: { relPath: string; data: Buffer }[] = [];
+  // Normalized paths already taken, NFC-normalized and case-folded because a case- or
+  // normalization-insensitive filesystem (APFS, NTFS) writes `Manifest.json` and `manifest.json`, or
+  // an NFC and an NFD spelling, to one file. Upper-then-lower also folds characters such as the long
+  // s that toLowerCase() leaves alone. Entries are written in order, so a repeat would let a later
+  // `z/../manifest.json` replace the manifest validated above.
+  const seen = new Set<string>();
   let actualBytes = 0;
   for (const e of packaged) {
     const relPath = e.entryName.slice(prefix.length);
@@ -107,6 +116,9 @@ export function parsePluginPackage(buffer: Buffer, limits: PackageLimits = DEFAU
     if (relPath.includes('\\') || norm.startsWith('..') || norm === '..' || path.posix.isAbsolute(norm)) {
       throw new BadRequestException(`Unsafe path in archive: ${e.entryName}`);
     }
+    const key = norm.normalize('NFC').toUpperCase().toLowerCase();
+    if (seen.has(key)) throw new BadRequestException(`Duplicate path in archive: ${e.entryName}`);
+    seen.add(key);
     let data: Buffer;
     try {
       data = readEntryData(e, limits.maxTotalBytes);

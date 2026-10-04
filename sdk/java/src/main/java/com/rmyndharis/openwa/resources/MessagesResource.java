@@ -5,6 +5,7 @@ import static com.rmyndharis.openwa.http.Http.encodeSegment;
 import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.BinaryResponse;
 import com.rmyndharis.openwa.http.HttpMethod;
+import com.rmyndharis.openwa.model.BatchCancelResponse;
 import com.rmyndharis.openwa.model.BatchStatusResponse;
 import com.rmyndharis.openwa.model.BulkMessageResponse;
 import com.rmyndharis.openwa.model.ChatHistoryMessage;
@@ -19,6 +20,7 @@ import com.rmyndharis.openwa.model.PinMessageRequest;
 import com.rmyndharis.openwa.model.ReactMessageRequest;
 import com.rmyndharis.openwa.model.ReactionRecord;
 import com.rmyndharis.openwa.model.ReplyMessageRequest;
+import com.rmyndharis.openwa.model.ClickButtonRequest;
 import com.rmyndharis.openwa.model.SendBulkRequest;
 import com.rmyndharis.openwa.model.SendContactRequest;
 import com.rmyndharis.openwa.model.SendLocationRequest;
@@ -80,7 +82,11 @@ public final class MessagesResource {
         return sendMedia(sessionId, "send-audio", body);
     }
 
-    /** Send a document (url or base64; {@code filename} required). */
+    /**
+     * Send a document (url or base64). {@code filename} is optional and is the name the recipient
+     * sees; without it the gateway uses {@code "file"}, or the URL basename for a URL send on
+     * whatsapp-web.js.
+     */
     public MessageResponse sendDocument(String sessionId, SendMediaRequest body) {
         return sendMedia(sessionId, "send-document", body);
     }
@@ -135,6 +141,19 @@ public final class MessagesResource {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/reply",
+            null,
+            body,
+            MessageResponse.class);
+    }
+
+    /**
+     * Click a button on a WhatsApp Business prompt. Baileys only: whatsapp-web.js returns 501.
+     * Sends a structured reply proto quoted to the prompt, not a native UI tap.
+     */
+    public MessageResponse clickButton(String sessionId, ClickButtonRequest body) {
+        return client.request(
+            HttpMethod.POST,
+            "/api/sessions/" + encodeSegment(sessionId) + "/messages/click-button",
             null,
             body,
             MessageResponse.class);
@@ -292,14 +311,17 @@ public final class MessagesResource {
             BatchStatusResponse.class);
     }
 
-    /** Cancel a running batch. Requires an OPERATOR-level key. */
-    public BatchStatusResponse cancelBatch(String sessionId, String batchId) {
+    /**
+     * Cancel a running batch. Requires an OPERATOR-level key. The reply carries no per-item results;
+     * call {@link #batchStatus} for those.
+     */
+    public BatchCancelResponse cancelBatch(String sessionId, String batchId) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/batch/" + encodeSegment(batchId) + "/cancel",
             null,
             null,
-            BatchStatusResponse.class);
+            BatchCancelResponse.class);
     }
 
     // ── Internal ───────────────────────────────────────────────────────

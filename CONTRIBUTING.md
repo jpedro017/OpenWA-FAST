@@ -18,33 +18,53 @@ See `docs/03-system-architecture.md` for the bigger picture.
 
 ## Getting started
 
-OpenWA targets **Node.js 22+**.
+OpenWA targets **Node.js 22.19 or newer** (`engines.node`).
 
 ```bash
-# backend
-npm install
-cp .env.example .env        # adjust as needed
-npm run start:dev           # hot-reload, default port 2785
-
-# dashboard (separate terminal)
-cd dashboard && npm install && npm run dev
+npm ci
+npm run dev   # API on 2785, dashboard (Vite) on 2886
 ```
 
+Dashboard dependencies install with the root ones (postinstall). `npm run start:dev` runs the API
+alone. Use `npm install` only when intentionally changing dependencies.
+
 Default storage is SQLite, so no external services are required to run locally.
+
+No `.env` is needed: the first boot writes `data/.env.generated` with these defaults. Create a
+`.env` only to pin values. If you copy `.env.example` for that, change its `NODE_ENV=production`
+to `NODE_ENV=development`, or the dev server runs with production behaviour (no Swagger UI,
+generic validation errors, JSON logs).
 
 ## Before opening a pull request
 
 Please make sure these pass locally:
 
+Backend:
+
 ```bash
 npm run build               # NestJS build (tsc)
+npx tsc --noEmit            # also type-checks specs, which the build excludes
 npm test                    # unit tests (Jest)
+npm run test:docs           # docs-sync specs, a separate lane `npm test` does not run
 npm run lint                # ESLint
-npm run format              # Prettier
-npm --prefix dashboard run build   # dashboard type-check + build
+npm run format              # Prettier (CI runs `format:check`)
 ```
 
-- Add or update tests for behavior changes — specs are colocated as `*.spec.ts`.
+Dashboard, where CI runs each of these as its own step:
+
+```bash
+cd dashboard
+npm run lint && npm run format:check && npm run typecheck
+npm run i18n:check && npm run build && npm run test:unit
+```
+
+If you changed a DTO, a route, or an `@ApiResponse`, also run `npm run openapi:export` and
+commit the snapshot, then `npm run openapi:check` and `npm run check:contract-shapes`. The
+hand-written SDK types are compared against the schemas and will fail CI by field name.
+
+- Add or update tests for behavior changes. Backend specs are colocated as `*.spec.ts`
+  and run under Jest; dashboard tests are colocated as `*.test.ts` and run under
+  `node --test`, so a dashboard file named `*.spec.ts` is never executed.
 - Keep each PR focused on one logical change; it makes review (and credit) much easier.
 - Update `docs/` and the `CHANGELOG.md` `[Unreleased]` section when your change is
   user-visible. (Maintainers own version stamping and release cutting.)

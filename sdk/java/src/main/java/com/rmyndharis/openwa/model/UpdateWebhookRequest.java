@@ -38,7 +38,11 @@ public record UpdateWebhookRequest(
             return this;
         }
 
-        /** HMAC secret; signed as {@code X-OpenWA-Signature: sha256=…}. */
+        /**
+         * HMAC secret; signed as {@code X-OpenWA-Signature: sha256=…}. Held to the same 16-character
+         * minimum as the create request, with one exception: {@code ""} is the documented
+         * "clear the secret" value and is accepted.
+         */
         public Builder secret(String v) {
             this.secret = v;
             return this;
@@ -49,12 +53,20 @@ public record UpdateWebhookRequest(
             return this;
         }
 
+        /**
+         * Replace the webhook's filters. To remove every filter, pass
+         * {@code new WebhookFilters(List.of())}; {@code filters(null)} leaves the existing filters
+         * unchanged, because a null field is omitted from the request.
+         */
         public Builder filters(WebhookFilters v) {
             this.filters = v;
             return this;
         }
 
-        /** 0–5; default 3. Server DTO field is {@code retryCount}. */
+        /**
+         * Total delivery attempts per event including the first, 0 to 5 (0 and 1 both mean one
+         * attempt); omit to keep the current value. Server DTO field is {@code retryCount}.
+         */
         public Builder retryCount(Integer v) {
             this.retryCount = v;
             return this;

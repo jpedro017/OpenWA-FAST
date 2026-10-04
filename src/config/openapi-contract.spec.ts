@@ -167,6 +167,26 @@ describe('openapi.json structural invariants', () => {
     expect(undeclared).toEqual([]);
   });
 
+  it('gives every API-key operation its auth refusals and an error body schema', () => {
+    const doc = snapshot();
+    type Op = { security?: unknown; responses?: Record<string, { content?: unknown; $ref?: string }> };
+    let checked = 0;
+    const gaps: string[] = [];
+    for (const [route, item] of Object.entries(doc.paths as unknown as Record<string, Record<string, Op>>)) {
+      for (const [method, op] of Object.entries(item)) {
+        if (!OPERATION_KEYS.has(method) || op.security !== undefined) continue;
+        checked++;
+        const responses = op.responses ?? {};
+        for (const status of ['401', '403']) if (!responses[status]) gaps.push(`${method} ${route} lacks ${status}`);
+        for (const [status, response] of Object.entries(responses)) {
+          if (Number(status) >= 400 && !response.$ref && !response.content) gaps.push(`${method} ${route} ${status}`);
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(150);
+    expect(gaps).toEqual([]);
+  });
+
   it('gives each route exactly one path key, whatever its parameters are named', () => {
     const doc = snapshot();
     // A path template variable is positional: `/x/{id}` and `/x/{sessionId}` are the same URL. Two
@@ -189,7 +209,7 @@ describe('openapi.json structural invariants', () => {
 // running gateway kept serving a document that fails validation while the artifact was clean. A
 // structural check, because neither producer is reachable from a unit test.
 describe('both OpenAPI producers apply the same passes', () => {
-  const PASSES = ['dropUnexpressibleOperations', 'exemptPublicOperations'];
+  const PASSES = ['dropUnexpressibleOperations', 'exemptPublicOperations', 'documentErrorResponses'];
   const producers = ['src/main.ts', 'scripts/export-openapi.ts'];
 
   it.each(PASSES)('%s runs in every producer', pass => {
@@ -206,9 +226,10 @@ describe('both OpenAPI producers apply the same passes', () => {
         text.indexOf(`${p}(document`) >= 0 ? text.indexOf(`${p}(document`) : text.indexOf(`${p}(doc`),
       );
       // drop must precede exempt: exempting an operation about to be deleted is wasted work, and the
-      // reverse order would leave a security exemption attached to nothing.
+      // reverse order would leave a security exemption attached to nothing. The error pass reads
+      // the exemption, so it runs last.
       expect(order[0]).toBeGreaterThan(-1);
-      expect(order[1]).toBeGreaterThan(order[0]);
+      for (let i = 1; i < order.length; i++) expect(order[i]).toBeGreaterThan(order[i - 1]);
     }
   });
 });
@@ -245,5 +266,59 @@ describe('every JSON request body publishes an object schema', () => {
       .filter(({ schema }) => !schema.$ref && !schema.properties && schema.type !== 'object')
       .map(({ op, schema }) => `${op} -> ${JSON.stringify(schema)}`);
     expect(primitives).toEqual([]);
+  });
+});
+
+/**
+ * A published `example` is what a reader pastes into Swagger's "Try it out", so an example its own
+ * route rejects is worse than no example at all: the first request against a new endpoint answers
+ * `400`, and the schema that caused it says nothing about why. `CreateWebhookDto.secret` offered a
+ * 15-character example under a 16-character floor, which is exactly how it was found
+ * ([#1491](https://github.com/rmyndharis/OpenWA/issues/1491)).
+ *
+ * Only length is checked here. It is the constraint a hand-written example actually drifts past, and
+ * it needs no validator: the bound and the example sit in the same schema object. The sweep covers
+ * the top-level string properties of each component schema, which is where a hand-written
+ * `@ApiProperty` example lives; nested and composed schemas are out of its reach.
+ */
+describe('every published string example fits its own schema', () => {
+  type Example = { where: string; example: string; min?: number; max?: number };
+
+  const examples = (): Example[] => {
+    const schemas = (snapshot().components?.schemas ?? {}) as Record<
+      string,
+      { properties?: Record<string, { type?: string; example?: unknown; minLength?: number; maxLength?: number }> }
+    >;
+    const out: Example[] = [];
+    for (const [name, schema] of Object.entries(schemas)) {
+      for (const [property, spec] of Object.entries(schema.properties ?? {})) {
+        if (spec.type === 'string' && typeof spec.example === 'string') {
+          out.push({ where: `${name}.${property}`, example: spec.example, min: spec.minLength, max: spec.maxLength });
+        }
+      }
+    }
+    return out;
+  };
+
+  const bounded = (): Example[] => examples().filter(({ min, max }) => min !== undefined || max !== undefined);
+
+  // Guards the assertion below twice over: an extractor that found no examples would pass it
+  // vacuously, and so would one that found examples but never a schema that bounds their length.
+  it('finds the document’s string examples, and the bounded ones among them', () => {
+    expect(examples().length).toBeGreaterThan(200);
+    expect(bounded().length).toBeGreaterThan(9);
+  });
+
+  it('publishes none of them outside its own minLength/maxLength', () => {
+    const violations = bounded()
+      .filter(
+        ({ example, min, max }) =>
+          (min !== undefined && example.length < min) || (max !== undefined && example.length > max),
+      )
+      .map(
+        ({ where, example, min, max }) =>
+          `${where}: ${JSON.stringify(example)} is ${example.length} chars, bounds [${min ?? '-'}, ${max ?? '-'}]`,
+      );
+    expect(violations).toEqual([]);
   });
 });

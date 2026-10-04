@@ -1,9 +1,15 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThan, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { IngressEvent } from './entities/ingress-event.entity';
 import { IntegrationDeliveryFailure } from './entities/integration-delivery-failure.entity';
-import { IngressEnqueueService, buildIngressDeadLetterRow } from './ingress-enqueue.service';
+import { PluginInstance } from './entities/plugin-instance.entity';
+import {
+  EnqueueOutcome,
+  IngressEnqueueService,
+  buildIngressDeadLetterRow,
+  resolveIngressJobOptions,
+} from './ingress-enqueue.service';
 import { extractConversationId } from './ingress.service';
 import { PluginInstanceService } from './plugin-instance.service';
 import { PluginLoaderService } from '../../core/plugins/plugin-loader.service';
@@ -12,8 +18,8 @@ import { createLogger } from '../../common/services/logger.service';
 import { resolveNonNegativeIntEnv } from '../../config/configuration';
 
 export interface IngressReconcilerOptions {
-  // Sweep cadence. 0 disables the reconciler. A blank or otherwise unparseable value falls back to
-  // the default rather than disabling the sweep, so a mis-set variable can never silently turn it off.
+  // Sweep cadence. 0 disables the reconciler. A blank value falls back to the default; boot validation
+  // refuses a negative or unparseable one, so a mis-set variable can never silently turn it off.
   intervalMs: number;
   // A 'pending' row only becomes sweep-eligible once its last activity (creation or latest attempt)
   // is older than this — the live path gets the whole window to record its own outcome first.
@@ -46,12 +52,14 @@ export interface IngressReconcileStats {
  * Closes the last silent-loss window of the fast-ack ingress pipeline. persist-before-ack makes the
  * ingress_events row durable, but durability alone is not delivery: a crash between the persist and
  * the enqueue, or a fire-and-forget enqueue whose outcome never gets recorded, strands the row
- * 'pending' forever — a provider retry only hits the dedup oracle and 200s as 'duplicate'.
+ * 'pending' forever: a provider retry only hits the dedup oracle and is answered with the route's ack.
  *
  * The reconciler sweeps small batches of stale 'pending' rows and re-dispatches them through the
  * exact same IngressEnqueueService the live path uses (same deliveryId as BullMQ jobId, so a replay
- * is idempotent against a job that did get enqueued). Re-dispatch from the row is sound because a
- * 'pending' row IS the full verified request: payload carries headers/query/body/rawBody,
+ * is idempotent against a job that did get enqueued; one that already failed is left to the DLQ,
+ * never counted as delivered, unless a copy IngressProcessor re-queued under a fresh id still owns
+ * the delivery, which then counts as that job). Re-dispatch from the row is sound because a 'pending'
+ * row IS the full verified request: payload carries headers/query/body/rawBody,
  * providerDeliveryId is the delivery id, and the manifest route re-derives the conversation lane.
  * (The payload is retired to NULL the moment an outcome is recorded — 'dispatched' rows and DLQ'd
  * 'failed' rows no longer need it — so only 'pending' rows, which always carry it, are replayable.)
@@ -79,7 +87,7 @@ export class IngressReconcilerService implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     const opts = resolveIngressReconcilerOptions();
     if (opts.intervalMs <= 0) {
-      this.logger.log('Ingress event reconciler disabled (INGRESS_RECONCILE_INTERVAL_MS <= 0)');
+      this.logger.log('Ingress event reconciler disabled (INGRESS_RECONCILE_INTERVAL_MS=0)');
       return;
     }
     this.timer = setInterval(() => {
@@ -104,11 +112,24 @@ export class IngressReconcilerService implements OnModuleInit, OnModuleDestroy {
     this.sweeping = true;
     try {
       const cutoff = new Date(now.getTime() - opts.graceMs);
-      const rows = await this.events.find({
-        where: { dispatchState: 'pending', createdAt: LessThan(cutoff) },
-        order: { createdAt: 'ASC' },
-        take: opts.batchSize,
-      });
+      // Only rows the sweep can act on may take a batch slot: a row of a disabled or deleted instance,
+      // or one without a payload, is skipped without being written, so selecting it would hand the same
+      // oldest rows back every sweep and starve every other instance's stranded deliveries. The join is
+      // 1:1 (plugin_instances is unique on pluginId+instanceId), so limit() bounds rows, not join fan-out.
+      const rows = await this.events
+        .createQueryBuilder('e')
+        .innerJoin(
+          PluginInstance,
+          'pi',
+          'pi.pluginId = e.pluginId AND pi.instanceId = e.instanceId AND pi.enabled = :enabled',
+          { enabled: true },
+        )
+        .where('e.dispatchState = :state', { state: 'pending' })
+        .andWhere('e.createdAt < :cutoff', { cutoff })
+        .andWhere('e.payload IS NOT NULL')
+        .orderBy('e.createdAt', 'ASC')
+        .limit(opts.batchSize)
+        .getMany();
       for (const row of rows) {
         // A row whose latest attempt is still inside the grace window cools down between replays;
         // it keeps its batch slot (bounded by maxAttempts, so the leak is capped) but is not hit again.
@@ -117,8 +138,8 @@ export class IngressReconcilerService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
         // A 'pending' row without a payload cannot be replayed (payloads are retired only once an
-        // outcome is recorded, so this means an imported/corrupt row). Skip it loudly rather than
-        // dispatching an empty delivery or spinning the attempt budget on a row that can never fire.
+        // outcome is recorded, so this means an imported/corrupt row). The query already excludes it;
+        // this narrows the type and still refuses to dispatch an empty delivery.
         if (!hasPayload(row)) {
           this.logger.error('Ingress event is pending without a payload; cannot replay', undefined, {
             pluginId: row.pluginId,
@@ -173,15 +194,54 @@ export class IngressReconcilerService implements OnModuleInit, OnModuleDestroy {
     now: Date,
   ): Promise<'replayed' | 'failed'> {
     const jobData = this.jobDataFor(row);
-    // jobId = the ORIGINAL deliveryId: BullMQ dedups a replay against a job that did get enqueued
-    // before the crash, so re-dispatch never double-delivers on the queue path.
-    const { outcome, error } = await this.ingressEnqueue.enqueue(jobData, row.providerDeliveryId);
+    // jobId = the ORIGINAL deliveryId, so the replay lands on any job the live path did enqueue before
+    // its outcome mark was lost. BullMQ resolves a duplicate add() whatever that job's state, so look
+    // first: a live job already owns the delivery, and a failed one would swallow the replay.
+    const existing = await this.ingressEnqueue.existingJobState(jobData, row.providerDeliveryId);
+    if (existing === 'failed') {
+      // Every queue attempt already ran and IngressProcessor dead-lettered the delivery, or re-queued it
+      // and every copy failed too: a live or completed copy answers for the job (see existingJobState).
+      // Nothing is dispatched: the DLQ row stays redrivable (written here if the processor's write was
+      // lost, and before the payload is retired, since it becomes the payload's only home). A copy the
+      // lookup missed (one pruned once completed) has already marked the event 'dispatched', so the mark
+      // only lands on a still-'pending' event, and the row this sweep wrote for an event a copy already
+      // dispatched is retired again. Only that row: 'dispatched' is also the mark for a job that was
+      // still live, and a row written before this sweep can be the dead letter of a delivery that never
+      // arrived.
+      const written = await this.ensureDeadLetterRow(
+        jobData,
+        resolveIngressJobOptions().attempts,
+        'ingress queue job failed',
+      );
+      const marked = await this.events.update(
+        { id: row.id, dispatchState: 'pending' },
+        { lastDispatchAt: now, dispatchState: 'failed', payload: null },
+      );
+      if (!marked.affected && written) {
+        const current = await this.events.findOne({ where: { id: row.id }, select: { dispatchState: true } });
+        if (current?.dispatchState === 'dispatched') {
+          await this.failures.update({ id: written, redriven: false }, { redriven: true });
+          return 'replayed';
+        }
+      }
+      this.logger.warn('Stranded ingress event already failed in the queue; left for redrive', {
+        pluginId: row.pluginId,
+        instanceId: row.instanceId,
+        deliveryId: row.providerDeliveryId,
+        action: 'ingress_event_reconcile_job_failed',
+      });
+      return 'failed';
+    }
+    const { outcome, error }: EnqueueOutcome = existing
+      ? { outcome: 'queued' }
+      : await this.ingressEnqueue.enqueue(jobData, row.providerDeliveryId);
     if (outcome !== 'failed') {
       // Retire the payload with the outcome: the dispatch tier owns the delivery from here (the
       // BullMQ job data, or a DLQ row on an in-tier failure), so the dedup row slims to its marker.
       await this.events.update({ id: row.id }, { dispatchState: 'dispatched', lastDispatchAt: now, payload: null });
       // Retire any dead-letter row the live path already wrote for this delivery (the inline-failure
-      // case) — the replay just delivered it, so a later manual redrive must not deliver it again.
+      // case): the replay, or the job or re-queued copy still live in the queue, delivers it, so a later
+      // manual redrive must not deliver it again.
       await this.failures.update(
         {
           direction: 'inbound',
@@ -228,8 +288,8 @@ export class IngressReconcilerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Rebuild the dispatch job from the persisted row. `method` is the one request field the row does
-   * not persist — dispatchWebhookForInstance defaults it to 'POST' (the same tolerance RedriveService
+   * Rebuild the dispatch job from the persisted row. A row written before the method was persisted
+   * has none, and dispatchWebhookForInstance defaults it to 'POST' (the same tolerance RedriveService
    * applies to legacy DLQ rows). providerConversationId is re-derived from the CURRENT manifest route
    * so the replay joins the same per-conversation ordering lane as live deliveries instead of
    * degrading to the per-instance lane; a hot-swapped/missing route just yields no key.
@@ -238,20 +298,27 @@ export class IngressReconcilerService implements OnModuleInit, OnModuleDestroy {
     const route = this.loader
       .getPlugin(row.pluginId)
       ?.manifest.ingress?.find(candidate => candidate.route === row.route);
+    const { method, ...payload } = row.payload;
     return {
       pluginId: row.pluginId,
       instanceId: row.instanceId,
       route: row.route,
+      method,
       deliveryId: row.providerDeliveryId,
       sessionId: row.sessionId ?? undefined,
-      providerConversationId: extractConversationId(route?.conversationId, row.payload.headers, row.payload.rawBody),
-      payload: row.payload,
+      providerConversationId: extractConversationId(route?.conversationId, payload.headers, payload.rawBody),
+      payload,
     };
   }
 
   // The live path dead-letters an inline-dispatch failure at request time, so a terminal row may
-  // already have its DLQ entry — write one only if missing, and never a second copy.
-  private async ensureDeadLetterRow(data: IngressJobData, attempts: number, error?: string): Promise<void> {
+  // already have its DLQ entry — write one only if missing, and never a second copy. Returns the id of
+  // the row it wrote, or undefined when one already existed.
+  private async ensureDeadLetterRow(
+    data: IngressJobData,
+    attempts: number,
+    error?: string,
+  ): Promise<string | undefined> {
     const existing = await this.failures.count({
       where: {
         direction: 'inbound',
@@ -260,8 +327,8 @@ export class IngressReconcilerService implements OnModuleInit, OnModuleDestroy {
         deliveryId: data.deliveryId,
       },
     });
-    if (existing > 0) return;
-    await this.failures.save({ ...buildIngressDeadLetterRow(data, error), attempts });
+    if (existing > 0) return undefined;
+    return (await this.failures.save({ ...buildIngressDeadLetterRow(data, error), attempts })).id;
   }
 }
 

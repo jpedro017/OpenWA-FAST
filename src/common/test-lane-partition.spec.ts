@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import * as yaml from 'js-yaml';
 
 /**
  * The doc-lint suites live in two hand-maintained lists in package.json: the `test:docs` script
@@ -12,7 +13,7 @@ import { join } from 'node:path';
 describe('Test lane partition', () => {
   const repoRoot = join(__dirname, '..', '..');
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as {
-    scripts: { 'test:docs'?: string };
+    scripts: { 'test:docs'?: string; 'test:scripts'?: string };
     jest?: { testPathIgnorePatterns?: string[]; coveragePathIgnorePatterns?: string[] };
   };
 
@@ -80,6 +81,62 @@ describe('Test lane partition', () => {
     // source path here deletes that code from the coverage ratios.
     const notASpec = coverageIgnores.filter(p => p !== '/node_modules/' && !p.endsWith('\\.spec\\.ts$'));
     expect(notASpec).toEqual([]);
+  });
+
+  /**
+   * `scripts/` has its own lane. `test:scripts` hands node:test an explicit list of positionals,
+   * and jest never looks in that directory, so the two lanes cannot cover for each other: a spec
+   * written under `scripts/` and left out of that string runs NOWHERE, and nothing fails to say so.
+   *
+   * Unlike the doc lane above there is no second list to compare against, so the comparison is
+   * against the directory itself. That also catches the reverse, a renamed or deleted spec still
+   * named by the script, which makes the whole node:test invocation exit non-zero on a file it
+   * cannot open.
+   */
+  it('runs every spec under scripts/ in the test:scripts lane', () => {
+    const isSpec = (name: string): boolean => name.endsWith('.spec.js') || name.endsWith('.spec.mjs');
+    const onDisk = readdirSync(join(repoRoot, 'scripts'))
+      .filter(isSpec)
+      .map(name => `scripts/${name}`);
+    const named = (pkg.scripts['test:scripts'] ?? '').split(/\s+/).filter(isSpec);
+
+    // Vacuity guard: an empty directory scan or an unparsed script would pass the diff below.
+    expect(onDisk.length).toBeGreaterThan(10);
+    expect(named.length).toBeGreaterThan(10);
+
+    expect({
+      neverRun: onDisk.filter(path => !named.includes(path)).sort(),
+      namedButAbsent: named.filter(path => !onDisk.includes(path)).sort(),
+    }).toEqual({ neverRun: [], namedButAbsent: [] });
+  });
+
+  /**
+   * The PostgreSQL specs self-skip unless DATABASE_TYPE=postgres, so the unit lane reports one as
+   * skipped, which is green. The only lane that sets it is the `test-postgres` job, and that job
+   * names its specs inline. jest reads those positionals as OR'd regex filters, so a stale name
+   * matches nothing and still exits 0, and a new spec left off the list runs nowhere. Diff each
+   * workflow's list against the files on disk.
+   */
+  it.each(['ci.yml', 'release.yml'])('runs every *.pg.spec.ts in the %s test-postgres job', file => {
+    const isPgSpec = (path: string): boolean => path.endsWith('.pg.spec.ts');
+    const onDisk = (readdirSync(join(repoRoot, 'src'), { recursive: true }) as string[])
+      .filter(isPgSpec)
+      .map(path => `src/${path.split('\\').join('/')}`);
+    const workflow = yaml.load(readFileSync(join(repoRoot, '.github', 'workflows', file), 'utf8')) as {
+      jobs?: Record<string, { steps?: { run?: string }[] }>;
+    };
+    const named = (workflow.jobs?.['test-postgres']?.steps ?? [])
+      .flatMap(step => (step.run ?? '').split(/\s+/))
+      .filter(isPgSpec);
+
+    // Vacuity guard: a scan or a parse that found nothing would pass the diff below.
+    expect(onDisk.length).toBeGreaterThanOrEqual(5);
+    expect(named.length).toBeGreaterThanOrEqual(5);
+
+    expect({
+      neverRun: onDisk.filter(path => !named.includes(path)).sort(),
+      namedButAbsent: named.filter(path => !onDisk.includes(path)).sort(),
+    }).toEqual({ neverRun: [], namedButAbsent: [] });
   });
 
   it('names suites that exist on disk', () => {

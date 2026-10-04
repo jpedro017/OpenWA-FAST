@@ -41,18 +41,25 @@ func (s *LabelsService) Chats(ctx context.Context, sessionID, labelID string) ([
 //
 // PUT rather than POST because the caller chooses the id: WhatsApp carries one write keyed on it, so
 // whether this creates or updates depends purely on whether that id already exists. Pick an unused
-// id to create — reusing one rewrites that label rather than failing. Omitted fields are left alone.
+// id to create — reusing one rewrites that label rather than failing.
+// The write replaces the whole label, so an omitted field is not preserved.
 func (s *LabelsService) Upsert(ctx context.Context, sessionID, labelID string, body UpsertLabelRequest) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "PUT", s.base(sessionID)+"/"+pathEscape(labelID), nil, body, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Delete removes a label; it disappears from every chat it was on. Baileys only.
 func (s *LabelsService) Delete(ctx context.Context, sessionID, labelID string) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "DELETE", s.base(sessionID)+"/"+pathEscape(labelID), nil, nil, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // ForChat returns the labels applied to a chat.

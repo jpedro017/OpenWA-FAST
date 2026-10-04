@@ -10,6 +10,7 @@
  */
 
 import { MessageType } from '../../../engine/interfaces/whatsapp-engine.interface';
+import { chatKind, type ChatKind } from '../../../engine/identity/wa-id';
 
 export type FilterOperator = 'is' | 'isNot' | 'contains' | 'equals';
 
@@ -56,11 +57,16 @@ const MESSAGE_TYPE_FLAGS: Record<MessageType, true> = {
   poll: true,
   call: true,
   revoked: true,
+  order: true,
+  product: true,
   masked: true,
   unknown: true,
 };
 
 export const MESSAGE_TYPES: readonly MessageType[] = Object.keys(MESSAGE_TYPE_FLAGS) as MessageType[];
+
+/** Chat kinds a message-family filter can match on. `channel` is a newsletter; see chatKind(). */
+export const CHAT_KINDS: readonly ChatKind[] = ['individual', 'group', 'channel', 'status', 'broadcast', 'unknown'];
 
 // Guard rails. These bound both stored config size and per-event evaluation cost.
 export const MAX_CONDITIONS = 20;
@@ -94,6 +100,20 @@ export const FILTER_FIELDS: Record<string, FieldDefinition[]> = {
       resolve: data => str(data.to),
     },
     {
+      // Conversation JID (DM or group). Carried by the message events proper: `IncomingMessage`
+      // declares `chatId` required, and the edited, reaction and revoked events set it explicitly.
+      // NOT by `message.ack` and `message.failed`, whose payload is `{ id, messageId, status, ack }`,
+      // so a chatId condition never scopes those two: an `is` condition suppresses every one of them
+      // and an `isNot` condition lets every one through. Scope the subscription with `events[]`
+      // instead (docs/06 carries the same warning for `sender`).
+      // Deliberately without a fall back to `from`, which is the sender on a DM and this session on
+      // an outbound message, so it would silently scope the filter to the wrong conversation.
+      field: 'chatId',
+      kind: 'id',
+      operators: ID_OPERATORS,
+      resolve: data => str(data.chatId),
+    },
+    {
       field: 'body',
       kind: 'text',
       operators: TEXT_OPERATORS,
@@ -111,6 +131,22 @@ export const FILTER_FIELDS: Record<string, FieldDefinition[]> = {
       kind: 'boolean',
       operators: BOOLEAN_OPERATORS,
       resolve: data => data.isGroup === true,
+    },
+    {
+      // The chat kind, so a filter can single out or exclude a channel (newsletter) where the
+      // boolean isGroup cannot: individual, group, channel, status, broadcast and unknown all
+      // collapse to isGroup=false. `kind` rides the received payload directly; the edited, reaction
+      // and revoked events in this family carry only chatId, so derive it there.
+      field: 'kind',
+      kind: 'enum',
+      operators: ENUM_OPERATORS,
+      enumValues: CHAT_KINDS,
+      resolve: data => {
+        const k = str(data.kind);
+        if (k) return k;
+        const chatId = str(data.chatId);
+        return chatId ? chatKind(chatId) : undefined;
+      },
     },
     {
       field: 'fromMe',

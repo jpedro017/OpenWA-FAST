@@ -10,9 +10,11 @@ import { encodeSegment } from '../http.js';
 import type { BinaryResponse } from '../http.js';
 import type { OpenWAClient } from '../client.js';
 import type {
+  BatchCancelResponse,
   BatchStatusResponse,
   BulkMessageResponse,
   ChatHistoryMessage,
+  ClickButtonRequest,
   DeleteMessageRequest,
   EditMessageRequest,
   ForwardMessageRequest,
@@ -74,7 +76,10 @@ export class MessagesResource {
     return this.client.sendMedia(sessionId, 'send-audio', body);
   }
 
-  /** Send a document (url or base64; `filename` required). */
+  /**
+   * Send a document (url or base64). `filename` is optional and is the name the recipient sees;
+   * without it the gateway uses `"file"`, or the URL basename for a URL send on whatsapp-web.js.
+   */
   sendDocument(sessionId: string, body: SendMediaRequest): Promise<MessageResponse> {
     return this.client.sendMedia(sessionId, 'send-document', body);
   }
@@ -125,6 +130,18 @@ export class MessagesResource {
     return this.client.request<MessageResponse>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/messages/reply`,
+      body,
+    });
+  }
+
+  /**
+   * Click a button on a WhatsApp Business prompt. Baileys only (whatsapp-web.js returns 501).
+   * Sends a structured reply proto quoted to the prompt, not a native UI tap.
+   */
+  clickButton(sessionId: string, body: ClickButtonRequest): Promise<MessageResponse> {
+    return this.client.request<MessageResponse>({
+      method: 'POST',
+      path: `/api/sessions/${encodeSegment(sessionId)}/messages/click-button`,
       body,
     });
   }
@@ -259,8 +276,8 @@ export class MessagesResource {
   }
 
   /** Cancel a running batch. Requires an OPERATOR-level key. */
-  cancelBatch(sessionId: string, batchId: string): Promise<BatchStatusResponse> {
-    return this.client.request<BatchStatusResponse>({
+  cancelBatch(sessionId: string, batchId: string): Promise<BatchCancelResponse> {
+    return this.client.request<BatchCancelResponse>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/messages/batch/${encodeSegment(batchId)}/cancel`,
     });

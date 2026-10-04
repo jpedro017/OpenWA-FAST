@@ -34,7 +34,9 @@ public record ChatHistoryMessage(
     Integer font,
     Media media,
     QuotedMessage quotedMessage,
-    Location location) {
+    Location location,
+    Order order,
+    Product product) {
 
     /** Attached media; {@code data} is absent when the payload was omitted (too large). */
     public record Media(String mimetype, String filename, String data, Boolean omitted, Long sizeBytes) {}
@@ -47,8 +49,17 @@ public record ChatHistoryMessage(
     public record Call(Boolean video, Boolean missed) {}
 
     /**
-     * Sender contact info. History carries {@code pushName} only; the richer fields arrive on
-     * {@code message.received} when {@code WEBHOOK_CONTACT_DETAILS} is enabled.
+     * Present on {@code order} messages only: the cart the customer placed from the business
+     * catalog, plus the single-order {@code token} that resolves its line items.
+     */
+    public record Order(String orderId, String token) {}
+
+    /** Present on {@code product} messages only: the catalog product shared into the chat. */
+    public record Product(String productId, String title, String description, String businessOwnerJid) {}
+
+    /**
+     * Sender contact info. History carries {@code name} and {@code pushName}; the richer fields
+     * are added when {@code WEBHOOK_CONTACT_DETAILS} is enabled, as on {@code message.received}.
      */
     public record Contact(
         String id,

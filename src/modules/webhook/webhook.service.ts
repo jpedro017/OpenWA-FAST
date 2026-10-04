@@ -9,7 +9,8 @@ import { CreateWebhookDto, UpdateWebhookDto } from './dto';
 import { createLogger } from '../../common/services/logger.service';
 import { resolveSessionScope } from '../../common/security/session-scope';
 import { ListOptions, resolveListWindow } from '../../common/utils/paginate';
-import { generateIdempotencyKey, generateDeliveryId } from './utils/idempotency.util';
+import { generateDeliveryId } from './utils/idempotency.util';
+import { buildDeliveryHeaders } from './utils/deliver-once';
 import {
   assertSafeFetchUrl,
   withSafeFetch,
@@ -55,9 +56,9 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Periodically prune webhook_delivery_failures older than WEBHOOK_FAILURE_RETENTION_DAYS
-   * (default 90; set <= 0 to disable). Runs once at startup, then daily. The table is an append-only
-   * log written on every terminally-failed delivery, so without this it grows without bound under a
-   * receiver outage. (Mirrors AuditService's audit-log retention.)
+   * (default 90; set <= 0 to disable). Runs once at startup, then daily. The table records every
+   * failed or unsent delivery (a later successful delivery removes its row), so without this it grows
+   * without bound under a receiver outage. (Mirrors AuditService's audit-log retention.)
    */
   onModuleInit(): void {
     const parsed = Number.parseInt(process.env.WEBHOOK_FAILURE_RETENTION_DAYS ?? '', 10);
@@ -171,7 +172,12 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
     // A session-restricted key only sees its own sessions' webhooks; an unrestricted key
     // (null/empty allowlist, e.g. ADMIN) sees all — mirroring the ApiKeyGuard allowedSessions model.
     const { limit, offset } = resolveListWindow(opts.limit, opts.offset);
-    const options: FindManyOptions<Webhook> = { order: { createdAt: 'DESC' }, take: limit, skip: offset };
+    // `id` tiebreaks the second-resolution `createdAt` so a paged walk has a total order.
+    const options: FindManyOptions<Webhook> = {
+      order: { createdAt: 'DESC', id: 'DESC' },
+      take: limit,
+      skip: offset,
+    };
     if (allowedSessions && allowedSessions.length > 0) {
       options.where = { sessionId: In(allowedSessions) };
     }
@@ -195,7 +201,8 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
     if (sessionScope !== null && sessionScope.length === 0) return []; // requested session outside the key's scope
     return this.failureRepository.find({
       where: sessionScope ? { sessionId: In(sessionScope) } : {},
-      order: { createdAt: 'DESC' },
+      // A receiver outage writes a burst of failures inside one second; `id` keeps the page order total.
+      order: { createdAt: 'DESC', id: 'DESC' },
       take: limit,
       skip: offset,
     });
@@ -213,21 +220,32 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
 
   async update(sessionId: string, id: string, dto: UpdateWebhookDto): Promise<Webhook> {
     const webhook = await this.findOne(sessionId, id);
+    const patch: Partial<Pick<Webhook, 'url' | 'events' | 'secret' | 'headers' | 'filters' | 'active' | 'retryCount'>> =
+      {};
 
-    if (dto.url !== undefined) {
+    // An unchanged URL is not re-validated: every edit re-sends it, so a webhook whose host stopped
+    // resolving or became SSRF-blocked could not otherwise be deactivated or re-filtered. Delivery
+    // still checks the URL on every send.
+    if (dto.url !== undefined && dto.url !== webhook.url) {
       await this.validateWebhookUrl(dto.url);
-      webhook.url = dto.url;
+      patch.url = dto.url;
     }
-    if (dto.events !== undefined) webhook.events = dto.events;
+    if (dto.events !== undefined) patch.events = dto.events;
     // Normalize empty string to null (parity with create) — an empty secret means "no HMAC",
     // not a stored blank that silently disables signing while looking configured.
-    if (dto.secret !== undefined) webhook.secret = dto.secret || null;
-    if (dto.headers !== undefined) webhook.headers = dto.headers;
-    if (dto.filters !== undefined) webhook.filters = dto.filters;
-    if (dto.active !== undefined) webhook.active = dto.active;
-    if (dto.retryCount !== undefined) webhook.retryCount = dto.retryCount;
+    if (dto.secret !== undefined) patch.secret = dto.secret || null;
+    if (dto.headers !== undefined) patch.headers = dto.headers;
+    if (dto.filters !== undefined) patch.filters = dto.filters;
+    if (dto.active !== undefined) patch.active = dto.active;
+    if (dto.retryCount !== undefined) patch.retryCount = dto.retryCount;
+    if (Object.keys(patch).length === 0) return webhook;
 
-    return this.webhookRepository.save(webhook);
+    // A conditional UPDATE of the carried fields, not save() of the entity read above: save() would
+    // re-insert a row a concurrent DELETE removed during the URL check, and write back stale values
+    // of every column this request did not touch.
+    const result = await this.webhookRepository.update({ id, sessionId }, patch);
+    if (!result.affected) throw new NotFoundException(`Webhook with id '${id}' not found`);
+    return this.findOne(sessionId, id);
   }
 
   async delete(sessionId: string, id: string): Promise<void> {
@@ -238,12 +256,15 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
   async test(sessionId: string, webhookId: string): Promise<{ success: boolean; statusCode?: number; error?: string }> {
     const webhook = await this.findOne(sessionId, webhookId);
 
+    // Every test is a new event: a key derived from the webhook alone repeats on every call, so a
+    // receiver that dedups on it acknowledges the second test without running its handler.
+    const deliveryId = generateDeliveryId();
     const testPayload: WebhookPayload = {
       event: 'test',
       timestamp: new Date().toISOString(),
       sessionId,
-      idempotencyKey: generateIdempotencyKey('test', { webhookId: webhook.id }),
-      deliveryId: generateDeliveryId(),
+      idempotencyKey: `test_${deliveryId}_${webhook.id}`,
+      deliveryId,
       data: {
         message: 'This is a test webhook from OpenWA',
         webhookId: webhook.id,
@@ -252,20 +273,8 @@ export class WebhookService implements OnModuleInit, OnModuleDestroy {
     };
 
     const body = JSON.stringify(testPayload);
-    const headers: Record<string, string> = {
-      // Custom headers FIRST so the system headers below always win.
-      ...this.delivery.sanitizeCustomHeaders(webhook.headers),
-      'Content-Type': 'application/json',
-      'User-Agent': 'OpenWA-Webhook/1.0.0',
-      'X-OpenWA-Event': 'test',
-      'X-OpenWA-Idempotency-Key': testPayload.idempotencyKey,
-      'X-OpenWA-Delivery-Id': testPayload.deliveryId,
-      'X-OpenWA-Retry-Count': '0',
-    };
-
-    if (webhook.secret) {
-      headers['X-OpenWA-Signature'] = this.delivery.generateSignature(body, webhook.secret);
-    }
+    // The same header builder as a real delivery, so the probe tests what the receiver will get.
+    const headers = buildDeliveryHeaders(webhook, 'test', testPayload.idempotencyKey, deliveryId, body);
 
     try {
       return await withSafeFetch(

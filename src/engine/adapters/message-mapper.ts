@@ -10,7 +10,14 @@ import { chatKind } from '../identity/wa-id';
  */
 export function mapWwebjsMessageType(raw: string): MessageType {
   switch (raw) {
+    // Besides plain `chat`, a tapped button, list row or template button: WA Web carries the chosen
+    // option's text in the body, and Baileys reports the same replies as `text` (#562). `hsm` and
+    // `interactive` prompts are left out: their body can be empty, and an empty text is worse than
+    // `unknown`.
     case 'chat':
+    case 'buttons_response':
+    case 'list_response':
+    case 'template_button_reply':
       return 'text';
     case 'image':
       return 'image';
@@ -35,6 +42,10 @@ export function mapWwebjsMessageType(raw: string): MessageType {
       return 'poll';
     case 'revoked':
       return 'revoked';
+    case 'order':
+      return 'order';
+    case 'product':
+      return 'product';
     default:
       return 'unknown';
   }
@@ -65,6 +76,16 @@ export interface RawMessageFields {
   mentionedIds?: string[];
   /** Raw wwebjs payload; `notifyName` carries the sender's push name without an extra lookup. */
   _data?: { notifyName?: string; ephemeralDuration?: number };
+  /** Set on `order` messages: the placed order's id, and the single-order token that unlocks its items. */
+  orderId?: string;
+  token?: string;
+  /** Set on `product` messages: the shared catalog product. */
+  productId?: string;
+  /** Product title / description. whatsapp-web.js exposes these only for a product card. */
+  title?: string;
+  description?: string;
+  /** The catalog owner's JID, on a shared product card. */
+  businessOwnerJid?: string;
 }
 
 /**
@@ -123,6 +144,19 @@ export function buildIncomingMessageBase(msg: RawMessageFields): IncomingMessage
   // Ephemeral/disappearing-messages timer, when the chat has one set.
   if (msg._data?.ephemeralDuration && msg._data.ephemeralDuration > 0) {
     incoming.ephemeralDuration = msg._data.ephemeralDuration;
+  }
+
+  // Commerce ids, keyed off the mapped type so a stray `title` on some other message shape cannot
+  // fabricate a product. Without the id neither entry is actionable, so both are then left unset.
+  if (incoming.type === 'order' && msg.orderId) {
+    incoming.order = { orderId: msg.orderId, ...(msg.token ? { token: msg.token } : {}) };
+  } else if (incoming.type === 'product' && msg.productId) {
+    incoming.product = {
+      productId: msg.productId,
+      ...(msg.title ? { title: msg.title } : {}),
+      ...(msg.description ? { description: msg.description } : {}),
+      ...(msg.businessOwnerJid ? { businessOwnerJid: msg.businessOwnerJid } : {}),
+    };
   }
 
   return incoming;

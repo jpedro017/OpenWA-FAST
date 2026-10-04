@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { OpenWAClient } from '../src';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import { OpenWAClient, type BatchCancelResponse } from '../src';
 import { MockTransport } from './helpers';
 
 function client(t: MockTransport): OpenWAClient {
@@ -167,6 +167,26 @@ describe('MessagesResource — exact paths', () => {
     expect(t.lastCall!.url).toContain('/messages/delete');
   });
 
+  it('clickButton posts to /messages/click-button', async () => {
+    const t = new MockTransport().on('POST', /\/messages\/click-button$/, {
+      body: { messageId: 'm2', timestamp: 9 },
+    });
+    const res = await client(t).messages.clickButton('s', {
+      chatId: 'a@c.us',
+      messageId: 'prompt1',
+      buttonId: 'yes',
+      text: 'Sim',
+    });
+    expect(t.lastCall!.url).toBe('http://x/api/sessions/s/messages/click-button');
+    expect(t.lastCall!.body).toEqual({
+      chatId: 'a@c.us',
+      messageId: 'prompt1',
+      buttonId: 'yes',
+      text: 'Sim',
+    });
+    expect(res.messageId).toBe('m2');
+  });
+
   it('editMessage posts to /messages/edit and returns the MessageResponse shape', async () => {
     const t = new MockTransport().on('POST', /\/messages\/edit$/, { body: { messageId: 'm1', timestamp: 4 } });
     const res = await client(t).messages.editMessage('s', { chatId: 'a@c.us', messageId: 'm1', body: 'edited' });
@@ -218,6 +238,8 @@ describe('MessagesResource — exact paths', () => {
     expect(status.progress?.sent).toBe(1);
     expect(t.lastCall!.url).toContain('/messages/batch/b');
     const cancelled = await c.messages.cancelBatch('s', 'b');
+    // The cancel route answers without the per-recipient `results` the status route carries.
+    expectTypeOf(cancelled).toEqualTypeOf<BatchCancelResponse>();
     expect(cancelled.status).toBe('cancelled');
     expect(t.lastCall!.url).toContain('/messages/batch/b/cancel');
     expect(t.lastCall!.method).toBe('POST');

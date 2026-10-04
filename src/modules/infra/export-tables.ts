@@ -1,4 +1,4 @@
-import type { MigrationTables, WebhookRow, MessageRow, MessageBatchRow } from './migration-tables.types';
+import type { MigrationTables, SessionRow, WebhookRow, MessageRow, MessageBatchRow } from './migration-tables.types';
 
 /**
  * A `data` value that is a POINTER rather than bytes. `metadata.media.data` holds `base64 || dto.url!`
@@ -23,6 +23,36 @@ function redactWebhookCredentials(rows: WebhookRow[]): void {
   for (const row of rows) {
     delete row.secret;
     delete row.headers;
+  }
+}
+
+/**
+ * `sessions.proxyUrl` may embed `user:pass` (docs/04 section 4.3), and the sibling webhook secret
+ * above is already kept out of this payload. Strip the userinfo and keep the rest of the URL.
+ *
+ * Dropping the column instead would be worse than it looks: the importer would restore the session
+ * with no proxy at all, and it would then connect DIRECT on the next start, leaking the host's real
+ * egress IP to WhatsApp with nothing to notice. That is the exact failure mode the engine refuses
+ * elsewhere, where an unusable proxy value fails the session rather than silently bypassing it
+ * (baileys-lifecycle.ts). A credential-stripped URL keeps the operator's intent visible, restores as
+ * `hasCredentials: false` on `GET /proxy`, and fails loudly on the next start when the proxy needs
+ * auth, which is the signal to re-enter it.
+ *
+ * A value the URL parser rejects is cleared rather than passed through, since it cannot be proven
+ * free of credentials.
+ */
+function redactSessionProxyCredentials(rows: SessionRow[]): void {
+  for (const row of rows) {
+    if (!row.proxyUrl) continue;
+    try {
+      const parsed = new URL(row.proxyUrl);
+      if (!parsed.username && !parsed.password) continue;
+      parsed.username = '';
+      parsed.password = '';
+      row.proxyUrl = parsed.toString();
+    } catch {
+      row.proxyUrl = null;
+    }
   }
 }
 
@@ -129,13 +159,31 @@ export interface ExportTable<K extends keyof MigrationTables = keyof MigrationTa
    * export, because a backup that silently omits them is worse than no backup.
    */
   optional?: boolean;
+  /**
+   * Rows carry an FK `sessionId` to sessions. The reads share no snapshot, so a session created after
+   * `sessions` was read can leave child rows here that would fail the restore's FK check and roll the
+   * whole import back; the export drops rows whose session is not in the archive.
+   */
+  sessionFk?: boolean;
   /** In-place row mutation applied right after the read (redaction, artifact stripping). */
   afterRead?: (rows: MigrationTables[K]) => void;
-  /** Spends the export's shared inline-media budget on this table's payloads. */
+  /**
+   * Spends the export's shared inline-media budget on this table's payloads. Such a table is never
+   * read whole: the export reads `id`, `recencyColumn` and the stored size of `payloadColumn` for
+   * every row, then the full rows in chunks, newest-first, stripping each chunk before reading the next.
+   */
   inlineMedia?: {
     /** Which arm of `omittedInlineMedia` reports this table's dropped payloads. */
     bucket: 'messages' | 'messageBatches';
-    /** Recency key: the budget is spent newest-first, so the most recent media survives. */
+    /** Column `newestFirst` reads. */
+    recencyColumn: keyof MigrationTables[K][number] & string;
+    /** Column holding the inline payloads; its stored size bounds each chunk of full rows. */
+    payloadColumn: keyof MigrationTables[K][number] & string;
+    /**
+     * Recency key: the budget is spent newest-first, so the most recent media survives. It is called
+     * on the key rows, which hold only `id`, `recencyColumn` and the payload size, so it must read
+     * nothing but `recencyColumn`.
+     */
     newestFirst: (row: MigrationTables[K][number]) => number;
     /** Drops the row's inline payload in place when it does not fit the budget. */
     strip: (row: MigrationTables[K][number], exceedsBudget: (encodedBytes: number) => boolean) => void;
@@ -152,6 +200,8 @@ export type AnyExportTable = Omit<ExportTable, 'afterRead' | 'inlineMedia'> & {
   afterRead?: (rows: never[]) => void;
   inlineMedia?: {
     bucket: 'messages' | 'messageBatches';
+    recencyColumn: string;
+    payloadColumn: string;
     newestFirst: (row: never) => number;
     strip: (row: never, exceedsBudget: (encodedBytes: number) => boolean) => void;
   };
@@ -172,8 +222,8 @@ function defineExportTable<K extends keyof MigrationTables>(table: ExportTable<K
  */
 export const EXPORT_TABLES: AnyExportTable[] = [
   // sessions first: webhooks/messages/templates/etc. all reference it (some via FK, all by sessionId).
-  defineExportTable({ key: 'sessions', table: 'sessions' }),
-  defineExportTable({ key: 'webhooks', table: 'webhooks', afterRead: redactWebhookCredentials }),
+  defineExportTable({ key: 'sessions', table: 'sessions', afterRead: redactSessionProxyCredentials }),
+  defineExportTable({ key: 'webhooks', table: 'webhooks', sessionFk: true, afterRead: redactWebhookCredentials }),
 
   // Both carry a full inline base64 payload, so they share ONE budget: messages are served first
   // (newest media kept), batches spend what is left. Optional — an older DB may predate them.
@@ -184,6 +234,8 @@ export const EXPORT_TABLES: AnyExportTable[] = [
     afterRead: stripBodyTs,
     inlineMedia: {
       bucket: 'messages',
+      recencyColumn: 'timestamp',
+      payloadColumn: 'metadata',
       newestFirst: (row: MessageRow) => Number(row.timestamp),
       strip: stripInlineMediaPayload,
     },
@@ -194,6 +246,8 @@ export const EXPORT_TABLES: AnyExportTable[] = [
     optional: true,
     inlineMedia: {
       bucket: 'messageBatches',
+      recencyColumn: 'created_at',
+      payloadColumn: 'messages',
       newestFirst: (row: MessageBatchRow) => Date.parse(row.created_at),
       strip: stripBatchInlineMedia,
     },
@@ -202,13 +256,23 @@ export const EXPORT_TABLES: AnyExportTable[] = [
   // templates + baileys_stored_messages both FK sessions ON DELETE CASCADE, so the import's
   // `DELETE FROM sessions` wipes them; they must be exported and re-inserted or the documented
   // backup flow loses them permanently.
-  defineExportTable({ key: 'templates', table: 'templates', optional: true }),
-  defineExportTable({ key: 'baileysStoredMessages', table: 'baileys_stored_messages', optional: true }),
+  defineExportTable({ key: 'templates', table: 'templates', optional: true, sessionFk: true }),
+  defineExportTable({
+    key: 'baileysStoredMessages',
+    table: 'baileys_stored_messages',
+    optional: true,
+    sessionFk: true,
+  }),
 
   // The persisted lid->phone resolution cache. Not a FK to sessions (provenance only), so the
   // import's `DELETE FROM sessions` never clears it — it must be exported + re-inserted explicitly
   // or a backup→restore into a fresh DB loses the whole cache (it self-heals, but lossily).
   defineExportTable({ key: 'lidMappings', table: 'lid_mappings', optional: true }),
+
+  // Persisted per-session mute/archive/pin. Like lid_mappings it is not a FK to sessions, so the
+  // import's `DELETE FROM sessions` never clears it; WhatsApp does not re-deliver it on reconnect,
+  // so a backup that omits it would show a muted chat as unmuted after a restore.
+  defineExportTable({ key: 'chatStates', table: 'chat_states', optional: true }),
 
   // Integration Fabric + both DLQs: none carry an FK constraint to sessions (sessionId is
   // provenance), so the import clears them explicitly before the sessions DELETE to keep the
@@ -231,7 +295,7 @@ export const EXPORT_TABLES: AnyExportTable[] = [
   // automation_rules has an ON DELETE CASCADE FK to sessions, so the sessions DELETE takes every
   // rule with it — exporting and re-inserting it is not optional, or a restore silently destroys
   // every autoreply rule.
-  defineExportTable({ key: 'automationRules', table: 'automation_rules', optional: true }),
+  defineExportTable({ key: 'automationRules', table: 'automation_rules', optional: true, sessionFk: true }),
 ];
 
 /**

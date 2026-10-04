@@ -13,10 +13,15 @@ export class WebhooksListController {
 
   @Get('delivery-failures')
   @RequireRole(ApiKeyRole.ADMIN)
-  @ApiOperation({ summary: 'List recently-failed webhook deliveries (all retries exhausted)' })
+  @ApiOperation({ summary: 'List failed or unsent webhook deliveries, most recent first' })
   @ApiResponse({
     status: 200,
-    description: 'Permanently-failed webhook deliveries, most recent first',
+    description:
+      'Deliveries that exhausted their retries (attempts > 0) and deliveries not sent (attempts 0: shed, ' +
+      'refused at shutdown, oversize or a preflight failure). A direct delivery that shutdown stops in a retry ' +
+      'backoff also records attempts 0, although its earlier attempts were sent. The outbox replays shed ' +
+      'deliveries and those stopped by shutdown; oversize and preflight-failed ones on a first dispatch are ' +
+      'final. A later successful delivery removes the row. Most recent first.',
     type: [WebhookDeliveryFailureDto],
   })
   @ApiQuery({ name: 'sessionId', required: false, description: 'Filter to a single session' })

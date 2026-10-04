@@ -22,6 +22,8 @@
  * Run locally: `npm run check:audit`.
  */
 import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Advisories CI will not stop on. Every entry states why, and what removes it.
@@ -29,47 +31,59 @@ import { execFileSync } from 'node:child_process';
  * Keep this list empty whenever possible. An entry belongs here only when there is no patched
  * version to move to, the reachable path is understood, and the fix is upstream rather than ours.
  */
-const ALLOWLIST = [
-  {
-    id: 'GHSA-jmr9-qjv8-65gv',
-    package: 'extract-zip',
-    reason:
-      'No patched version exists — the advisory covers extract-zip * and 2.0.1 is the latest publish. ' +
-      'It reaches us only through @puppeteer/browsers <=2.13.2, which puppeteer-core 24.38.0 pins EXACTLY, ' +
-      'and puppeteer 24.38.0 is itself pinned exactly by whatsapp-web.js 1.34.7 — so nothing we can express ' +
-      'in overrides moves it. @puppeteer/browsers 3.x drops extract-zip for modern-tar, but forcing it past ' +
-      'those pins pulls yargs 18 and modern-tar (both type:module) into a CommonJS Jest run and 60 suites ' +
-      'fail to load; that was measured, not assumed. ' +
-      'Reachability: the vulnerable path is zip extraction inside `puppeteer browsers install`, which this ' +
-      'repo calls once, at IMAGE BUILD time, on amd64 only (Dockerfile — arm64 symlinks Debian chromium and ' +
-      'never calls it), against a version-pinned Chrome for Testing build fetched from Google over HTTPS. ' +
-      'Nothing in the shipped image extracts a zip through this path at runtime.',
-    removeWhen:
-      'whatsapp-web.js ships a release whose puppeteer pin carries @puppeteer/browsers 3.x. Re-check with ' +
-      '`npm view whatsapp-web.js dependencies.puppeteer` then `npm view puppeteer-core@<v> dependencies`.',
-  },
-];
+const ALLOWLIST = [];
 
 const BLOCKING = new Set(['high', 'critical']);
 
 /**
+ * True when an `npm audit --json` payload is a registry failure rather than a real audit result.
+ * npm returns `{ error: { summary } }` (no `vulnerabilities`, no `metadata`) when the audit endpoint
+ * is unreachable or, as npm retires the legacy audit endpoint, returns an error. That is NOT a clean
+ * tree: reading it as one would find zero advisories and flag every allowlist entry as stale. A
+ * genuinely clean report carries no `error` key (it has `vulnerabilities: {}` and `metadata`), so
+ * keying on `error` leaves a normal clean run clean. Anything unparseable is wrapped as an error too.
+ */
+export function auditUnavailable(report) {
+  return report == null || typeof report !== 'object' || 'error' in report;
+}
+
+/**
  * `npm audit --json` exits non-zero exactly when it found something, so a throw is the normal path
- * and the payload is on stdout either way. Anything that is not parseable JSON is a real failure —
- * a network error or a broken registry — and must not read as "no vulnerabilities".
+ * and the payload is on stdout either way. Unparseable output, or an `{ error }` payload, means the
+ * audit could not be performed and is wrapped as an error rather than read as "no vulnerabilities".
+ */
+function runAuditOnce() {
+  let raw;
+  try {
+    raw = execFileSync('npm', ['audit', '--json'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    raw = err?.stdout ?? '';
+    if (!raw) return { error: { summary: err?.stderr?.trim() || err?.message || 'npm audit produced no output' } };
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { error: { summary: 'npm audit output was not JSON (network or registry error)' } };
+  }
+}
+
+/**
+ * Runs the audit, retrying once when the endpoint does not answer. A transient blip clears on the
+ * retry; a retired or persistently-down endpoint returns the last error report, which the caller
+ * turns into a loud skip (or, on a required path, a failure) rather than a false "stale allowlist"
+ * failure.
  */
 function runAudit() {
-  try {
-    return JSON.parse(execFileSync('npm', ['audit', '--json'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
-  } catch (err) {
-    const stdout = err?.stdout ?? '';
-    try {
-      return JSON.parse(stdout);
-    } catch {
-      console.error('check:audit — could not read `npm audit --json` output:');
-      console.error(err?.stderr || err?.message || String(err));
-      process.exit(1);
+  const ATTEMPTS = 2;
+  let report;
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    report = runAuditOnce();
+    if (!auditUnavailable(report)) return report;
+    if (attempt < ATTEMPTS) {
+      console.error(`check:audit: npm audit endpoint did not answer, retrying (${attempt}/${ATTEMPTS})`);
     }
   }
+  return report;
 }
 
 /**
@@ -92,6 +106,35 @@ export function collectAdvisories(report) {
     }
   }
   return found;
+}
+
+/**
+ * What to do when npm audit could not answer at all. On PR and push CI only this root-tree check
+ * skips, and the skip is raised as a warning annotation on GitHub Actions rather than a log line
+ * inside a green step. It does not keep the audit job green: the dashboard's plain `npm audit` step
+ * in ci.yml fails closed on the same outage. A path that sets CHECK_AUDIT_REQUIRED=1 (the release
+ * gate and the weekly scan) fails instead: publishing, or reporting a week clean, with no advisory
+ * checked is not a skip those paths may take. A re-run clears a transient outage.
+ */
+export function unavailableOutcome(summary, env = process.env) {
+  const required = env.CHECK_AUDIT_REQUIRED === '1';
+  const text = `npm audit endpoint is unavailable after a retry (${summary}); advisories were not checked this run.`;
+  const lines = [];
+  if (env.GITHUB_ACTIONS === 'true') {
+    // A workflow command ends at the first newline, and npm's summary can span several lines.
+    const message = text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+    lines.push(
+      required
+        ? `::error title=check:audit could not run::${message}`
+        : `::warning title=check:audit skipped::${message}`,
+    );
+  }
+  lines.push(
+    required
+      ? `check:audit FAILED: ${text} The audit is required on this path (CHECK_AUDIT_REQUIRED=1).`
+      : `check:audit SKIPPED: ${text}`,
+  );
+  return { exitCode: required ? 1 : 0, lines };
 }
 
 /** The gate's verdict, split out so a spec can drive it without shelling out to npm. */
@@ -124,8 +167,26 @@ export function evaluate(report, allowlist = ALLOWLIST) {
 }
 
 // Guarded so the spec can import the two functions above without running a real audit.
-if (import.meta.url === `file://${process.argv[1]}`) {
+//
+// Compare REAL PATHS, not a hand-built file URL. `import.meta.url` is percent-encoded, so any
+// checkout path needing escaping (a space, a `#`, non-ASCII) made `file://${process.argv[1]}`
+// differ and the gate exited 0 having run no audit at all. On Windows it never matched: argv[1] is
+// a native path with backslashes and a drive letter. `fileURLToPath` decodes the URL to a native
+// path and `realpathSync` resolves argv[1], symlinks included (Node realpaths the main module URL,
+// so an unresolved path through a symlink never matched).
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const report = runAudit();
+
+  // A registry that cannot answer the audit request must not be read as a clean tree. On a merge
+  // path this step skips loudly rather than failing while npm's audit endpoint is down (or being
+  // retired). That keeps the root step from failing, not the audit job green: the dashboard audit
+  // step fails closed on the same outage. A required path fails. See unavailableOutcome.
+  if (auditUnavailable(report)) {
+    const outcome = unavailableOutcome(report?.error?.summary ?? 'no report');
+    for (const line of outcome.lines) console.log(line);
+    process.exit(outcome.exitCode);
+  }
+
   const errors = evaluate(report);
 
   if (errors.length > 0) {

@@ -3,14 +3,59 @@ import { join } from 'node:path';
 import { engineCapabilityMatrix } from './engine-capability-matrix';
 
 /**
- * `docs/29` states the same three figures in ten places — the intro, the architecture prose, a
- * mermaid node, two section headings, the §29.4 totals and the §29.8 summary. All ten are
+ * `docs/29` states the matrix's figures in many places: the intro, the architecture prose, a
+ * mermaid node, the §29.4 and §29.6 headings, the §29.4 totals and the §29.8 summary. All of them are
  * hand-written restatements of what `engine-capability-matrix.ts` contains.
  *
  * Adding one interface method updated the matrix and §29.8 and left the other six behind, and
  * nothing noticed: the parity gates compare the matrix to the interface, and no check reads the
  * prose. This binds every count-shaped claim in the file to the source it restates.
  */
+/**
+ * The same document also names the two engine LIBRARY versions, in the intro and again in the
+ * architecture mermaid node. Those are hand-written too, and nothing read them: the Baileys pin
+ * moved to 7.0.0-rc14 while both places still said rc13, so the file that exists to be the
+ * authority on engine capability was describing a build the tree does not install.
+ */
+describe('docs/29 names the engine library versions the tree pins', () => {
+  const repoRoot = join(__dirname, '..', '..');
+  const doc = readFileSync(join(repoRoot, 'docs', '29-engine-capability-matrix.md'), 'utf8');
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as {
+    dependencies: Record<string, string>;
+  };
+
+  it.each([
+    ['whatsapp-web.js', 'whatsapp-web.js'],
+    ['@whiskeysockets/baileys', '@whiskeysockets/baileys'],
+  ])('states the installed %s version', (_label, dependency) => {
+    const pinned = pkg.dependencies[dependency];
+    expect(pinned).toBeTruthy();
+
+    // Exact pins, not ranges: a caret here would make "the version docs/29 must name" ambiguous.
+    expect(pinned).toMatch(/^\d/);
+    expect(doc).toContain(pinned);
+  });
+
+  it('names no other exact version of either library', () => {
+    // Non-vacuity, and the actual failure mode: a stale version sitting beside a correct figure
+    // elsewhere in the file, so a containment check alone would pass. A library reference is not
+    // always adjacent to its version either: the intro names the package in backticks a line above
+    // its build, so an adjacency scan would miss exactly one of the two places this gate protects.
+    //
+    // Scan by each pin's own `major.minor.` prefix instead. That is specific enough to skip the
+    // section numbers (29.x.y) and the WhatsApp Web build (2.3000.x) that share the file, and catches
+    // a drifted build wherever it sits. `1.34.x` is left alone on purpose: a `.x` release-line
+    // reference has no digit in its patch position, so the `\d` below never matches it.
+    for (const pin of [pkg.dependencies['whatsapp-web.js'], pkg.dependencies['@whiskeysockets/baileys']]) {
+      const [major, minor] = pin.split('.');
+      const shape = new RegExp(String.raw`\b${major}\.${minor}\.\d[\w.-]*`, 'g');
+      const found = doc.match(shape) ?? [];
+      expect(found.length).toBeGreaterThan(0);
+      expect(found.filter(v => v !== pin)).toEqual([]);
+    }
+  });
+});
+
 describe('docs/29 counts match the capability matrix', () => {
   const read = (...parts: string[]): string => readFileSync(join(__dirname, '..', '..', ...parts), 'utf8');
 
@@ -34,11 +79,22 @@ describe('docs/29 counts match the capability matrix', () => {
     // The REST caller's view counts the two store-backed status reads as neutral rather than
     // wwjs-only; docs/29 states that adjustment explicitly where it uses the figure.
     const neutralRaw = rows.filter(r => ok(r.wwjs) && ok(r.baileys)).length;
-    return { methods: rows.length, cells: rows.length * 2, supported, neutral: neutralRaw + 2 };
+    // 'not-available' exactly, not "not supported": the document states uncertain cells separately.
+    const wwjsNotAvailable = rows.filter(r => r.wwjs === 'not-available').length;
+    const baileysNotAvailable = rows.filter(r => r.baileys === 'not-available').length;
+    return {
+      methods: rows.length,
+      cells: rows.length * 2,
+      supported,
+      neutral: neutralRaw + 2,
+      notAvailable: wwjsNotAvailable + baileysNotAvailable,
+      wwjsNotAvailable,
+      baileysNotAvailable,
+    };
   };
 
   /** Every phrasing in the file that restates one of those figures. */
-  const CLAIMS: { label: string; re: RegExp; of: 'methods' | 'cells' | 'supported' | 'neutral' }[] = [
+  const CLAIMS: { label: string; re: RegExp; of: keyof ReturnType<typeof recount> }[] = [
     { label: 'intro coverage', re: /Coverage is total: all (\d+) `IWhatsAppEngine` methods/, of: 'methods' },
     { label: 'section guide', re: /Rows are the (\d+) `IWhatsAppEngine` methods/, of: 'methods' },
     { label: 'architecture prose', re: /`IWhatsAppEngine` interface \((\d+) methods/, of: 'methods' },
@@ -53,6 +109,11 @@ describe('docs/29 counts match the capability matrix', () => {
     { label: '29.8 supported', re: /adapter cells: \*\*(\d+) ✅\*\*/, of: 'supported' },
     { label: '29.8 restated supported', re: /Of the (\d+) ✅ cells/, of: 'supported' },
     { label: '29.8 REST view', re: /REST caller's view: \*\*(\d+)\*\* engine-neutral/, of: 'neutral' },
+    { label: '29.4 totals not-available', re: /adapter cells: \*\*\d+ ✅, (\d+) ❌\*\*/, of: 'notAvailable' },
+    { label: '29.6 heading', re: /^## 29\.6 The (\d+) not-available cells/m, of: 'notAvailable' },
+    { label: '29.6.1 heading', re: /^### 29\.6\.1 Baileys adapter \((\d+) cells\)/m, of: 'baileysNotAvailable' },
+    { label: '29.6.2 heading', re: /^### 29\.6\.2 wwjs adapter \((\d+) cells\)/m, of: 'wwjsNotAvailable' },
+    { label: '29.8 not-available', re: /\*\*\d+ ✅\*\* \/ \*\*(\d+) ❌\*\*/, of: 'notAvailable' },
   ];
 
   /**
@@ -84,7 +145,17 @@ describe('docs/29 counts match the capability matrix', () => {
     // 29.3's opening sentence and 29.3.2's split spell the figure in prose rather than digits, which
     // is why they drifted while the digit-shaped claims held: a patcher was added to each library and
     // the words stayed at "five" and "1 on Baileys".
-    const WORDS: Record<string, number> = { four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+    const WORDS: Record<string, number> = {
+      four: 4,
+      five: 5,
+      six: 6,
+      seven: 7,
+      eight: 8,
+      nine: 9,
+      ten: 10,
+      eleven: 11,
+      twelve: 12,
+    };
     const spelled = doc.match(/OpenWA ships (\w+) exact, self-disabling source transforms/);
     const wrongProse: string[] = [];
     if (!spelled) wrongProse.push('29.3 opening: phrasing no longer found in the document');
@@ -150,9 +221,12 @@ describe('docs/29 counts match the capability matrix', () => {
       wrong.push(`not-available span: 29.8 says ${spanning[1]}, 29.4 says ${across[1]}`);
 
     // 29.8's wwjs patch-dependency count must match the ✅🔧ⁿ marks 29.4 actually carries. 🔧⁶ is the
-    // one baileys row-level mark, so it is excluded from the wwjs figure.
+    // one baileys row-level mark, so it is excluded from the wwjs figure. The class spans every
+    // superscript a patcher can carry rather than the ones that happen to be row-marked today: a
+    // narrower class makes a NEW mark invisible here, so adding a patcher and marking its row would
+    // read as drift in the claim rather than agreement.
     const contract = section(/^## 29\.4 /m, /^## 29\.5 /m);
-    const marks = [...contract.matchAll(/✅🔧([¹²³⁴⁵⁶⁷])/g)].map(m => m[1]);
+    const marks = [...contract.matchAll(/✅🔧([¹²³⁴⁵⁶⁷⁸⁹])/g)].map(m => m[1]);
     const wwjsMarks = marks.filter(m => m !== '⁶').length;
     const claimed = doc.match(/\*\*(\d+) wwjs cells carry an explicit patch dependency\*\*/);
     if (!claimed) wrong.push('patch dependency count: phrasing no longer found');

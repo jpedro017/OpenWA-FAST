@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger, NotImplementedException, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, NotImplementedException, OnModuleInit } from '@nestjs/common';
+import { createLogger } from '../../../common/services/logger.service';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import type { MessageType } from '../../../engine/interfaces/whatsapp-engine.interface';
@@ -38,7 +39,7 @@ type PlaceholderFn = () => string;
 export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
   readonly id = 'builtin-fts';
   readonly label = 'Built-in database full-text search';
-  private readonly logger = new Logger('BuiltInFtsProvider');
+  private readonly logger = createLogger('BuiltInFtsProvider');
 
   // OpenWA has two TypeORM connections (main: auth/audit SQLite, data: messages). Bind explicitly to
   // 'data' so the provider queries the connection that owns the `messages` table + the FTS migration,
@@ -46,12 +47,13 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
   constructor(@InjectDataSource('data') private readonly dataSource: DataSource) {}
 
   /**
-   * Self-heals the FTS schema at bootstrap so search works under DATABASE_SYNCHRONIZE=true (the dev
-   * compose and the zero-config first-boot default), where TypeORM creates the `messages` table from
-   * the entity but NEVER runs migrations — so the migration that establishes `messages_fts` /
-   * `body_ts` is skipped and search would 501 on a fresh SQLite box. This re-applies the same
+   * Self-heals the FTS schema at bootstrap so search works under an opted-in DATABASE_SYNCHRONIZE=true
+   * on SQLite (docker-compose.dev.yml sets it; the default is migrations), where TypeORM creates the
+   * `messages` table from the entity but NEVER runs migrations — so the migration that establishes
+   * `messages_fts` is skipped and search would 501 on a fresh SQLite box. This re-applies the same
    * idempotent DDL as the migration (1782400000000-AddMessagesFts); `IF NOT EXISTS` / `IF NOT` guards
-   * make it a no-op once the schema exists, so migrations-based deployments are unaffected. Probes the
+   * make it a no-op once the schema exists, and on Postgres no DDL is issued at all when the catalog
+   * already holds the column and index, so migrations-based deployments take no table lock. Probes the
    * result into `ftsAvailable` so the first search() / health() call doesn't re-probe.
    */
   async onModuleInit(): Promise<void> {
@@ -132,22 +134,36 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
   /**
    * Creates the FTS schema if missing. Mirrors migration 1782400000000-AddMessagesFts verbatim and is
    * idempotent (every statement is `IF NOT EXISTS` / `IF NOT`), so:
-   *   - migrations-based deployments: the migration has already run; this is a set of no-ops.
-   *   - synchronize-based deployments (dev compose / zero-config first boot): migrations are skipped,
-   *     so this is what actually brings the index up at boot. Without it search 501s on every fresh
-   *     SQLite box, contradicting docs/26's "zero-config, on by default" promise.
+   *   - migrations-based deployments: the migration has already run; SQLite runs a set of no-ops,
+   *     and Postgres reads the catalog and issues no DDL, because `ALTER TABLE ... IF NOT EXISTS`
+   *     still queues for ACCESS EXCLUSIVE on `messages` before it finds the column, stalling every
+   *     message read and write behind any open transaction.
+   *   - synchronize-based SQLite deployments (DATABASE_SYNCHRONIZE=true, e.g. the dev compose):
+   *     migrations are skipped, so this is what actually brings the index up at boot. Without it
+   *     search 501s on every such box. Postgres refuses synchronize at boot, so the Postgres
+   *     branch only repairs a schema whose FTS migration objects are missing.
    * Returns true when the index is usable, false when the SQLite build lacks FTS5 (no schema left
    * behind — the route 501s cleanly via ensureFts).
    */
   private async ensureFtsSchema(): Promise<boolean> {
     const isPostgres = this.dataSource.options.type === 'postgres';
     if (isPostgres) {
-      await this.dataSource.query(
-        `ALTER TABLE "messages" ADD COLUMN IF NOT EXISTS "body_ts" tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(body, ''))) STORED`,
+      // Uncached on purpose (probeFts caches and swallows errors). Both objects are looked up on the
+      // table to_regclass resolves, the same one the runtime queries hit; only a missing one is created.
+      const rows: Array<{ col: boolean; idx: boolean }> = await this.dataSource.query(
+        `SELECT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('messages') AND a.attname = 'body_ts' AND NOT a.attisdropped) AS col,
+                EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = to_regclass('messages') AND c.relname = 'idx_messages_body_ts') AS idx`,
       );
-      await this.dataSource.query(
-        `CREATE INDEX IF NOT EXISTS "idx_messages_body_ts" ON "messages" USING GIN ("body_ts")`,
-      );
+      if (!rows[0]?.col) {
+        await this.dataSource.query(
+          `ALTER TABLE "messages" ADD COLUMN IF NOT EXISTS "body_ts" tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(body, ''))) STORED`,
+        );
+      }
+      if (!rows[0]?.idx) {
+        await this.dataSource.query(
+          `CREATE INDEX IF NOT EXISTS "idx_messages_body_ts" ON "messages" USING GIN ("body_ts")`,
+        );
+      }
       return true;
     }
     // SQLite: probe FTS5 first; skip leaving any schema if this build lacks it.
@@ -169,6 +185,21 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
     // were never added, and SQLite rejects the whole statement — so ordinary edits and deletes on
     // them fail, not merely searches. Reads `d."rowid"` rather than `d."id"`: same query plan,
     // without depending on the shadow table's column naming.
+    //
+    // A rowid-level gap check cannot see a renumbered table. TypeORM synchronize rebuilds `messages`
+    // on SQLite by copying the rows without their implicit rowid, so after any delete the survivors
+    // get new rowids and the index entries under them describe other messages. The triggers keep
+    // `docsize` in step with `messages`, so an index row with no message behind it only appears after
+    // such a rebuild, and any rebuild that renumbered a row leaves the old highest rowid behind. Drop
+    // the whole index then and let the gap repair below re-add every row.
+    const orphanRow: unknown[] = await this.dataSource.query(
+      `SELECT EXISTS(SELECT 1 FROM "messages_fts_docsize" d
+         WHERE NOT EXISTS (SELECT 1 FROM "messages" m WHERE m."rowid" = d."rowid")) AS orphan`,
+    );
+    if (Number((orphanRow as Array<{ orphan: number }>)[0]?.orphan)) {
+      this.logger.warn('FTS index holds rows the messages table no longer has; re-indexing every message');
+      await this.dataSource.query(`INSERT INTO "messages_fts"("messages_fts") VALUES ('delete-all')`);
+    }
     const gapRow: unknown[] = await this.dataSource.query(
       `SELECT EXISTS(SELECT 1 FROM "messages" m WHERE m."body" IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM "messages_fts_docsize" d WHERE d."rowid" = m."rowid")) AS missing`,
@@ -237,7 +268,7 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
 
   async health(): Promise<{ ok: boolean; detail?: string }> {
     // Reflects FTS availability (not just raw connectivity): a non-FTS5 build reports unhealthy here
-    // so /health and the registry surface the true state. DB errors still map to { ok: false }.
+    // for callers of health(). DB errors still map to { ok: false }.
     try {
       const ok = await this.probeFts();
       return { ok, detail: ok ? undefined : 'full-text index absent' };
@@ -290,6 +321,13 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
 
   // --- SQLite FTS5 -----------------------------------------------------------
   // SQL appearance order: MATCH term -> filters -> LIMIT -> OFFSET. Params pushed in that order.
+  // Both dialects tiebreak on `m."id"`: neither `rank`/`score` nor the whole-second `timestamp` is
+  // unique (a one-word query can score every hit identically), and without a total order a paged
+  // walk repeats some hits and never returns others. Measured on Postgres, which sorts a tie group
+  // differently per LIMIT/OFFSET: an ordinary search repeated a row by the third page. SQLite was
+  // already self-consistent, but it keeps the term so the two dialects page alike; its plan is
+  // unchanged (the ORDER BY already needed a temp b-tree) and the extra column costs about a
+  // millisecond a page.
   private buildSqlite(q: SearchQuery, limit: number, offset: number) {
     const ph = BuiltInFtsProvider.sqlitePlaceholder;
     const params: unknown[] = [];
@@ -297,7 +335,7 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
     params.push(BuiltInFtsProvider.toFts5Query(q.q));
     this.applyFilters(where, params, q, 'm.', ph);
     const cols = `m."id", m."waMessageId" AS wa_message_id, m."sessionId" AS session_id, m."chatId" AS chat_id, m."from" AS "from", m."body", m."timestamp", m."type", m."direction", snippet(messages_fts, 0, '<mark>', '</mark>', '…', ${MAX_SNIPPET_WORDS}) AS snippet, rank AS score`;
-    const sql = `SELECT ${cols} FROM messages_fts JOIN messages m ON m."rowid" = messages_fts."rowid" WHERE ${where.join(' AND ')} ORDER BY rank, m."timestamp" DESC LIMIT ${ph()} OFFSET ${ph()}`;
+    const sql = `SELECT ${cols} FROM messages_fts JOIN messages m ON m."rowid" = messages_fts."rowid" WHERE ${where.join(' AND ')} ORDER BY rank, m."timestamp" DESC, m."id" DESC LIMIT ${ph()} OFFSET ${ph()}`;
     params.push(limit, offset);
     return { sql, params };
   }
@@ -317,7 +355,7 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
     // StartSel/StopSel are pinned to <mark>/</mark> to match the SQLite FTS5 snippet() output, so the
     // SearchHit.snippet contract stays dialect-agnostic (PG's ts_headline defaults to <b>/</b>).
     const cols = `m."id", m."waMessageId" AS wa_message_id, m."sessionId" AS session_id, m."chatId" AS chat_id, m."from", m."body", m."timestamp", m."type", m."direction", ts_headline('simple', m."body", q.query, 'MaxFragments=1, MaxWords=${MAX_SNIPPET_WORDS}, StartSel=<mark>, StopSel=</mark>') AS snippet, ts_rank(m.body_ts, q.query) AS score`;
-    const sql = `SELECT ${cols} FROM messages m, ${ftsTerm} WHERE ${where.join(' AND ')} ORDER BY score DESC, m."timestamp" DESC LIMIT ${ph()} OFFSET ${ph()}`;
+    const sql = `SELECT ${cols} FROM messages m, ${ftsTerm} WHERE ${where.join(' AND ')} ORDER BY score DESC, m."timestamp" DESC, m."id" DESC LIMIT ${ph()} OFFSET ${ph()}`;
     params.push(limit, offset);
     return { sql, params };
   }
@@ -355,11 +393,11 @@ export class BuiltInFtsProvider implements SearchProvider, OnModuleInit {
     // (WhatsApp messageTimestamp — see the inbound mappers in the engine adapters). Bind ms→seconds
     // at the boundary, otherwise `seconds >= ms` is false for every modern row and dateFrom/dateTo
     // silently exclude all results.
-    if (q.dateFrom) {
+    if (q.dateFrom != null) {
       where.push(`${prefix}"timestamp" >= ${ph()}`);
       params.push(Math.floor(q.dateFrom / 1000));
     }
-    if (q.dateTo) {
+    if (q.dateTo != null) {
       where.push(`${prefix}"timestamp" <= ${ph()}`);
       params.push(Math.floor(q.dateTo / 1000));
     }

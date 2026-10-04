@@ -47,9 +47,10 @@ type GroupEventChanges struct {
 }
 
 // GroupEventPayload is the payload of the group.join / group.leave /
-// group.update events (webhook and socket alike). ParticipantIDs carries the
-// affected users for join/leave and is empty for metadata updates; Changes is
-// the metadata delta, present on group.update. Timestamp is unix seconds.
+// group.update / group.join_request events (webhook and socket alike).
+// ParticipantIDs carries the affected users for join/leave, the users asking
+// to join for join_request, and is empty for metadata updates; Changes is the
+// metadata delta, present on group.update. Timestamp is unix seconds.
 type GroupEventPayload struct {
 	GroupID        string             `json:"groupId"`
 	ActorID        *string            `json:"actorId,omitempty"`
@@ -59,8 +60,8 @@ type GroupEventPayload struct {
 }
 
 // CallReceivedPayload is the payload of the call.received event. CallID is the
-// handle Calls.RejectCall accepts while the call is still ringing. Timestamp
-// is unix seconds.
+// handle Calls.RejectCall accepts while the call is still ringing (Baileys
+// only; whatsapp-web.js answers 501). Timestamp is unix seconds.
 type CallReceivedPayload struct {
 	CallID    string `json:"callId"`
 	From      string `json:"from"`
@@ -86,7 +87,23 @@ type WebhookFilters struct {
 	Conditions []WebhookFilterCondition `json:"conditions"`
 }
 
+// MarshalJSON encodes a nil Conditions as `[]` rather than `null`.
+//
+// The gateway requires conditions to be an array and answers 400 for `null`, so the zero value
+// &WebhookFilters{} could not express the documented empty filter `{ "conditions": [] }`.
+func (f WebhookFilters) MarshalJSON() ([]byte, error) {
+	type alias WebhookFilters
+	out := alias(f)
+	if out.Conditions == nil {
+		out.Conditions = []WebhookFilterCondition{}
+	}
+	return json.Marshal(out)
+}
+
 // CreateWebhookRequest registers a webhook. RetryCount is 0–5 (default 3).
+//
+// Secret is optional and signs every delivery as X-OpenWA-Signature: sha256=<hex>. The gateway
+// enforces a 16-character minimum and answers 400 below it; omit Secret for unsigned deliveries.
 type CreateWebhookRequest struct {
 	URL        string            `json:"url"`
 	Events     []string          `json:"events"`
@@ -106,6 +123,9 @@ type CreateWebhookRequest struct {
 // Filters cannot use the same trick — a nil pointer marshals away under omitempty, and dropping
 // omitempty would send "filters": null on EVERY update, clearing filters nobody asked to touch. Set
 // ClearFilters instead; MarshalJSON turns it into the explicit null the server reads.
+//
+// The gateway's 16-character minimum on Secret applies here too, with one exception: the empty
+// string is the documented "clear the secret" value and is accepted.
 type UpdateWebhookRequest struct {
 	URL        string             `json:"url,omitempty"`
 	Events     []string           `json:"events,omitempty"`
@@ -158,4 +178,41 @@ type WebhookTestResult struct {
 	Success    bool   `json:"success"`
 	StatusCode int    `json:"statusCode,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// WebhookDeliveryFailure is a webhook delivery the gateway gave up on or could
+// not dispatch, as listed by the delivery-failure log. A later successful
+// delivery removes the row.
+type WebhookDeliveryFailure struct {
+	ID        string `json:"id"`
+	WebhookID string `json:"webhookId"`
+	SessionID string `json:"sessionId"`
+	Event     string `json:"event"`
+	URL       string `json:"url"`
+	// IdempotencyKey is the key the receiver would have deduped on.
+	IdempotencyKey *string `json:"idempotencyKey,omitempty"`
+	DeliveryID     *string `json:"deliveryId,omitempty"`
+	// Attempts is the number of attempts made before giving up; 0 when the
+	// delivery was not given up after retries (oversize or unserializable
+	// payload, capacity shed, or shutdown, possibly in a retry backoff after
+	// earlier attempts were sent).
+	Attempts int `json:"attempts"`
+	// LastStatusCode is the last HTTP status when the failure was a non-2xx
+	// response; nil for a network or timeout error, or when Attempts is 0.
+	LastStatusCode *int   `json:"lastStatusCode,omitempty"`
+	LastError      string `json:"lastError"`
+	// CreatedAt is the ISO timestamp of when the failure was first recorded.
+	CreatedAt string `json:"createdAt"`
+}
+
+// WebhookDelivery is the JSON body of a webhook delivery (docs/06 section
+// 6.6). Event is "test" for a delivery sent by the test endpoint. Check the
+// raw body with VerifyWebhookSignature before decoding it.
+type WebhookDelivery struct {
+	Event          WebhookEvent    `json:"event"`
+	Timestamp      string          `json:"timestamp"`
+	SessionID      string          `json:"sessionId"`
+	IdempotencyKey string          `json:"idempotencyKey"`
+	DeliveryID     string          `json:"deliveryId"`
+	Data           json.RawMessage `json:"data"`
 }

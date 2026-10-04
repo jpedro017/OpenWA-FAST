@@ -5,12 +5,22 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { createLogger } from '../../common/services/logger.service';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
+import { chatKind } from '../../engine/identity/wa-id';
 import { evaluateFilters } from '../webhook/filters/filter-evaluator';
 import { PLUGIN_MESSAGE_PORT, type PluginMessagePort } from '../../core/plugins/plugin-host-ports';
 import { AutomationRule } from './entities/automation-rule.entity';
-import { CreateAutomationRuleDto, UpdateAutomationRuleDto } from './dto/automation-rule.dto';
+import { Session } from '../session/entities/session.entity';
+import {
+  AUTOMATION_COOLDOWN_MAX_SECONDS,
+  CreateAutomationRuleDto,
+  UpdateAutomationRuleDto,
+} from './dto/automation-rule.dto';
 
-/** Entries above this size trigger a sweep of expired cooldowns before inserting the next one. */
+/**
+ * The cooldown map is swept of entries older than the longest allowed cooldown once it reaches this
+ * size, and after a sweep only once it doubles again, so a sweep that frees nothing is not repeated
+ * on every reply.
+ */
 const COOLDOWN_SWEEP_THRESHOLD = 10_000;
 
 /**
@@ -20,6 +30,13 @@ const COOLDOWN_SWEEP_THRESHOLD = 10_000;
  * queued message only after its own cooldown has long expired.
  */
 const MAX_MESSAGE_AGE_SECONDS = 300;
+
+/**
+ * Chat kinds a rule answers only when it names them. A reply into a channel is published to every
+ * follower when the account is an admin there, and is refused everywhere else (a failed send that can
+ * also count toward the send-pacing breaker); a status or broadcast list has no conversation to answer.
+ */
+const OPT_IN_CHAT_KINDS: ReadonlySet<string> = new Set(['channel', 'broadcast', 'status']);
 
 /**
  * Single-message autoreply rules: evaluated on every inbound message, first matching rule replies
@@ -36,14 +53,21 @@ const MAX_MESSAGE_AGE_SECONDS = 300;
 export class AutomationRulesService {
   private readonly logger = createLogger('AutomationRulesService');
 
-  /** `${ruleId}:${chatId}` -> epoch ms until which the rule stays quiet in that chat. Per-process. */
+  /**
+   * `${ruleId}:${chatId}` -> when the rule last fired in that chat. The quiet period is judged against
+   * the rule's CURRENT cooldownSeconds, so an edit takes effect on a window already running; the sweep
+   * only drops an entry older than the longest cooldown a rule may have. Per-process.
+   */
   private readonly cooldowns = new Map<string, number>();
+  private nextCooldownSweepAt = COOLDOWN_SWEEP_THRESHOLD;
 
   private messagePort?: PluginMessagePort;
 
   constructor(
     @InjectRepository(AutomationRule, 'data')
     private readonly ruleRepository: Repository<AutomationRule>,
+    @InjectRepository(Session, 'data')
+    private readonly sessionRepository: Repository<Session>,
     @Optional()
     private readonly moduleRef?: ModuleRef,
     @Optional()
@@ -53,6 +77,11 @@ export class AutomationRulesService {
   ) {}
 
   async create(sessionId: string, dto: CreateAutomationRuleDto): Promise<AutomationRule> {
+    // The automation_rules.sessionId FK turns a missing session into a driver error (500) at save
+    // time; check first so the caller gets a truthful 404, as the webhook create route does.
+    if (!(await this.sessionRepository.exists({ where: { id: sessionId } }))) {
+      throw new NotFoundException(`Session with id '${sessionId}' not found`);
+    }
     // Per-session cap, the same shape (and softness) the webhook fan-out cap has: every inbound
     // message is evaluated against every rule of its session, so an unbounded count turns each
     // message into unbounded work. A concurrent create can race the count — the cap bounds
@@ -145,11 +174,41 @@ export class AutomationRulesService {
     // matches a lid-addressed sender identically in both places.
     const resolveLid = (jid: string): string | null => this.lidMappingStore?.resolveLid(jid) ?? null;
 
+    // Resolved the way the `kind` filter field resolves it, so the guard and a kind condition agree.
+    const kind = typeof message.kind === 'string' && message.kind ? message.kind : chatKind(chatId);
+    const optInOnly = OPT_IN_CHAT_KINDS.has(kind);
+
     // First match wins: one inbound message never produces more than one automated reply, and rule
-    // order (creation order) is the tiebreak the operator can reason about.
-    const rule = rules.find(candidate =>
-      evaluateFilters(candidate.conditions, 'message.received', message, resolveLid),
-    );
+    // order (creation order) is the tiebreak the operator can reason about. A rule without a `kind`
+    // condition skips the opt-in chat kinds; naming the kind is how a rule reaches them. A rule whose
+    // stored conditions are malformed (a restore bypasses the DTO) is skipped on its own, so it cannot
+    // silence every other rule of the session. A `conditions` that is not a plain object, or a
+    // non-array `conditions.conditions`, is refused explicitly: evaluateFilters reads either as "no
+    // filter", which would answer every inbound message.
+    const rule = rules.find(candidate => {
+      try {
+        const conditions: unknown = candidate.conditions;
+        if (
+          conditions != null &&
+          (typeof conditions !== 'object' ||
+            Array.isArray(conditions) ||
+            (candidate.conditions?.conditions != null && !Array.isArray(candidate.conditions.conditions)))
+        ) {
+          throw new TypeError('conditions must be an object with a conditions array');
+        }
+        return (
+          (!optInOnly || candidate.conditions?.conditions?.some(c => c.field === 'kind')) &&
+          evaluateFilters(candidate.conditions, 'message.received', message, resolveLid)
+        );
+      } catch (error) {
+        this.logger.warn('Skipping automation rule with malformed conditions', {
+          sessionId,
+          ruleId: candidate.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      }
+    });
     if (!rule) return;
     if (this.inCooldown(rule, chatId)) return;
     // Enter the cooldown BEFORE the send: a burst of matching messages must collapse to one reply
@@ -160,7 +219,7 @@ export class AutomationRulesService {
       const messagePort = this.resolveMessagePort();
       if (!messagePort) return;
       await messagePort.sendText(sessionId, { chatId, text: rule.replyText });
-      this.logger.log('Automation rule replied', { sessionId, ruleId: rule.id, chatId });
+      this.logger.debug('Automation rule replied', { sessionId, ruleId: rule.id, chatId });
     } catch (error) {
       // The send path already persisted/audited its own failure; here it only must not propagate.
       this.logger.warn('Automation rule reply failed', {
@@ -195,18 +254,19 @@ export class AutomationRulesService {
 
   private inCooldown(rule: AutomationRule, chatId: string): boolean {
     if (!rule.cooldownSeconds) return false;
-    const until = this.cooldowns.get(`${rule.id}:${chatId}`);
-    return until !== undefined && until > Date.now();
+    const firedAt = this.cooldowns.get(`${rule.id}:${chatId}`);
+    return firedAt !== undefined && firedAt + rule.cooldownSeconds * 1000 > Date.now();
   }
 
   private enterCooldown(rule: AutomationRule, chatId: string): void {
     if (!rule.cooldownSeconds) return;
-    if (this.cooldowns.size >= COOLDOWN_SWEEP_THRESHOLD) {
-      const now = Date.now();
-      for (const [key, until] of this.cooldowns) {
-        if (until <= now) this.cooldowns.delete(key);
+    const now = Date.now();
+    if (this.cooldowns.size >= this.nextCooldownSweepAt) {
+      for (const [key, firedAt] of this.cooldowns) {
+        if (firedAt + AUTOMATION_COOLDOWN_MAX_SECONDS * 1000 <= now) this.cooldowns.delete(key);
       }
+      this.nextCooldownSweepAt = Math.max(COOLDOWN_SWEEP_THRESHOLD, this.cooldowns.size * 2);
     }
-    this.cooldowns.set(`${rule.id}:${chatId}`, Date.now() + rule.cooldownSeconds * 1000);
+    this.cooldowns.set(`${rule.id}:${chatId}`, now);
   }
 }

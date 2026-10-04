@@ -1,9 +1,9 @@
-import * as path from 'path';
 import * as fs from 'fs';
 import { type Client } from 'whatsapp-web.js';
 import { type EngineEventCallbacks, EngineStatus } from '../interfaces/whatsapp-engine.interface';
 import { type createLogger } from '../../common/services/logger.service';
 import { type WhatsAppWebJsConfig } from './whatsapp-web-js.adapter';
+import { wwjsAuthDir } from '../auth-dir-paths';
 
 /**
  * Stuck-auth detection and recovery extracted from WhatsAppWebJsAdapter: what to do when a session
@@ -21,6 +21,9 @@ export interface WwebjsStuckAuthHost {
   /** Live callbacks bag — read per event, since initialize() installs it after delegates are built. */
   getCallbacks(): EngineEventCallbacks;
 }
+
+/** The Puppeteer Browser whatsapp-web.js keeps on the client; `process()` is null once Chromium is gone. */
+type BrowserHandle = { pupBrowser?: { process?: () => { kill?: (sig: string) => void } | null } };
 
 export class WwebjsStuckAuth {
   // Guards the stuck-auth self-heal so it runs at most once per engine: a re-paired session that still
@@ -69,9 +72,24 @@ export class WwebjsStuckAuth {
 
     const client = this.host.getClient();
     this.host.setClient(null);
-    // Clear auth + disconnect FIRST (the recovery path), then tear the wedged client down in the
-    // background so a hung Chromium destroy can't block (or skip) the recovery.
-    await this.clearLocalAuth();
+    // Kill the wedged Chromium before removing its profile: a live browser keeps writing into the
+    // directory being removed, which can exhaust the rm retries and leave half a profile behind.
+    try {
+      const browser = (client as unknown as BrowserHandle | null)?.pupBrowser;
+      browser?.process?.()?.kill?.('SIGKILL');
+    } catch (err) {
+      this.host.logger.warn('Could not kill the browser before clearing the saved session', {
+        sessionId: this.host.config.sessionId,
+        error: String(err),
+      });
+    }
+    // Clear auth + disconnect (the recovery path), then finish the client teardown in the background
+    // so a hung destroy can't block (or skip) the recovery. The removal is registered with the
+    // credential-teardown fence before it is awaited, as the logout path does: a stop and start
+    // arriving meanwhile would otherwise launch a new Chromium into the directory being deleted.
+    const removal = this.clearLocalAuth();
+    this.host.getCallbacks().onCredentialTeardownStarted?.(removal);
+    await removal;
     this.host.setStatus(EngineStatus.DISCONNECTED);
     // onDisconnected drives the lifecycle's reconnect, which re-creates the engine with no saved auth
     // → a fresh QR. (A no-op once the engine is superseded/torn down.)
@@ -81,7 +99,7 @@ export class WwebjsStuckAuth {
 
   /** Remove this session's LocalAuth directory so the next start re-pairs from a clean slate. */
   async clearLocalAuth(): Promise<void> {
-    const dir = path.join(path.resolve(this.host.config.sessionDataPath), `session-${this.host.config.sessionId}`);
+    const dir = wwjsAuthDir(this.host.config.sessionDataPath, this.host.config.sessionId);
     await fs.promises
       // maxRetries mirrors LocalAuth's own default: on a WhatsApp-initiated unlink the library never
       // closes the browser, so Chromium is still rotating IndexedDB files while this walks the tree and

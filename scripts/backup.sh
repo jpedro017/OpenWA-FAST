@@ -7,9 +7,13 @@
 #   - data store    — openwa.sqlite (SQLite) OR a pg_dump (when DATABASE_TYPE=postgres)
 #   - sessions/     — whatsapp-web.js LocalAuth session data
 #   - baileys/      — Baileys engine authentication state
-#   - media/        — locally-stored media (skipped automatically when using S3)
+#   - media/        — the local media dir (STORAGE_LOCAL_PATH), archived whenever it exists. Under
+#                     STORAGE_TYPE=s3 it holds only media the app could not write to the bucket
+#                     (unreachable, or no credentials); the bucket's contents are not archived and
+#                     need a backup of their own
 #   - plugin-packages/ — installed plugin packages from PLUGINS_DIR
-#   - plugin-state/    — registry and persisted ctx.storage state under OPENWA_DATA_DIR
+#   - plugin-state/    — registry and persisted ctx.storage state under PLUGIN_STATE_DIR/plugins
+#                        (default: <data dir>/plugins)
 #   - .env.generated and .api-key — dashboard config and plaintext bootstrap admin key
 #
 # The previous runbook backed up the wrong file (openwa.db) and omitted main.sqlite,
@@ -29,12 +33,27 @@
 #   DATABASE_TYPE     sqlite (default) | postgres
 #   SESSION_DATA_PATH, BAILEYS_AUTH_DIR, STORAGE_LOCAL_PATH, PLUGINS_DIR
 #                     override the corresponding state directories
+#   PLUGIN_STATE_DIR  root whose plugins/ holds the plugin registry and ctx.storage (default: the
+#                     data dir)
+#   BOOTSTRAP_KEY_FILE  the plaintext admin key to archive (default: <data dir>/.api-key)
+#                     These paths resolve through the same layers as the databases.
 #   For postgres: DATABASE_URL, or DATABASE_HOST/PORT/USERNAME/PASSWORD/NAME
+#                     DATABASE_URL is read by this script only (the app uses the DATABASE_* keys)
+#                     and wins over them when set. It is passed to pg_dump as an argument, which
+#                     other local users can read in the process list, so leave the password out of
+#                     it and supply PGPASSWORD or ~/.pgpass instead; the DATABASE_* path already
+#                     passes DATABASE_PASSWORD through PGPASSWORD.
 #
 # Failure policy: a missing source database is FATAL (no silent empty backup), and the finished
 # archive must contain every configured database or it is deleted and the run fails. When the
 # sqlite3 CLI is unavailable the databases are plain-copied (possibly torn if the app is live) and
 # the archive carries a CONSISTENCY-WARNING marker that restore.sh surfaces.
+#
+# Engine authentication state (sessions/, baileys/) is copied, not snapshotted: the engines rewrite
+# it while they run, so an online backup can hold a copy torn mid-write. When a whatsapp-web.js
+# profile is open or Baileys state is present, the archive carries an ENGINE-STATE-NOTE that
+# restore.sh prints without refusing (--strict gates only the database marker). For a copy that is
+# consistent by construction, stop the sessions (or the container) first.
 #
 set -euo pipefail
 # The archive now contains bootstrap credentials and generated database secrets. Never inherit a
@@ -59,7 +78,7 @@ MAIN_DB="$(openwa_resolve MAIN_DATABASE_NAME ./data/main.sqlite)"
 DATA_DB="$(openwa_resolve DATABASE_NAME ./data/openwa.sqlite)"
 SESSIONS_DIR="$(openwa_resolve SESSION_DATA_PATH "$DATA_DIR/sessions")"
 BAILEYS_DIR="$(openwa_resolve BAILEYS_AUTH_DIR "$DATA_DIR/baileys")"
-MEDIA_DIR="$(openwa_resolve STORAGE_LOCAL_PATH "$DATA_DIR/media")"
+MEDIA_DIR="$(openwa_media_dir)"
 # Installed plugin code. The app defaults this to <dataDir>/plugins — the same tree as the
 # registry and each plugin's ctx.storage below — so an unset PLUGINS_DIR must resolve there
 # too, or the archive silently omits the plugin packages.
@@ -73,10 +92,22 @@ PLUGIN_PACKAGES_DIR="$(openwa_resolve PLUGINS_DIR "$DATA_DIR/plugins")"
 PLUGIN_STATE_ROOT="$(openwa_resolve PLUGIN_STATE_DIR "$DATA_DIR")"
 PLUGIN_STATE_DIR="$PLUGIN_STATE_ROOT/plugins"
 GENERATED_ENV="$DATA_DIR/.env.generated"
-ADMIN_KEY_FILE="$DATA_DIR/.api-key"
+# The app writes the generated admin key to BOOTSTRAP_KEY_FILE when that is set.
+ADMIN_KEY_FILE="$(openwa_resolve BOOTSTRAP_KEY_FILE "$DATA_DIR/.api-key")"
 
 log() { echo "[backup] $*"; }
 
+# Check the destination before staging anything. The shipped container's root filesystem is
+# read-only, so the default ./backups (/app/backups) cannot be created there; failing only at the
+# end would first copy every database, session and media file into the staging directory.
+if ! mkdir -p "$BACKUP_DIR" 2>/dev/null || [ ! -w "$BACKUP_DIR" ]; then
+  log "ERROR: BACKUP_DIR=$BACKUP_DIR is not writable; point BACKUP_DIR at a writable, persistent directory (inside the container use BACKUP_DIR=/app/data/backups, and under docker compose also TMPDIR=/app/data/backups: its /tmp is a tmpfs charged to the container's memory)"
+  exit 1
+fi
+
+# The staging copy goes to TMPDIR. Under docker compose that is a tmpfs charged to the container's
+# memory limit, so an in-container run there points TMPDIR at the data volume (docs/11); staging the
+# data in the tmpfs gets the running gateway OOM-killed once the data outgrows its headroom.
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
@@ -96,6 +127,46 @@ EOF
   echo "plain-copied: $1" >>"$CONSISTENCY_WARNING"
 }
 
+ENGINE_STATE_NOTE="$STAGE/ENGINE-STATE-NOTE"
+
+# Marker file shipped INSIDE the archive: engine auth state was copied while an engine may have been
+# writing it. Separate from the database marker so restore.sh --strict does not refuse every online
+# backup; a torn auth copy costs a re-pair, not data.
+record_engine_state_note() {
+  if [ ! -f "$ENGINE_STATE_NOTE" ]; then
+    cat >"$ENGINE_STATE_NOTE" <<'EOF'
+The engine authentication state listed below was copied while the app may have been writing it:
+these directories are plain copies. This note does not cover the databases; a CONSISTENCY-WARNING
+in the same archive does. If a restored session does not reconnect, pair it again, or re-take the
+backup with the sessions (or the container) stopped.
+EOF
+  fi
+  echo "$1" >>"$ENGINE_STATE_NOTE"
+  log "WARN: engine auth state may have been written during the copy; a restore may need re-pairing: $1"
+}
+
+# copy_live_tree <src> <dest> [label] - cp -pRH, except that a file the app deleted or renamed while
+# cp walked the tree (Chromium cache and LevelDB churn, the Baileys store's temp files and consumed
+# keys, media retention and plugin storage writes) is a torn copy, not a failed backup. With a label
+# the copy is engine auth state and goes in ENGINE-STATE-NOTE; without one it is only logged. Every
+# other cp error stays fatal. cp runs in the C locale so the error text matched here is the one it
+# prints, and grep reads a here-string: piped from printf, a grep -q that stops at the first fatal line
+# breaks the pipe once the errors outgrow its buffer, and pipefail then reads a failure as benign.
+copy_live_tree() {
+  local err
+  if ! err="$(LC_ALL=C cp -pRH "$1" "$2" 2>&1)"; then
+    if grep -qv 'No such file or directory' <<<"$err"; then
+      printf '%s\n' "$err" >&2
+      exit 1
+    fi
+    if [ -n "${3:-}" ]; then
+      record_engine_state_note "$3 (files changed during the copy)"
+    else
+      log "WARN: files under $1 changed during the copy"
+    fi
+  fi
+}
+
 # Online SQLite backup (consistent without stopping the app) when sqlite3 is present. A missing
 # source database is FATAL: an archive without the configured databases is not a backup, and a
 # silent skip is how an empty archive gets reported as "Backup complete".
@@ -108,7 +179,14 @@ backup_sqlite() {
     exit 1
   fi
   if command -v sqlite3 >/dev/null 2>&1; then
-    sqlite3 "$src" ".backup '$dest'"
+    # The app writes in rollback-journal mode, and a bare .backup gave up on the first lock it met and
+    # restarted after every outside write, so a busy gateway never got a backup. The read transaction
+    # lets the copy finish in one pass, but it blocks every app write, and with it the app's event
+    # loop, until the copy ends, and a write that outlasts the app's SQLite busy timeout fails. The
+    # busy timeout here waits out a commit, and -init /dev/null keeps the operator's sqlite3 rc file
+    # out of the run.
+    sqlite3 -init /dev/null -cmd ".timeout 30000" "$src" \
+      "BEGIN" "SELECT count(*) FROM sqlite_master" ".backup '$dest'" "COMMIT" >/dev/null
   else
     log "WARN: sqlite3 not found — plain-copying live database $src (the snapshot may be torn)"
     cp "$src" "$dest"
@@ -149,33 +227,59 @@ else
   REQUIRED_MEMBERS+=("./openwa.sqlite")
 fi
 
+# The state directories below are copied with -H: a directory an operator moved to another disk and
+# linked back is archived by its content. Without it the archive held only the link, with no data.
 if [ -d "$SESSIONS_DIR" ]; then
   log "Backing up whatsapp-web.js sessions"
-  cp -pR "$SESSIONS_DIR" "$STAGE/sessions"
+  copy_live_tree "$SESSIONS_DIR" "$STAGE/sessions" sessions/
+  # Chromium holds a SingletonLock (a symlink, so not `-e`) in every profile it has open. A browser
+  # killed outright (force-kill, a stop that timed out) leaves its lock behind until the next launch
+  # or container start clears it, so a lock here means the profile is open or was last hard-killed.
+  OPEN_PROFILES="$({
+    find -H "$SESSIONS_DIR" -mindepth 2 -maxdepth 2 -name SingletonLock -exec dirname {} \; 2>/dev/null || true
+  } | sed 's|.*/||' | sort | tr '\n' ' ')"
+  if [ -n "$OPEN_PROFILES" ]; then
+    record_engine_state_note "sessions/ (whatsapp-web.js profiles holding a Chromium SingletonLock, open or left by a killed browser: ${OPEN_PROFILES% })"
+  fi
 else
   log "WARN: $SESSIONS_DIR not found — skipping sessions"
 fi
 
 if [ -d "$BAILEYS_DIR" ]; then
   log "Backing up Baileys authentication state"
-  cp -pR "$BAILEYS_DIR" "$STAGE/baileys"
-elif [ "${ENGINE_TYPE:-}" = "baileys" ]; then
+  copy_live_tree "$BAILEYS_DIR" "$STAGE/baileys" baileys/
+  # Baileys rewrites creds.json and its key files during normal traffic and leaves no sign of being
+  # live, so any session's state counts, stopped or not.
+  if [ -n "$(find -H "$BAILEYS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]; then
+    record_engine_state_note "baileys/ (recorded whenever Baileys state exists; it cannot show whether it was live)"
+  fi
+elif [ "$(openwa_resolve ENGINE_TYPE '')" = "baileys" ]; then
   log "WARN: ENGINE_TYPE=baileys but $BAILEYS_DIR was not found — restored sessions will require pairing"
 fi
 
 if [ -d "$MEDIA_DIR" ]; then
   log "Backing up local media"
-  cp -pR "$MEDIA_DIR" "$STAGE/media"
+  copy_live_tree "$MEDIA_DIR" "$STAGE/media"
+else
+  log "WARN: $MEDIA_DIR not found; skipping local media"
 fi
 
 if [ -d "$PLUGIN_PACKAGES_DIR" ]; then
   log "Backing up installed plugin packages"
-  cp -pR "$PLUGIN_PACKAGES_DIR" "$STAGE/plugin-packages"
+  copy_live_tree "$PLUGIN_PACKAGES_DIR" "$STAGE/plugin-packages"
+fi
+
+# With PLUGINS_DIR unset the app also loads packages from ./plugins, its default up to 0.12.1 (see
+# plugin-package-scanner.ts). The archive does not carry that directory, so say so.
+if [ -z "$(openwa_resolve PLUGINS_DIR '')" ] &&
+  [ -n "$(find -H ./plugins -mindepth 2 -maxdepth 2 -name manifest.json ! -path './plugins/.*' 2>/dev/null)" ]; then
+  log "WARN: ./plugins holds plugin packages the app still loads, and this archive does not carry them;"
+  log "      move them into $PLUGIN_PACKAGES_DIR, or set PLUGINS_DIR=./plugins, and back up again"
 fi
 
 if [ -d "$PLUGIN_STATE_DIR" ]; then
   log "Backing up plugin registry and persisted state"
-  cp -pR "$PLUGIN_STATE_DIR" "$STAGE/plugin-state"
+  copy_live_tree "$PLUGIN_STATE_DIR" "$STAGE/plugin-state"
 fi
 
 if [ -f "$GENERATED_ENV" ]; then
@@ -188,7 +292,6 @@ if [ -f "$ADMIN_KEY_FILE" ]; then
   cp -p "$ADMIN_KEY_FILE" "$STAGE/.api-key"
 fi
 
-mkdir -p "$BACKUP_DIR"
 ARCHIVE="$BACKUP_DIR/openwa-backup-$TIMESTAMP.tar.gz"
 tar -czf "$ARCHIVE" -C "$STAGE" .
 
@@ -196,10 +299,12 @@ ARCHIVE_LIST="$(tar -tzf "$ARCHIVE")"
 
 # Min-content check on the finished archive: every configured database must be present. If not,
 # delete the defective archive and fail — leaving it on disk invites a restore into a fresh-empty
-# install (new API keys, new master key) reported as success.
+# install (new API keys, new master key) reported as success. grep reads a here-string, not a pipe: a
+# grep -q that matches early stops reading, and on a listing larger than the pipe buffer the broken pipe
+# made pipefail report a member that is there as missing.
 MISSING_MEMBERS=""
 for member in "${REQUIRED_MEMBERS[@]}"; do
-  if ! printf '%s\n' "$ARCHIVE_LIST" | grep -qxF "$member"; then
+  if ! grep -qxF "$member" <<<"$ARCHIVE_LIST"; then
     MISSING_MEMBERS="$MISSING_MEMBERS $member"
   fi
 done

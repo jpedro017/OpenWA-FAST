@@ -21,12 +21,6 @@ export class CallController {
   @ApiResponse({ status: 200, description: 'The generated link', type: CallLinkResponseDto })
   @ApiResponse({ status: 400, description: 'Session is not started, or an invalid type / startTime' })
   @ApiResponse({ status: 403, description: 'WhatsApp generated no link for this request' })
-  @ApiResponse({
-    status: 503,
-    description:
-      'WhatsApp did not answer within the request budget. The link may or may not have been created — ' +
-      'the gateway stopped waiting for a reply that never came.',
-  })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   async createLink(
     @Param('sessionId') sessionId: string,
@@ -45,6 +39,7 @@ export class CallController {
   @ApiResponse({ status: 200, description: 'Call rejected', type: CallAckResponseDto })
   @ApiResponse({ status: 400, description: 'Session is not started' })
   @ApiResponse({ status: 404, description: 'Call not found or no longer ringing' })
+  @ApiResponse({ status: 501, description: 'The active engine cannot reject a call (whatsapp-web.js)' })
   @ApiResponse({
     status: 503,
     description:

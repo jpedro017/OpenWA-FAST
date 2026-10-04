@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { applyNewsletterCreatePatch, PARSE_FIND, MARKER } = require('./patch-baileys-newsletter-create');
+const { applyNewsletterCreatePatch, isApplied, PARSE_FIND, MARKER } = require('./patch-baileys-newsletter-create');
 
 /**
  * Same contract as the sibling patcher specs: the patcher rewrites a file this repository does not
@@ -116,11 +116,9 @@ test('refuses an unknown shape rather than shipping unpatched', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('skips a tree with no baileys rather than failing the install', () => {
+test('refuses a tree with no newsletter.js rather than shipping unpatched', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'baileys-newsletter-'));
-  const result = applyNewsletterCreatePatch(dir);
-  assert.equal(result.skipped, true);
-  assert.match(result.reason, /not found/);
+  assert.throws(() => applyNewsletterCreatePatch(dir), /not found/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -128,5 +126,13 @@ test('the marker the idempotence check keys on is actually written', () => {
   const { dir, file } = fakeBaileys();
   applyNewsletterCreatePatch(dir);
   assert.ok(fs.readFileSync(file, 'utf8').includes(MARKER));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('isApplied is false on a pristine tree and true once the patch has run', () => {
+  const { dir } = fakeBaileys();
+  assert.equal(isApplied(dir), false);
+  applyNewsletterCreatePatch(dir);
+  assert.equal(isApplied(dir), true);
   fs.rmSync(dir, { recursive: true, force: true });
 });

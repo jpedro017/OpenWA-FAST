@@ -44,6 +44,21 @@ export class SessionLifecycleFences {
   }
 
   /**
+   * Graceful destroy(), escalating to forceDestroy() when it throws or hits its deadline, like stop()
+   * does. For teardowns that leave the engine unreachable afterwards (it is removed from the Map), a
+   * failed graceful destroy would otherwise leave a live browser with no handle to kill it by.
+   * Resolves `false` only when both attempts failed. Not for shutdown(): the process is exiting.
+   */
+  async destroyWithEscalation(sessionId: string, engine: IWhatsAppEngine): Promise<boolean> {
+    if (await this.teardownEngineSafely(sessionId, engine, e => e.destroy(), 'destroy')) return true;
+    this.logger.warn(`Graceful destroy failed for session ${sessionId}; escalating to force-destroy`, {
+      sessionId,
+      action: 'destroy_escalate_force_destroy',
+    });
+    return this.teardownEngineSafely(sessionId, engine, e => e.forceDestroy(), 'force-destroy');
+  }
+
+  /**
    * Run an engine teardown (destroy/disconnect), isolating + time-bounding failures so a stuck
    * Chromium/socket can neither hang nor abort the caller. Always resolves — the caller is then free
    * to reconcile the engines Map and proceed with DB cleanup regardless of teardown outcome.
@@ -54,8 +69,8 @@ export class SessionLifecycleFences {
    * A teardown that loses the deadline race keeps running past the caller's return. For 'logout'
    * that leftover promise ends in an fs.rm of the session's on-disk profile — the same path a
    * later start() re-creates — so the raw promise is registered in pendingTeardowns (keyed by the
-   * session NAME, which is the auth-dir key) and start()/delete() wait (bounded, fail-closed) for
-   * it to settle before touching that path.
+   * session NAME, 1:1 with the live row whose id keys that dir) and start()/delete() wait (bounded,
+   * fail-closed) for it to settle before touching that path.
    */
   async teardownEngineSafely(
     sessionId: string,
@@ -89,10 +104,10 @@ export class SessionLifecycleFences {
   }
 
   /**
-   * Track a destructive credential-teardown promise under the session NAME (the on-disk auth-dir
-   * key — NOT the UUID). A logout's `engine.logout()` ends in an `fs.rm` of the same directory a
-   * later start() under the same name re-creates, so start()/delete()/executeReconnect consult this
-   * map and wait (bounded, fail-closed) before touching that path.
+   * Track a destructive credential-teardown promise under the session NAME. A logout's
+   * `engine.logout()` ends in an `fs.rm` of the same directory a later start() re-creates, so
+   * start()/delete()/executeReconnect consult this map and wait (bounded, fail-closed) before
+   * touching that path. See awaitPendingTeardown for why the name, not the id, is the key.
    *
    * Settlement marker only — never rejects, so it can't drive a caller's deadline race to a false
    * "completed". A concurrent teardown for the same name CHAINS onto the previous entry instead of
@@ -117,14 +132,16 @@ export class SessionLifecycleFences {
    * Wait (bounded) for a teardown that lost its deadline race to settle. A losing logout() promise
    * ends in an fs.rm of the on-disk profile — the same deterministic path start() re-creates and
    * delete() purges — so those paths call this before touching disk. The fence is FAIL CLOSED: a
-   * teardown still wedged past the bound could still land its rm on credentials a (re)created session
-   * under the same name would write, so the operation refuses with a retryable 409
-   * (SESSION_NAME_TEARDOWN_PENDING) instead of proceeding. The entry is NOT dropped on timeout — a
-   * retry after the rm eventually settles will see it gone and proceed.
+   * teardown still wedged past the bound could still land its rm on credentials a (re)started session
+   * would write, so the operation refuses with a retryable 409 (SESSION_NAME_TEARDOWN_PENDING)
+   * instead of proceeding. The entry is NOT dropped on timeout — a retry after the rm eventually
+   * settles will see it gone and proceed.
    *
-   * Keyed by the session NAME: the auth directories are built from `Session.name`, so two sessions
-   * sharing a name (a deleted UUID recreated under the same name) share the credential path and must
-   * share the fence.
+   * Keyed by the session NAME even though the auth directories are keyed by `Session.id` (#1597):
+   * the name is unique, so for a live row the two keys are 1:1 and this fence covers exactly the
+   * directory at risk. Across a delete and a recreate under the same name it holds the new session
+   * back a little longer than strictly needed, which is the safe direction, and it keeps the public
+   * refusal code meaning what it says.
    */
   async awaitPendingTeardown(sessionName: string): Promise<void> {
     const pending = this.pendingTeardowns.get(sessionName);
@@ -169,8 +186,10 @@ export class SessionLifecycleFences {
     if (!pending || pending.engine !== engine) return;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // A rejected write has settled too, and start()'s catch owns reporting it: the retiring control
+    // must still reach its teardown and final write.
     const settled = await Promise.race([
-      pending.promise.then(() => true),
+      pending.promise.catch(() => undefined).then(() => true),
       new Promise<boolean>(resolve => {
         timer = setTimeout(() => resolve(false), 10_000);
       }),
@@ -190,9 +209,12 @@ export class SessionLifecycleFences {
    * concurrency slot and makes a later start() see the session as "already started"; forceDestroy()
    * (not the graceful destroy()) is used because such an engine's browser/CDP connection is typically
    * already broken, so a graceful close would only time out before the process is reaped.
+   *
+   * The eviction is identity-checked (deleteIfLive): if a replacement engine is already registered
+   * for `id`, it stays. The passed engine is force-destroyed either way, since it is dead or abandoned.
    */
   evictAndForceDestroy(id: string, engine: IWhatsAppEngine): void {
-    this.engines.delete(id);
+    this.engines.deleteIfLive(id, engine);
     void this.teardownEngineSafely(id, engine, e => e.forceDestroy(), 'force-destroy');
   }
 }

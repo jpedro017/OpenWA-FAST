@@ -1,14 +1,24 @@
 import { DataSource, DataSourceOptions } from 'typeorm';
 import * as path from 'path';
 import { loadCliEnv } from './load-cli-env';
-import { sqliteDataMainPathCollision } from '../config/env.validation';
+import { postgresUtcExtra } from './postgres-utc';
+import { postgresSchemaError, sqliteDataMainPathCollision } from '../config/env.validation';
 
 // Load env with the same precedence as the app (process.env > .env > data/.env.generated), so the
 // migration CLI targets the SAME database the dashboard configured — not the default SQLite DB.
 loadCliEnv();
 
 // The TypeORM CLI never runs ConfigModule's validate(), so the boot-time guards in env.validation
-// don't apply here. The one that matters for a DDL-issuing connection is re-applied explicitly:
+// don't apply here. The selector is checked raw, as boot does: a padded 'postgres ' from the host env,
+// or a quoted one from .env (dotenv keeps the padding inside quotes), would otherwise fail the exact
+// comparison below and migrate a SQLite file named after the database. It runs after loadCliEnv, so
+// both sources reach it.
+const rawDbType = process.env.DATABASE_TYPE;
+if (rawDbType?.trim() && rawDbType !== 'sqlite' && rawDbType !== 'postgres') {
+  throw new Error(`DATABASE_TYPE must be "sqlite" or "postgres" (got ${JSON.stringify(rawDbType)})`);
+}
+
+// The other boot guard that matters for a DDL-issuing connection is re-applied explicitly:
 // DATABASE_NAME must not resolve to the main (auth/audit) SQLite file, or data migrations would
 // run against the wrong database. Resolved exactly like the runtime (env → default), so the CLI
 // and the app make the same call.
@@ -19,10 +29,19 @@ if (sqlitePathCollision) {
 
 const dbType = process.env.DATABASE_TYPE || 'sqlite';
 
+// Same POSTGRES_SCHEMA rule as boot: a mixed-case name is quoted by TypeORM (ledger) but folded to
+// lower case in the unquoted search_path (raw migration DDL), splitting one migration run across two
+// schemas.
+const pgSchemaError =
+  dbType === 'postgres' && process.env.POSTGRES_SCHEMA ? postgresSchemaError(process.env.POSTGRES_SCHEMA) : null;
+if (pgSchemaError) {
+  throw new Error(pgSchemaError);
+}
+
 const sourceGlob = (...segments: string[]): string => path.join(__dirname, ...segments).replace(/\\/g, '/');
 
-// Scoped to the DATA-owned modules only (session/webhook/message/template/engine/integration/status-store), mirroring
-// the runtime data connection (app.module.ts). A broad '**' glob would also sweep in the main-owned
+// Scoped to the DATA-owned modules only (session/webhook/message/template/engine/integration/status-store/automation),
+// mirroring the runtime data connection (app.module.ts). A broad '**' glob would also sweep in the main-owned
 // auth/audit entities and pollute `migration:generate` against the data DB with their DDL.
 const dataEntities = [
   sourceGlob('..', 'modules', 'session', '**', '*.entity{.ts,.js}'),
@@ -83,6 +102,9 @@ export function buildPostgresDataSourceOptions(env: NodeJS.ProcessEnv = process.
           }
         : false,
     extra: {
+      // Same UTC pin the runtime data connection carries (pg-boot-migrations.ts): a migration that
+      // rewrites a timestamp column must mean the same thing as the app that wrote it.
+      ...postgresUtcExtra(),
       max: parseInt(env.DATABASE_POOL_SIZE || '10', 10),
       // Pool resilience only. NO statement_timeout here: this connection runs migrations, and a
       // long CREATE INDEX / backfill must not be aborted mid-flight.

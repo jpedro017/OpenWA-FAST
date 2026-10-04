@@ -1,9 +1,16 @@
 import type { IncomingMessage } from '../interfaces/whatsapp-engine.interface';
+import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
 
 /** Default inbound media cap: 50 MiB. Shares MEDIA_DOWNLOAD_MAX_BYTES with the outbound download cap. */
 const DEFAULT_INBOUND_MEDIA_MAX_BYTES = 50 * 1024 * 1024;
 
-/** Resolved inbound media byte cap; a non-positive/garbage override falls back to the default. */
+/**
+ * Resolved inbound media byte cap.
+ *
+ * The fallback below only covers unset and empty: boot validation rejects anything else, including
+ * the unit-suffixed form its neighbours accept. `parseInt` would read `50mb` as 50 and this helper
+ * would take it, since 50 is a positive integer, capping every download at 50 bytes.
+ */
 export function inboundMediaMaxBytes(): number {
   const parsed = Number.parseInt(process.env.MEDIA_DOWNLOAD_MAX_BYTES ?? '', 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_INBOUND_MEDIA_MAX_BYTES;
@@ -15,17 +22,57 @@ const DEFAULT_INBOUND_MEDIA_CONCURRENCY = 4;
 /**
  * Max inbound media downloads processed concurrently. Each download materialises a full decrypted
  * buffer in heap, so an unbounded fire-and-forget loop lets a sender flood the gateway with N parallel
- * multi-MB allocations; this bounds N. Override via INBOUND_MEDIA_CONCURRENCY; garbage falls back.
+ * multi-MB allocations; this bounds N. Override via INBOUND_MEDIA_CONCURRENCY; boot validation
+ * rejects a malformed value, so the fallback below only covers unset and empty.
  */
 export function inboundMediaConcurrency(): number {
   const parsed = Number.parseInt(process.env.INBOUND_MEDIA_CONCURRENCY ?? '', 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_INBOUND_MEDIA_CONCURRENCY;
 }
 
+/**
+ * Process-wide ceiling on inbound media downloads, across every session (INBOUND_MEDIA_GLOBAL_CONCURRENCY).
+ * INBOUND_MEDIA_CONCURRENCY bounds one session, so without this the worst case grows with the session
+ * count. 0 (the default, and unset or empty) turns it off.
+ */
+export function inboundMediaGlobalConcurrency(): number {
+  const parsed = Number.parseInt(process.env.INBOUND_MEDIA_GLOBAL_CONCURRENCY ?? '', 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
+}
+
+let globalGate: ConcurrencyLimiter | null | undefined;
+
+/**
+ * The gate every session's downloads share, built on first use and never closed. Null when off:
+ * ConcurrencyLimiter clamps 0 to 1, which would serialize every download in the process.
+ */
+export function globalInboundMediaGate(): ConcurrencyLimiter | null {
+  if (globalGate === undefined) {
+    const max = inboundMediaGlobalConcurrency();
+    globalGate = max > 0 ? new ConcurrencyLimiter(max) : null;
+  }
+  return globalGate;
+}
+
+/** Run one media download under the process-wide gate, or directly when it is off. */
+export function runUnderGlobalMediaGate<T>(task: () => Promise<T>): Promise<T> {
+  const gate = globalInboundMediaGate();
+  return gate ? gate.run(task) : task();
+}
+
+/** Forget the built gate so the next call reads INBOUND_MEDIA_GLOBAL_CONCURRENCY again. Tests only. */
+export function __resetGlobalInboundMediaGate(): void {
+  globalGate = undefined;
+}
+
 /** Default inbound media download timeout: 30s. Shares MEDIA_DOWNLOAD_TIMEOUT_MS with the outbound download. */
 const DEFAULT_INBOUND_MEDIA_TIMEOUT_MS = 30_000;
 
-/** Resolved per-download wall-clock timeout; a non-positive/garbage override falls back to the default. */
+/**
+ * Resolved per-download wall-clock timeout. Boot validation rejects a malformed override, so the
+ * fallback only covers unset and empty: `parseInt` would read `30s` as 30 and this helper would take
+ * it, timing out every download after 30 ms.
+ */
 export function inboundMediaTimeoutMs(): number {
   const parsed = Number.parseInt(process.env.MEDIA_DOWNLOAD_TIMEOUT_MS ?? '', 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_INBOUND_MEDIA_TIMEOUT_MS;
@@ -36,10 +83,10 @@ export function inboundMediaTimeoutMs(): number {
  * bound TIME: a remote sender can trickle bytes slowly (never tripping the cap) and hold a concurrency
  * slot indefinitely — a slow-loris on the inbound pipeline. On timeout `onTimeout` runs — a best-effort
  * hook to abort the source where it's abortable (e.g. destroy a Baileys stream) — and the result resolves
- * `null`, the same "no usable media" sentinel the byte-cap abort returns. A non-abortable source (the wwjs
- * `downloadMedia()`) can't be stopped, so that caller must instead hold its concurrency slot until the real
- * download settles. A late rejection from the abandoned download is swallowed so it can't surface as an
- * unhandled rejection after the race has already settled.
+ * `null`, the "no usable media" sentinel. A non-abortable source (the wwjs `downloadMedia()`) can't be
+ * stopped, so that caller must instead hold its concurrency slot until the real download settles. A late
+ * rejection from the abandoned download is swallowed so it can't surface as an unhandled rejection after
+ * the race has already settled.
  */
 export function withInboundDownloadTimeout<T>(
   promise: Promise<T>,
@@ -81,7 +128,8 @@ const DEFAULT_CHAT_HISTORY_MEDIA_BUDGET_BYTES = 25 * 1024 * 1024;
 /**
  * Aggregate budget (counted in base64 characters, the actual response/heap payload) for media inlined
  * by one getChatHistory pass. Once the running total crosses it, remaining media messages carry the
- * usual `omitted` marker instead of a download. A non-positive/garbage override falls back to the default.
+ * usual `omitted` marker instead of a download. Boot validation rejects a malformed override, so the
+ * fallback covers unset and empty only.
  */
 export function chatHistoryMediaBudgetBytes(): number {
   const parsed = Number.parseInt(process.env.CHAT_HISTORY_MEDIA_BUDGET_BYTES ?? '', 10);

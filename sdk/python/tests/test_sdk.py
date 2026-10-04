@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+import json
+import time
+from typing import get_args, get_type_hints
+
 import httpx
 import pytest
 
 from openwa import OpenWAClient, OpenWAApiError, OpenWANotFoundError
 from openwa._http import build_url
 from openwa.errors import OpenWAServiceUnavailableError
-from openwa.types import WebhookFilters
+from openwa.resources.catalog import CatalogResource
+from openwa.resources.messages import MessagesResource
+from openwa.types import (
+    AuthValidateResponse,
+    BatchCancelResponse,
+    HealthReadyResponse,
+    WebhookDelivery,
+    WebhookDeliveryEvent,
+    WebhookEvent,
+    WebhookFilters,
+)
 
 from conftest import MockBackend, make_client
 
@@ -44,6 +58,19 @@ class TestClientCore:
         assert backend.last_call.headers["content-type"] == "application/json"
         assert backend.last_call.headers["x-trace"] == "keep"  # benign custom headers still pass through
 
+    def test_default_headers_cannot_override_api_key_in_another_case(self):
+        # Header names are case-insensitive: a lowercase copy must be replaced, not sent alongside.
+        backend = MockBackend().on("GET", "/api/sessions", body=[])
+        client = OpenWAClient(
+            base_url="http://localhost",
+            api_key="REAL_KEY",
+            default_headers={"x-api-key": "EVIL", "content-type": "text/plain"},
+            transport=backend.as_transport(),
+        )
+        client.sessions.list()
+        assert backend.last_call.headers["x-api-key"] == "REAL_KEY"
+        assert backend.last_call.headers["content-type"] == "application/json"
+
     def test_non_json_2xx_body_returns_text(self):
         import httpx
 
@@ -61,6 +88,22 @@ class TestClientCore:
         backend2 = MockBackend().on("GET", "/history", body=[])
         make_client(backend2).messages.history("s", "a@c.us")
         assert "/messages/a@c.us/history" in backend2.last_call.url  # @ preserved
+
+    def test_empty_or_dot_ids_are_refused_before_sending(self):
+        # httpx resolves dot segments, so such an id would otherwise reach the
+        # parent resource.
+        backend = MockBackend()
+        client = make_client(backend)
+        with pytest.raises(ValueError):
+            client.webhooks.delete("s1", "..")
+        with pytest.raises(ValueError):
+            client.contacts.delete("s1", ".")
+        with pytest.raises(ValueError):
+            client.templates.delete("s1", "")
+        assert backend.calls == []
+        backend.on("DELETE", "/webhooks/", status=204)
+        client.webhooks.delete("s1", "628123@c.us")
+        assert backend.last_call.url == "http://localhost:2785/api/sessions/s1/webhooks/628123@c.us"
 
     def test_raw_request_escape_hatch(self):
         backend = MockBackend().on("GET", "/api/anything", body={"ok": True})
@@ -94,12 +137,32 @@ class TestClientCore:
         client.sessions.list()
         assert backend.last_call.url == "http://localhost:2785/api/sessions"
 
+    def test_sessions_list_sends_name(self):
+        backend = MockBackend().on("GET", "/api/sessions", body=[])
+        make_client(backend).sessions.list({"name": "my-bot"})
+        assert "name=my-bot" in backend.last_call.url
+
     def test_query_params_skip_none(self):
         backend = MockBackend().on("GET", "/messages", body=[])
         make_client(backend).messages.list("s1", {"chatId": "a@c.us", "limit": 10})
         url = backend.last_call.url
         assert "chatId=a%40c.us" in url
         assert "limit=10" in url
+
+    def test_build_url_escapes_a_literal_percent_in_a_query_value(self):
+        # httpx before 0.27.1 sent "%41" unescaped, so the gateway decoded it to "A".
+        assert build_url("http://x", "/api/search", {"q": "%41"}).endswith("q=%2541")
+        assert build_url("http://x", "/api/search", {"q": "50%"}).endswith("q=50%25")
+
+    @pytest.mark.parametrize("path", ["https://evil.example/x", ".evil.example/x", "@evil.example/x"])
+    def test_build_url_refuses_a_path_without_a_leading_slash(self, path):
+        # An absolute URL would replace the base host and carry the API key there.
+        with pytest.raises(ValueError):
+            build_url("http://x", path)
+        backend = MockBackend()
+        with pytest.raises(ValueError):
+            make_client(backend).request("GET", path)
+        assert backend.calls == []
 
     def test_build_url_omits_none_valued_params(self):
         # The behaviour a caller depends on: a None never reaches the wire as the literal "None".
@@ -111,6 +174,11 @@ class TestClientCore:
         assert "limit=5" in url
         assert "sessionId" not in url
         assert "None" not in url
+
+    def test_raw_request_keeps_a_query_string_in_the_path(self):
+        backend = MockBackend().on("GET", "/api/sessions", body=[])
+        make_client(backend).request("GET", "/api/sessions?limit=5", query={"name": "x"})
+        assert backend.last_call.url == "http://localhost:2785/api/sessions?limit=5&name=x"
 
     def test_204_is_none(self):
         # `delete` is declared `-> None`, so asserting on its result is a type error and proves
@@ -127,10 +195,54 @@ class TestClientCore:
         with pytest.raises(OpenWANotFoundError):
             make_client(backend).sessions.get("missing")
 
+    def test_error_exposes_code_retry_after_and_headers(self):
+        from email.utils import formatdate
+
+        from openwa.errors import OpenWARateLimitError
+
+        def fail(status: int, body: object = None, headers: dict[str, str] | None = None, text: str = "") -> OpenWAApiError:
+            content = json.dumps(body).encode() if body is not None else text.encode()
+            transport = httpx.MockTransport(lambda _: httpx.Response(status, content=content, headers=headers))
+            client = OpenWAClient(base_url="https://x", api_key="k", transport=transport)
+            with pytest.raises(OpenWAApiError) as caught:
+                client.sessions.list()
+            return caught.value
+
+        throttled = fail(429, {"statusCode": 429, "message": "ThrottlerException: Too Many Requests"}, {"Retry-After": "7"})
+        assert isinstance(throttled, OpenWARateLimitError)
+        assert throttled.retry_after_seconds == 7
+        assert throttled.code is None
+        assert throttled.headers is not None and throttled.headers["retry-after"] == "7"
+
+        # Send pacing puts its wait in the body; a header must not shorten it.
+        pacing = {
+            "statusCode": 429,
+            "error": "Too Many Requests",
+            "message": "Daily send cap reached",
+            "code": "SEND_PACING_LIMITED",
+            "retryAfterSeconds": 34521,
+        }
+        for headers in (None, {"Retry-After": "1"}):
+            err = fail(429, pacing, headers)
+            assert err.code == "SEND_PACING_LIMITED"
+            assert err.retry_after_seconds == 34521
+
+        dated = fail(503, headers={"Retry-After": formatdate(time.time() + 2, usegmt=True)})
+        assert dated.retry_after_seconds is not None and 0 <= dated.retry_after_seconds <= 3
+        assert fail(503, headers={"Retry-After": "soon"}).retry_after_seconds is None
+        # An out-of-range date overflows inside the stdlib parser; it is still just unparseable.
+        for huge in ("Mon, 01 Jan 99999999999999999999 00:00:00 GMT", "Fri, 1 Jan 2100 00:00:00 +99999999999999999999"):
+            assert fail(503, headers={"Retry-After": huge}).retry_after_seconds is None
+
+        logout = fail(502, {"statusCode": 502, "message": "x", "code": "SESSION_LOGOUT_INCOMPLETE"})
+        assert logout.code == "SESSION_LOGOUT_INCOMPLETE"
+        plain = fail(500, text="oops")
+        assert plain.code is None and plain.retry_after_seconds is None
+
     def test_maps_503_to_service_unavailable(self):
-        # The gateway answers 503 when the engine never confirmed an operation -- the one typed error
-        # here worth retrying. It used to fall through to the base class while the permanent 501 had a
-        # subclass of its own.
+        # The gateway answers 503 when the engine never confirmed an operation: a transport failure,
+        # which is worth retrying, as a 429 is. It used to fall through to the base class while the
+        # permanent 501 had a subclass of its own.
         backend = MockBackend()
         backend.on("GET", "/api/sessions/s1", 503, {
             "statusCode": 503, "message": "WhatsApp did not answer", "error": "Service Unavailable"
@@ -307,6 +419,11 @@ class TestMessages:
         assert "/messages/batch/b/cancel" in backend.calls[-1].url
         assert backend.calls[-1].method == "POST"
 
+    def test_cancel_batch_is_typed_as_the_cancel_response(self):
+        # The cancel route sends no results, so typing it as BatchStatusResponse (results required)
+        # lets a caller read a key that is never there.
+        assert get_type_hints(MessagesResource.cancel_batch)["return"] is BatchCancelResponse
+
 
 # ── Sessions ───────────────────────────────────────────────────────
 
@@ -326,14 +443,17 @@ class TestSessions:
         client.sessions.list()
         assert backend.calls[-1].url == "http://localhost:2785/api/sessions"
         client.sessions.get("s1")
-        assert "/sessions/s1" in backend.calls[-1].url
+        assert backend.calls[-1].url == "http://localhost:2785/api/sessions/s1"
         client.sessions.create({"name": "n"})
         assert backend.calls[-1].body == {"name": "n"}
         client.sessions.start("s1")
         assert "/sessions/s1/start" in backend.calls[-1].url
+        # The mock answers any path under the generic /api/sessions prefix, so only the URL proves
+        # stop did not land on logout (which unlinks the device).
         client.sessions.stop("s1")
+        assert backend.calls[-1].url == "http://localhost:2785/api/sessions/s1/stop"
         client.sessions.logout("s1")
-        assert "/sessions/s1/logout" in backend.calls[-1].url
+        assert backend.calls[-1].url == "http://localhost:2785/api/sessions/s1/logout"
         client.sessions.force_kill("s1")
         assert "/sessions/s1/force-kill" in backend.calls[-1].url
         client.sessions.delete("s1")
@@ -565,6 +685,19 @@ class TestContacts:
 
 
 class TestWebhooks:
+    def test_delivery_event_excludes_the_subscription_wildcard(self):
+        # "*" only matches a subscription; a delivery names one concrete event, or "test".
+        assert set(get_args(WebhookEvent)) == set(get_args(WebhookDeliveryEvent)) | {"*"}
+        delivery: WebhookDelivery = {
+            "event": "*",  # type: ignore[typeddict-item]
+            "timestamp": "2026-02-02T10:00:00.000Z",
+            "sessionId": "s1",
+            "idempotencyKey": "k",
+            "deliveryId": "dlv_1",
+            "data": {},
+        }
+        assert delivery["event"] == "*"
+
     def test_crud_test(self):
         wh = {"id": "w1", "sessionId": "s", "url": "u", "events": ["*"], "active": True, "createdAt": "", "updatedAt": ""}
         backend = MockBackend()
@@ -681,7 +814,9 @@ class TestChatsAndHealth:
         client.chats.mark_read("s", {"chatId": "a@c.us"})
         assert "/chats/read" in backend.calls[-1].url
         client.chats.mark_unread("s", {"chatId": "a@c.us"})
+        assert backend.calls[-1].url == "http://localhost:2785/api/sessions/s/chats/unread"
         client.chats.delete("s", {"chatId": "a@c.us"})
+        assert backend.calls[-1].url == "http://localhost:2785/api/sessions/s/chats/delete"
         client.chats.send_state("s", {"chatId": "a@c.us", "state": "typing"})
         assert "/chats/typing" in backend.calls[-1].url
 
@@ -748,16 +883,26 @@ class TestChatsAndHealth:
         backend = MockBackend()
         backend.on("GET", "/api/health", body={"status": "ok", "version": "0.7.2"})
         backend.on("GET", "/live", body={"status": "ok"})
-        backend.on("GET", "/ready", body={"status": "ok", "details": {}})
+        # The full path, so it outranks the shorter /api/health prefix it contains.
+        ready = {"status": "ok", "details": {"mainDatabase": {"status": "up"}, "dataDatabase": {"status": "up"}}}
+        backend.on("GET", "/api/health/ready", body=ready)
         backend.on("POST", "/validate", body={"valid": True, "role": "admin"})
         client = make_client(backend)
         client.health.check()
         assert backend.calls[-1].url == "http://localhost:2785/api/health"
         client.health.live()
-        client.health.ready()
+        assert backend.calls[-1].url == "http://localhost:2785/api/health/live"
+        assert client.health.ready()["details"]["mainDatabase"]["status"] == "up"
         client.auth()
         assert backend.calls[-1].method == "POST"
         assert "/auth/validate" in backend.calls[-1].url
+
+    def test_health_ready_response_requires_details(self):
+        # The readiness route always sends details, on the 200 and on the 503.
+        assert HealthReadyResponse.__required_keys__ == frozenset({"status", "details"})
+
+    def test_auth_validate_response_carries_scoped(self):
+        assert "scoped" in AuthValidateResponse.__optional_keys__
 
 
 class TestLabelsChannelsCatalog:
@@ -818,6 +963,16 @@ class TestLabelsChannelsCatalog:
         assert "/messages/send-product" in backend.calls[-1].url
         assert backend.calls[-1].body == {"chatId": "a@c.us", "productId": "p1", "body": "x"}
 
+    def test_catalog_reads_return_none_on_an_empty_body(self):
+        # The gateway answers 200 with an empty body when there is no catalog or no such product.
+        backend = MockBackend().on("GET", "/catalog", body=None)
+        client = make_client(backend)
+        assert client.catalog.info("s") is None
+        assert client.catalog.product("s", "p1") is None
+        # Read the annotation as written: evaluating `X | None` needs Python 3.10, and CI runs 3.9.
+        for method in (CatalogResource.info, CatalogResource.product):
+            assert method.__annotations__["return"].endswith("| None")
+
     def test_templates_crud(self):
         tpl = {"id": "t1", "sessionId": "s", "name": "welcome", "body": "Hi {{name}}", "createdAt": "", "updatedAt": ""}
         backend = MockBackend()
@@ -868,7 +1023,7 @@ class TestSearch:
             "sessionId": "s1",
             "chatId": "628123@c.us",
             "direction": "incoming",
-            "type": "chat",
+            "type": "text",
             "from": "628123456789@c.us",
             "dateFrom": 1720000000000,
             "dateTo": 1720100000000,
@@ -881,7 +1036,7 @@ class TestSearch:
         assert "sessionId=s1" in url
         assert "chatId=628123%40c.us" in url  # @ percent-encoded in query
         assert "direction=incoming" in url
-        assert "type=chat" in url
+        assert "type=text" in url
         assert "from=628123456789%40c.us" in url
         assert "dateFrom=1720000000000" in url
         assert "dateTo=1720100000000" in url
@@ -893,7 +1048,7 @@ class TestSearch:
             "messageId": "m1", "waMessageId": "wam1", "sessionId": "s1",
             "chatId": "628123@c.us", "body": "please send the invoice",
             "snippet": "please send the <mark>invoice</mark>", "timestamp": 1720000000,
-            "type": "chat", "direction": "incoming", "from": "628123456789@c.us",
+            "type": "text", "direction": "incoming", "from": "628123456789@c.us",
             "score": 0.42,
         }
         backend = MockBackend().on("GET", "/api/search", body={

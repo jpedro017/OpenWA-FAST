@@ -1,4 +1,4 @@
-import { Repository } from 'typeorm';
+import { Not, Repository } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm';
 import { Message } from '../message/entities/message.entity';
 import { KeyedMutationQueue } from '../../common/utils/keyed-mutation-queue';
@@ -53,7 +53,11 @@ export class MessageMutationProjector {
       // no protection against that — the row it finds is real, just the wrong one.
       if (!event.messageId) return;
 
-      const msg = await this.messageRepository.findOne({ where: { sessionId: id, waMessageId: event.messageId } });
+      // A revoked row reads as absent, like the edit paths: a reaction that lands after the delete must
+      // not write a reactions map back onto the cleared metadata.
+      const msg = await this.messageRepository.findOne({
+        where: { sessionId: id, waMessageId: event.messageId, type: Not('revoked') },
+      });
 
       // The stored copy is best-effort — a message is absent whenever it was never persisted (an
       // ephemeral one under STORE_EPHEMERAL_MESSAGES=false, or one that arrived before the session
@@ -96,7 +100,11 @@ export class MessageMutationProjector {
   /** Persist an edit before notifying consumers, while still surfacing the occurrence if storage fails. */
   private async applyMessageEdit(id: string, message: EditedMessage): Promise<void> {
     try {
-      await this.messageRepository.update({ sessionId: id, waMessageId: message.messageId }, { body: message.body });
+      // Never onto a revoked row: a late edit must not bring back text the sender deleted.
+      await this.messageRepository.update(
+        { sessionId: id, waMessageId: message.messageId, type: Not('revoked') },
+        { body: message.body },
+      );
     } catch (err) {
       this.logger.error(`Failed to update edited message: ${message.messageId}`, String(err));
     }
@@ -117,7 +125,7 @@ export class MessageMutationProjector {
     await new Promise<void>(resolve => {
       this.enqueueMessageMutation(sessionId, messageId, async () => {
         try {
-          await this.messageRepository.update({ sessionId, waMessageId: messageId }, { body });
+          await this.messageRepository.update({ sessionId, waMessageId: messageId, type: Not('revoked') }, { body });
         } catch (err) {
           this.logger.warn(`Failed to update stored body of edited message ${messageId}`, { error: String(err) });
         } finally {

@@ -18,7 +18,8 @@ import { type createLogger } from '../../common/services/logger.service';
 export class SessionStatusBroadcaster {
   // Last session.status value broadcast per session. Some engines signal one transition via BOTH
   // onStateChanged and a dedicated callback (onQRCode/onDisconnected), so this guards both the WS emit
-  // and the webhook POST against firing the same status twice. Cleared on delete().
+  // and the webhook POST against firing the same status twice. Cleared on delete(), and before a
+  // lapsed-row correction is announced (see SessionEngineLifecycle.announceStatus).
   readonly lastDispatchedStatus = new Map<string, SessionStatus>();
 
   private readonly sessionRepository: Repository<Session>;
@@ -45,6 +46,18 @@ export class SessionStatusBroadcaster {
       status,
       action: 'status_update',
     });
+    this.announce(id, status);
+  }
+
+  /**
+   * The fan-out half of updateStatus, for a caller that has ALREADY written the row itself.
+   *
+   * One caller needs that split: a row whose owning node is gone has to be corrected under a
+   * predicate (still that node's, still lapsed, still claiming to run), never by id, because a peer
+   * can claim and start it at any moment. Writing by id afterwards to get the fan-out would undo the
+   * predicate. Everything else must keep using updateStatus.
+   */
+  announce(id: string, status: SessionStatus): void {
     // Mirror the status change to WS clients AND subscribed webhooks — both de-duped. Some engines signal
     // one transition via both onStateChanged AND a dedicated callback (onQRCode/onDisconnected), which
     // would otherwise emit/POST the same status twice; only act when it actually changed from the last one.
@@ -55,7 +68,10 @@ export class SessionStatusBroadcaster {
     }
   }
 
-  /** Drop the de-dup entry for a session — called from delete()'s committed-delete cleanup. */
+  /**
+   * Drop the de-dup entry for a session — called from delete()'s committed-delete cleanup, and
+   * before a lapsed-status correction announces, since that write is a transition this process never saw.
+   */
   clear(id: string): void {
     this.lastDispatchedStatus.delete(id);
   }

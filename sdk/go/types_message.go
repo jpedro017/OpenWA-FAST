@@ -130,6 +130,14 @@ type ReplyMessageRequest struct {
 	Mentions []string `json:"mentions,omitempty"`
 }
 
+// ClickButtonRequest taps a choice on a WhatsApp Business prompt. Baileys only.
+type ClickButtonRequest struct {
+	ChatID    string `json:"chatId"`
+	MessageID string `json:"messageId"`
+	ButtonID  string `json:"buttonId"`
+	Text      string `json:"text,omitempty"`
+}
+
 // ForwardMessageRequest forwards a message between chats.
 type ForwardMessageRequest struct {
 	FromChatID string `json:"fromChatId"`
@@ -169,6 +177,12 @@ type ListMessagesQuery struct {
 	From   *string
 	Limit  *int
 	Offset *int
+	// After is a keyset cursor: the id of the last message of the previous page. Takes
+	// precedence over Offset.
+	After *string
+	// InlineMedia set to false omits inline media payloads. The budget is per response, so a
+	// walk repays it on every page.
+	InlineMedia *bool
 }
 
 func (q *ListMessagesQuery) values() url.Values {
@@ -177,6 +191,8 @@ func (q *ListMessagesQuery) values() url.Values {
 	setStr(v, "from", q.From)
 	setInt(v, "limit", q.Limit)
 	setInt(v, "offset", q.Offset)
+	setStr(v, "after", q.After)
+	setBool(v, "inlineMedia", q.InlineMedia)
 	return v
 }
 
@@ -285,6 +301,24 @@ type ChatHistoryMessage struct {
 	Media         *ChatHistoryMedia `json:"media,omitempty"`
 	QuotedMessage *QuotedMessage    `json:"quotedMessage,omitempty"`
 	Location      *MessageLocation  `json:"location,omitempty"`
+	Order         *MessageOrder     `json:"order,omitempty"`
+	Product       *MessageProduct   `json:"product,omitempty"`
+}
+
+// MessageOrder is the order block on a live history message, present on order messages only: the
+// cart the customer placed from the business catalog, plus the single-order token for its items.
+type MessageOrder struct {
+	OrderID string `json:"orderId"`
+	Token   string `json:"token,omitempty"`
+}
+
+// MessageProduct is the product block on a live history message, present on product messages only:
+// the catalog product shared into the chat.
+type MessageProduct struct {
+	ProductID        string `json:"productId"`
+	Title            string `json:"title,omitempty"`
+	Description      string `json:"description,omitempty"`
+	BusinessOwnerJID string `json:"businessOwnerJid,omitempty"`
 }
 
 // MessageCall is the call block on a live history message, present on call messages only.
@@ -293,8 +327,9 @@ type MessageCall struct {
 	Missed bool `json:"missed"`
 }
 
-// MessageContact is the sender contact block on a live history message. History carries PushName
-// only; the richer fields arrive on message.received when WEBHOOK_CONTACT_DETAILS is enabled.
+// MessageContact is the sender contact block on a live history message. History carries Name and
+// PushName; the richer fields are added when WEBHOOK_CONTACT_DETAILS is enabled, as on
+// message.received.
 type MessageContact struct {
 	ID           string `json:"id,omitempty"`
 	Number       string `json:"number,omitempty"`
@@ -430,6 +465,8 @@ const (
 	MsgPoll     MessageType = "poll"
 	MsgCall     MessageType = "call"
 	MsgRevoked  MessageType = "revoked"
+	MsgOrder    MessageType = "order"
+	MsgProduct  MessageType = "product"
 	MsgMasked   MessageType = "masked"
 	MsgUnknown  MessageType = "unknown"
 )
@@ -483,7 +520,7 @@ type BatchProgress struct {
 	Cancelled int `json:"cancelled"`
 }
 
-// BatchStatusResponse is the response from the batch status / cancel endpoints.
+// BatchStatusResponse is the response from the batch status endpoint.
 type BatchStatusResponse struct {
 	BatchID     string               `json:"batchId"`
 	Status      BatchLifecycleStatus `json:"status"`
@@ -491,6 +528,14 @@ type BatchStatusResponse struct {
 	Results     []BatchMessageResult `json:"results"`
 	StartedAt   *string              `json:"startedAt,omitempty"`
 	CompletedAt *string              `json:"completedAt,omitempty"`
+}
+
+// BatchCancelResponse is the response from the batch cancel endpoint: the batch
+// state without the per-recipient results.
+type BatchCancelResponse struct {
+	BatchID  string               `json:"batchId"`
+	Status   BatchLifecycleStatus `json:"status"`
+	Progress BatchProgress        `json:"progress"`
 }
 
 // MessageMedia is a message's stored media: the raw bytes plus the served

@@ -18,6 +18,7 @@ import {
   MENTIONS_DESCRIPTION,
   MENTIONS_MAX,
   MENTION_WID_MAX_LENGTH,
+  BUTTON_ID_MAX_LENGTH,
   MESSAGE_TEXT_MAX_LENGTH,
   QUOTED_MESSAGE_ID_DESCRIPTION,
   QUOTED_MESSAGE_ID_EXAMPLE,
@@ -114,6 +115,9 @@ export class SendPollDto {
   @ApiProperty({
     description: 'Options to vote on (WhatsApp allows between 2 and 12)',
     type: [String],
+    minItems: 2,
+    maxItems: 12,
+    items: { type: 'string', maxLength: 100 },
     example: ['Park', 'Beach', 'Downtown'],
   })
   @IsArray()
@@ -158,7 +162,13 @@ export class ReplyMessageDto {
   @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
   text!: string;
 
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)
@@ -287,6 +297,40 @@ export class VotePollDto {
   options!: string[];
 }
 
+export class ClickButtonDto {
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  chatId!: string;
+
+  @ApiProperty({ description: 'WhatsApp id of the business prompt message that offered the buttons.' })
+  @IsString()
+  @IsNotEmpty()
+  messageId!: string;
+
+  @ApiProperty({
+    description:
+      'Stable id of the choice to tap (inbound `buttons[].id`). URL/call CTA buttons cannot be clicked this way.',
+    maxLength: BUTTON_ID_MAX_LENGTH,
+  })
+  @IsString()
+  @IsNotEmpty()
+  // Bounded by what a choice id can actually be, not by the text cap: the engine never offers a
+  // choice whose id is longer, so anything past this could only ever answer "unknown button".
+  @MaxLength(BUTTON_ID_MAX_LENGTH)
+  buttonId!: string;
+
+  @ApiPropertyOptional({
+    description: 'Visible label of the choice. When omitted, resolved from the stored prompt; falls back to buttonId.',
+    maxLength: MESSAGE_TEXT_MAX_LENGTH,
+  })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
+  text?: string;
+}
+
 export class StarMessageDto {
   @ApiProperty()
   @IsString()
@@ -339,7 +383,13 @@ export class EditMessageDto {
 
   // An edit REPLACES the message content, so tags are re-applied rather than preserved: omitting
   // this drops whatever the original body carried.
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)

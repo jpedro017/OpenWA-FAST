@@ -14,11 +14,20 @@ import {
   Filter,
   Skull,
   Unlink,
+  Globe,
+  AlertCircle,
 } from 'lucide-react';
-import { sessionApi, type Session, type SessionConfig, type AccountRestriction } from '../services/api';
+import {
+  sessionApi,
+  type Session,
+  type SessionConfig,
+  type SessionProxy,
+  type AccountRestriction,
+} from '../services/api';
 import { queryKeys } from '../hooks/queries';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import {
+  awaitsPairing,
   canForceKillSession,
   canUnlinkSession,
   classifyUnlinkError,
@@ -26,7 +35,13 @@ import {
   replaceSession,
 } from '../utils/sessionActions';
 import { invalidateSessionQueries, reconcileSessionCache } from '../utils/sessionMutation';
-import { canCreateSession, filterSessions, isValidPairingPhone, sessionNameIssues } from '../utils/sessionForm';
+import {
+  canCreateSession,
+  filterSessions,
+  isValidPairingPhone,
+  isValidProxyUrl,
+  sessionNameIssues,
+} from '../utils/sessionForm';
 import { useToast } from '../hooks/useToast';
 import { useRole } from '../hooks/useRole';
 import { useSessionPairing } from '../hooks/useSessionPairing';
@@ -55,7 +70,10 @@ export function Sessions() {
   const { t } = useTranslation();
   useDocumentTitle(t('sessions.title'));
   const toast = useToast();
-  const { canWrite } = useRole();
+  const { canWrite, isAdmin, scoped } = useRole();
+  // Creating a session and changing its proxy are refused for any session-scoped key, whatever its role.
+  const canCreate = canWrite && !scoped;
+  const canEditProxy = isAdmin && !scoped;
   const queryClient = useQueryClient();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -64,24 +82,94 @@ export function Sessions() {
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
-  const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+  // Only the id: the detail modal renders the row as it is in `sessions` now, so a status push or a
+  // list read shows there too, and a row that is gone closes it.
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const selectedSession = selectedSessionId ? (sessions.find(s => s.id === selectedSessionId) ?? null) : null;
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [killConfirmId, setKillConfirmId] = useState<string | null>(null);
   const [unlinkConfirmId, setUnlinkConfirmId] = useState<string | null>(null);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [killingId, setKillingId] = useState<string | null>(null);
+  // Sessions whose Start or Reconnect click is still being handled. A start can wait seconds before its
+  // engine exists, and a second click in that window is refused as "already starting" while the first
+  // one proceeds.
+  const [startingIds, setStartingIds] = useState<ReadonlySet<string>>(new Set());
   // Session config is not on the list payload — the API never returns the config column, so it is
   // fetched per session when the detail modal opens rather than N times to render the list.
   const [sessionConfig, setSessionConfig] = useState<SessionConfig | null>(null);
-  const [savingConfig, setSavingConfig] = useState(false);
+  // Ids of sessions with an auto-reject save in flight. Per session, because Close stays enabled while
+  // one saves: the modal reopened for that session must stay locked, and another session's must not.
+  const [savingConfigIds, setSavingConfigIds] = useState<ReadonlySet<string>>(new Set());
+  const [proxySession, setProxySession] = useState<Session | null>(null);
+  const [proxyInfo, setProxyInfo] = useState<SessionProxy | null>(null);
+  const [proxyLoading, setProxyLoading] = useState(false);
+  const [proxySaving, setProxySaving] = useState(false);
+  const [proxyEnabled, setProxyEnabled] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState('');
+  const [proxyUrlError, setProxyUrlError] = useState<string | null>(null);
+  // A failed read must not look like "no proxy configured": saving from that state would clear a
+  // proxy, and the credentials with it, that the operator never got to see.
+  const [proxyLoadFailed, setProxyLoadFailed] = useState(false);
 
-  const fetchSessions = useCallback(async (): Promise<Session[]> => {
+  // Set while the last list read failed. Cleared as a read starts, so a connect that already triggered
+  // a reload (onReconnect) is not followed by a second read from the recovery effect below.
+  const listReadFailed = useRef(false);
+  // Spends the one retry the recovery effect below is allowed per connect. Given back by a read that
+  // actually succeeded, so a later independent failure on the same connection is retried too.
+  const retriedThisConnect = useRef(false);
+  // List reads overlap (every status push that needs server fields starts one) and can answer out of
+  // order, and a read is a snapshot from before any row the page wrote while it was in flight. So a
+  // read is applied only if no newer read has been applied and no row was written since it started;
+  // `rowWrites` counts those writes. A read that loses to a write is sent again, unless a newer read
+  // is already on its way, so what it would have brought (a restriction, the rows after a socket gap)
+  // still arrives. A read dropped for a newer applied one returns the rows the page holds; one dropped
+  // while a newer read is in flight answers with that read (`latestList`), so a caller deciding on
+  // server fields (the disconnect handler's engine check) never decides on rows a push wrote.
+  const listRequest = useRef(0);
+  const listApplied = useRef(0);
+  const rowWrites = useRef(0);
+  const latestList = useRef<Promise<Session[]>>(Promise.resolve([]));
+
+  // Mirror the latest sessions in a ref so the WS handler can compare against the current status without
+  // depending on `sessions` (which would churn the callback identity and re-subscribe the socket). Every
+  // writer moves the ref in the same tick as its setState (a list read directly, row writes through
+  // `updateSessions`), so a push handled before React re-renders sees what the last write produced. No
+  // effect copies `sessions` back in: one flushing after such a push would move the ref to an older list.
+  const sessionsRef = useRef<Session[]>([]);
+  // A row write: applied to the ref now, and to state as a functional update, so it builds on every
+  // write queued before it instead of replacing the list with an older copy.
+  const updateSessions = useCallback((update: (list: Session[]) => Session[]) => {
+    sessionsRef.current = update(sessionsRef.current);
+    setSessions(update);
+  }, []);
+
+  const readSessions = useCallback(async (): Promise<Session[]> => {
+    listReadFailed.current = false;
+    let request = 0;
     try {
       // Background refetches — a websocket push, a mutation reloading the list — would otherwise
       // replace the whole page with a spinner for the length of a round-trip, so a restriction
       // arriving on a live page reads as a full reload.
       if (!initialLoadDone.current) setLoading(true);
-      const data = await sessionApi.list();
+      let data: Session[];
+      for (;;) {
+        request = ++listRequest.current;
+        const writes = rowWrites.current;
+        data = await sessionApi.list();
+        if (request < listApplied.current) return sessionsRef.current;
+        if (rowWrites.current === writes) break;
+        // Only the most recently started read can hold the newest request, so this is never itself.
+        if (request !== listRequest.current) return latestList.current;
+      }
+      listApplied.current = request;
+      sessionsRef.current = data;
       setSessions(data);
+      // The list is current again, so an error left by an earlier failed read (or a create, whose toast
+      // already reported it) no longer describes the page, and the recovery retry is available again.
+      setError(null);
+      retriedThisConnect.current = false;
       // Keep the shared React Query cache (read by the Dashboard via useSessionsQuery /
       // useSessionStatsQuery) in sync after this page's mutations reload local state — otherwise the
       // Dashboard shows stale session counts/status. This runs on every reload (mount / WS-failed /
@@ -92,6 +180,9 @@ export function Sessions() {
       void invalidateSessionQueries(queryClient, queryKeys.sessions);
       return data;
     } catch (err) {
+      // A failure older than a read already applied says nothing about the list on screen.
+      if (request < listApplied.current) return sessionsRef.current;
+      listReadFailed.current = true;
       setError(err instanceof Error ? err.message : t('sessions.create.errorDefault'));
       return [];
     } finally {
@@ -99,14 +190,7 @@ export function Sessions() {
       setLoading(false);
     }
   }, [t, queryClient]);
-
-  // Mirror the latest sessions in a ref so the WS handler can compare against the current status without
-  // depending on `sessions` (which would churn the callback identity and re-subscribe the socket). Kept
-  // in sync with every state update (fetch / create / delete / WS) via the effect below.
-  const sessionsRef = useRef<Session[]>([]);
-  useEffect(() => {
-    sessionsRef.current = sessions;
-  }, [sessions]);
+  const fetchSessions = useCallback(() => (latestList.current = readSessions()), [readSessions]);
 
   const {
     qrData,
@@ -123,18 +207,37 @@ export function Sessions() {
     handleCloseQRModal,
     applyQrPush,
     dismissQrForSession,
+    clearQrCodeForSession,
   } = useSessionPairing({ sessions, sessionsRef, reloadSessions: fetchSessions });
 
-  const { showCreateModal, setShowCreateModal, newSessionName, setNewSessionName, creating, handleCreate } =
-    useSessionCreateForm({
-      onCreated: newSession => {
-        // Functional append: never capture a stale `sessions` (a WS or fetch between the await and the
-        // setState would otherwise drop a row). Then invalidate the prefix so stats/groups/chats refresh.
-        setSessions(current => [...current, newSession]);
-        void invalidateSessionQueries(queryClient, queryKeys.sessions);
-      },
-      onFailed: msg => setError(msg),
-    });
+  const {
+    showCreateModal,
+    setShowCreateModal,
+    newSessionName,
+    setNewSessionName,
+    useProxy,
+    setUseProxy,
+    proxyUrl: createProxyUrl,
+    setProxyUrl: setCreateProxyUrl,
+    creating,
+    handleCreate,
+  } = useSessionCreateForm({
+    onCreated: newSession => {
+      // Functional append: never capture a stale `sessions` (a WS or fetch between the await and the
+      // setState would otherwise drop a row). Then invalidate the prefix so stats/groups/chats refresh.
+      rowWrites.current += 1;
+      updateSessions(current => [...current, newSession]);
+      // A refused earlier attempt left its message in the banner; nothing re-reads the list after a
+      // create, so clear it here. A failed list read keeps its banner.
+      if (!listReadFailed.current) setError(null);
+      void invalidateSessionQueries(queryClient, queryKeys.sessions);
+    },
+    // The hook's toast reports the refusal; a failed list read keeps the banner, since it still
+    // describes the list on screen.
+    onFailed: msg => {
+      if (!listReadFailed.current) setError(msg);
+    },
+  });
 
   // Reconcile the LOCAL view with an authoritative Session response. The previous handlers discarded
   // the response and fabricated `{ status: 'disconnected' }`, losing phone:null, timestamps, and other
@@ -145,66 +248,91 @@ export function Sessions() {
   // disconnected session's stale code.
   const applySessionResponse = useCallback(
     async (updated: Session) => {
-      sessionsRef.current = replaceSession(sessionsRef.current, updated);
-      setSessions(sessionsRef.current);
-      setSelectedSession(current => (current?.id === updated.id ? updated : current));
+      rowWrites.current += 1;
+      updateSessions(current => replaceSession(current, updated));
       dismissQrForSession(updated.id);
       await reconcileSessionCache(queryClient, queryKeys.sessions, updated);
     },
-    [queryClient, dismissQrForSession],
+    [queryClient, dismissQrForSession, updateSessions],
   );
 
-  useSessionFeed({
+  // A restriction push and a recovered socket mean the same thing to this page: the local list may be
+  // behind the server, re-read it. (The badge renders from the server projection
+  // `session.restriction`, and a restriction can arrive with no status transition at all, because the
+  // Baileys reachout timelock rides a connect probe, so that push is purely a refetch signal.)
+  const refetchSessions = useCallback(() => {
+    void fetchSessions();
+  }, [fetchSessions]);
+
+  const { isConnected, connectionFailed, reconnect } = useSessionFeed({
     sessions,
     sessionsRef,
     onQRCode: applyQrPush,
-    // The badge renders from the server projection (`session.restriction`), and a restriction can
-    // arrive with no status transition at all (the Baileys reachout timelock rides a connect
-    // probe) — so the push is purely a refetch signal.
-    onSessionRestriction: useCallback(() => {
-      void fetchSessions();
-    }, [fetchSessions]),
+    onSessionRestriction: refetchSessions,
+    // Everything pushed during a socket gap is lost, and nothing else on this page re-reads the list
+    // after mount, so a card would sit on its pre-gap status until the operator reloaded.
+    onReconnect: refetchSessions,
     onSessionStatus: useCallback(
       (event: { sessionId: string; status: string }) => {
         const prev = sessionsRef.current.find(s => s.id === event.sessionId);
         // Some engines double-signal one transition; only react to an ACTUAL status change so the toast
-        // and the failed-refresh don't fire on every redundant envelope. Update the ref synchronously so
-        // a duplicate arriving in the same tick (before the sync effect runs) is also caught.
+        // and the failed-refresh don't fire on every redundant envelope. `updateSessions` moves the ref
+        // synchronously, so a duplicate arriving before React re-renders is also caught.
         if (prev && prev.status === event.status) return;
+        // A push for a row the page does not hold yet changes nothing, so it must not void the read
+        // that is about to bring that row (the mount read, before any row is on screen).
+        if (prev) rowWrites.current += 1;
         // Drop `engineLoaded` alongside the status patch: it is server-owned live state the status
         // envelope does not carry, so keeping the previous value would pair a fresh status with a
         // stale engine answer and the card could offer Start to a running session (or Unlink to one
         // with no engine). Clearing it makes isSessionStarted fall back to the status set until an
         // authoritative response arrives — and for `disconnected`, where that fallback is knowingly
         // wrong, the branch below refetches.
-        sessionsRef.current = sessionsRef.current.map(s =>
-          s.id === event.sessionId ? { ...s, status: event.status as Session['status'], engineLoaded: undefined } : s,
+        updateSessions(current =>
+          current.map(s =>
+            s.id === event.sessionId ? { ...s, status: event.status as Session['status'], engineLoaded: undefined } : s,
+          ),
         );
-        setSessions(sessionsRef.current);
         // Mark the shared session queries stale so sibling views refetch — but ONLY on a real
         // transition (the dedup guard above already swallows the redundant double-signals, so this
         // does not re-invalidate on duplicate envelopes).
         void invalidateSessionQueries(queryClient, queryKeys.sessions);
         if (event.status === 'ready') {
+          // Refresh so the card picks up the phone and lastActive the gateway writes on READY.
+          void fetchSessions();
           toast.success(t('sessions.toasts.readyTitle'), t('sessions.toasts.readyDesc'));
         } else if (event.status === 'disconnected') {
           // Refresh so the card picks up `engineLoaded` from the API. `disconnected` is the one status
           // that means two different things — an engine still registered through its automatic
           // reconnect backoff, or a session stopped with no engine at all — and only the server can
           // say which, so the offered actions must not be guessed from the status here.
-          void fetchSessions();
+          // The same answer decides whether an open QR modal for it can be closed outright.
+          // Either way the code on screen was minted by a connection that is now gone, so blank it
+          // first: scanning it cannot work, and the modal shows its loading state until the session
+          // is back at `qr_ready` with a fresh one.
+          clearQrCodeForSession(event.sessionId);
+          void fetchSessions().then(rows => {
+            if (rows.find(s => s.id === event.sessionId)?.engineLoaded === false) {
+              // Only if nothing arrived while the answer was in flight: a reconnect that completed
+              // in that window has already pushed a fresh code into the modal blanked above, and
+              // that code is scannable.
+              dismissQrForSession(event.sessionId, true);
+            }
+          });
           toast.warning(t('sessions.toasts.disconnectedTitle'), t('sessions.toasts.disconnectedDesc'));
         } else if (event.status === 'action_required') {
           // Refresh so the card picks up the lastError reason (what the operator must do) from the API.
           void fetchSessions();
           toast.warning(t('sessions.toasts.actionRequiredTitle'), t('sessions.toasts.actionRequiredDesc'));
         } else if (event.status === 'failed') {
-          // Refresh so the card picks up the lastError reason from the API.
+          // Refresh so the card picks up the lastError reason from the API. Every FAILED write evicts the
+          // engine, so an open QR modal for this session can never show a code: close it, uncovering the card.
           void fetchSessions();
+          dismissQrForSession(event.sessionId);
           toast.error(t('sessions.toasts.failedTitle'), t('sessions.toasts.failedDesc'));
         }
       },
-      [toast, t, fetchSessions, queryClient],
+      [toast, t, fetchSessions, queryClient, dismissQrForSession, clearQrCodeForSession, updateSessions],
     ),
   });
 
@@ -213,12 +341,36 @@ export function Sessions() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A connected feed means the gateway answers again, but the feed only reports a RECONNECT: a first
+  // connect that lands after socket.io's own retries (the gateway was restarting at mount) fires no
+  // onReconnect, and no status push re-reads the list, so the failed mount read would stay on screen
+  // with no cards. `error` is a dependency so a read that fails after the connect is retried too, but
+  // only once per connect: failures whose messages differ (a 502, then a 504) would otherwise each
+  // change `error` and re-read the list with no backoff for as long as the upstream stays down. The
+  // allowance (declared with `listReadFailed` above) is given back by a successful read, so the loop
+  // stays closed while a later failure on the same connection is still retried.
+  useEffect(() => {
+    if (!isConnected) {
+      retriedThisConnect.current = false;
+      return;
+    }
+    if (listReadFailed.current && !retriedThisConnect.current) {
+      retriedThisConnect.current = true;
+      void fetchSessions();
+    }
+  }, [isConnected, error, fetchSessions]);
+
   const handleDelete = async (id: string) => {
+    // The confirm modal stays open until the request answers, so a double-click would delete twice and
+    // report the second, failed delete after the first one's success.
+    if (deletingId) return;
+    setDeletingId(id);
     const session = sessions.find(s => s.id === id);
     try {
       await sessionApi.delete(id);
       // Functional removal (no stale `sessions` capture), then invalidate the prefix.
-      setSessions(current => current.filter(s => s.id !== id));
+      rowWrites.current += 1;
+      updateSessions(current => current.filter(s => s.id !== id));
       await invalidateSessionQueries(queryClient, queryKeys.sessions);
       toast.success(
         t('sessions.delete.successTitle'),
@@ -231,32 +383,43 @@ export function Sessions() {
       console.error('Failed to delete:', err);
       toast.error(t('sessions.delete.errorTitle'), msg);
     } finally {
+      setDeletingId(null);
       setDeleteConfirmId(null);
     }
   };
 
+  // Start and Reconnect only render for a card with no engine behind it, so they always call the
+  // gateway. A leftover `initializing` or `qr_ready` status (a node that died mid-pairing) is no reason
+  // to open the QR modal instead: GET /qr answers 400 until something starts the session.
   const handleStart = async (id: string) => {
-    const session = sessions.find(s => s.id === id);
-    if (session && ['initializing', 'qr_ready'].includes(session.status)) {
-      handleShowQR(id);
-      return;
-    }
-
+    setStartingIds(current => new Set(current).add(id));
     try {
       // Use the authoritative response instead of fabricating a status. The old code wrote a local
       // `status: 'connecting'` — a value the gateway never emits — while keeping every other field
       // from before the start, which now includes `engineLoaded` and would leave the card offering
       // Start for a session that just acquired an engine.
       const started = await sessionApi.start(id);
-      setSessions(current => replaceSession(current, started));
-      await fetchSessions();
-      handleShowQR(id);
+      rowWrites.current += 1;
+      updateSessions(current => replaceSession(current, started));
+      // A 200 does not promise the engine is still there when the list is read back: a concurrent stop
+      // retires the start, and an engine can fail right after answering. Skip the modal when the re-read
+      // shows the session without one. A failed re-read gives no answer, so the start's success decides.
+      const row = (await fetchSessions()).find(s => s.id === id);
+      // A session that came back already linked has nothing to scan. Decided from the re-read rather
+      // than left to handleShowQR's own guard, which reads the sessions state this render still
+      // holds: that state predates both the start response and the re-read, so it would let the
+      // modal open over a connected session and then poll for a QR that can never arrive.
+      if (row?.status === 'ready') return;
+      if (!row || isSessionStarted(row)) handleShowQR(id);
     } catch (err) {
       console.error('Failed to start:', err);
       // A credential teardown for this name is still settling — the backend fails closed with 409 +
       // SESSION_NAME_TEARDOWN_PENDING. It is retryable, so warn with the server message and do NOT
-      // open a QR modal (there is no engine to scan yet). Any other start error keeps the existing
-      // authoritative reload + QR fallback behavior.
+      // open a QR modal (there is no engine to scan yet). Any other start error re-reads the list. An
+      // engine that is still coming up (a reverse proxy timing out a slow start) gets the QR modal. A
+      // start that left no engine gets the gateway's answer instead: the modal's poll waits for a qr_ready
+      // that cannot arrive, so it would spin until closed, over the card's error row or, for a refusal that
+      // records nothing (the concurrency cap), with the reason only in the console.
       const code = (err as { code?: string } | null | undefined)?.code;
       if (code === 'SESSION_NAME_TEARDOWN_PENDING') {
         const msg = err instanceof Error && err.message ? err.message : t('sessions.start.teardownPending');
@@ -266,14 +429,31 @@ export function Sessions() {
       }
       const fresh = await fetchSessions();
       const current = fresh.find(s => s.id === id);
-      if (current?.status !== 'ready') handleShowQR(id);
+      if (current && isSessionStarted(current)) {
+        if (current.status !== 'ready') handleShowQR(id);
+        return;
+      }
+      // The answer to this request, not the row's lastError: that is shown on the card, and it can be the
+      // terse cause behind a diagnostic 504 or a reason left from an earlier attempt.
+      toast.error(
+        t('sessions.start.errorTitle'),
+        err instanceof Error && err.message ? err.message : t('common.unknownError'),
+      );
+    } finally {
+      setStartingIds(current => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
   // Load the config when the detail modal opens and drop it when it closes, so a value fetched for
-  // one session can never render against another.
-  const selectedSessionId = selectedSession?.id ?? null;
+  // one session can never render against another. A toggle's answer checks `configSessionId` for the
+  // same reason: Close stays enabled while it saves, so another session's modal may be open by then.
+  const configSessionId = useRef<string | null>(null);
   useEffect(() => {
+    configSessionId.current = selectedSessionId;
     setSessionConfig(null);
     if (!selectedSessionId) return;
     let cancelled = false;
@@ -293,18 +473,100 @@ export function Sessions() {
 
   const handleAutoRejectToggle = async (next: boolean) => {
     if (!selectedSessionId || !sessionConfig) return;
+    const id = selectedSessionId;
     const previous = sessionConfig;
     setSessionConfig({ ...sessionConfig, autoRejectCalls: next });
-    setSavingConfig(true);
+    setSavingConfigIds(current => new Set(current).add(id));
     try {
-      setSessionConfig(await sessionApi.updateConfig(selectedSessionId, { autoRejectCalls: next }));
+      const saved = await sessionApi.updateConfig(id, { autoRejectCalls: next });
+      if (configSessionId.current === id) setSessionConfig(saved);
     } catch (err) {
       // Revert: an optimistic toggle left flipped would tell the operator calls are being rejected
       // when the gateway never accepted the change.
-      setSessionConfig(previous);
+      if (configSessionId.current === id) setSessionConfig(previous);
       toast.error(t('sessions.details.autoRejectCalls'), err instanceof Error ? err.message : t('common.unknownError'));
     } finally {
-      setSavingConfig(false);
+      setSavingConfigIds(current => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
+  const proxySessionId = proxySession?.id ?? null;
+  // Cancel stays enabled while a save runs, so a save that answers after its modal closed must neither
+  // close nor unlock whichever proxy modal is open by then.
+  const proxyOpenId = useRef<string | null>(null);
+  useEffect(() => {
+    proxyOpenId.current = proxySessionId;
+    setProxySaving(false);
+    setProxyInfo(null);
+    setProxyEnabled(false);
+    setProxyUrl('');
+    setProxyUrlError(null);
+    setProxyLoadFailed(false);
+    if (!proxySessionId) return;
+    let cancelled = false;
+    setProxyLoading(true);
+    sessionApi
+      .getProxy(proxySessionId)
+      .then(data => {
+        if (cancelled) return;
+        setProxyInfo(data);
+        setProxyEnabled(data.enabled);
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setProxyLoadFailed(true);
+          toast.error(t('dashboard.loadError'), err instanceof Error ? err.message : t('common.unknownError'));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setProxyLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Only the session being edited belongs in here. `t` and `toast` are recreated on every render of
+    // their providers (ToastContext hands out a fresh object literal), so listing them re-runs this
+    // effect whenever any toast appears or auto-dismisses, wiping the URL mid-typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proxySessionId]);
+
+  const handleProxySave = async () => {
+    if (!proxySession) return;
+    if (proxyEnabled) {
+      const trimmed = proxyUrl.trim();
+      if (!trimmed && !proxyInfo?.enabled) {
+        setProxyUrlError(t('sessions.proxy.invalidUrl'));
+        return;
+      }
+      if (trimmed && !isValidProxyUrl(trimmed)) {
+        setProxyUrlError(t('sessions.proxy.invalidUrl'));
+        return;
+      }
+    }
+    setProxyUrlError(null);
+    const id = proxySession.id;
+    setProxySaving(true);
+    try {
+      if (!proxyEnabled) {
+        await sessionApi.updateProxy(id, { proxyUrl: null });
+      } else if (proxyUrl.trim()) {
+        await sessionApi.updateProxy(id, { proxyUrl: proxyUrl.trim() });
+      } else if (proxyInfo?.enabled) {
+        setProxySession(null);
+        return;
+      } else {
+        return;
+      }
+      toast.success(t('sessions.proxy.saveSuccessTitle'), t('sessions.proxy.saveSuccess'));
+      if (proxyOpenId.current === id) setProxySession(null);
+    } catch (err) {
+      toast.error(t('sessions.proxy.saveError'), err instanceof Error ? err.message : t('common.unknownError'));
+    } finally {
+      if (proxyOpenId.current === id) setProxySaving(false);
     }
   };
 
@@ -314,6 +576,7 @@ export function Sessions() {
       await applySessionResponse(updated);
     } catch (err) {
       console.error('Failed to stop:', err);
+      toast.error(t('sessions.toasts.stopFailedTitle'), err instanceof Error ? err.message : t('common.unknownError'));
       // The error response carries no Session body, so re-fetch the authoritative state — phone:null
       // and the real status come from the list endpoint, not the error envelope.
       await fetchSessions();
@@ -321,15 +584,26 @@ export function Sessions() {
   };
 
   const handleForceKill = async (id: string) => {
+    // Same double-click guard as handleDelete.
+    if (killingId) return;
+    setKillingId(id);
     try {
       const updated = await sessionApi.forceKill(id);
       await applySessionResponse(updated);
       toast.success(t('sessions.forceKill.successTitle'), t('sessions.forceKill.success'));
     } catch (err) {
       console.error('Failed to force-kill:', err);
-      toast.error(t('sessions.forceKill.failedTitle'), t('sessions.forceKill.failed'));
+      // 502 + SESSION_FORCE_KILL_INCOMPLETE: the session is stopped, but the engine process may still
+      // run. Show the gateway's guidance (restart the node). Any other error, a reverse-proxy 502
+      // without that code included, stays generic.
+      const incomplete = (err as { code?: string } | null)?.code === 'SESSION_FORCE_KILL_INCOMPLETE';
+      toast.error(
+        t('sessions.forceKill.failedTitle'),
+        incomplete && err instanceof Error && err.message ? err.message : t('sessions.forceKill.failed'),
+      );
       await fetchSessions();
     } finally {
+      setKillingId(null);
       setKillConfirmId(null);
     }
   };
@@ -378,6 +652,12 @@ export function Sessions() {
   const existingSessionNames = sessions.map(s => s.name);
   // Empty is a disabled button, not a message: the form stays quiet until the user types something.
   const nameIssues = newSessionName ? sessionNameIssues(newSessionName, existingSessionNames) : [];
+  // One term: isValidProxyUrl rejects '' too, so the emptiness check was redundant, and its
+  // `string && boolean` shape widened this to `boolean | ""`, which the disabled prop rejects.
+  const createProxyInvalid = useProxy && !isValidProxyUrl(createProxyUrl.trim());
+  // Shared by the Create button and the name field's Enter key, which would otherwise post a name
+  // the button refuses, or post the same name twice while the first create is in flight.
+  const createDisabled = creating || !canCreateSession(newSessionName, existingSessionNames) || createProxyInvalid;
 
   if (loading) {
     return (
@@ -396,7 +676,7 @@ export function Sessions() {
         title={t('sessions.title')}
         subtitle={t('sessions.subtitle')}
         actions={
-          canWrite && (
+          canCreate && (
             <button className="btn-primary" onClick={() => setShowCreateModal(true)}>
               <Plus size={18} />
               {t('sessions.newSession')}
@@ -404,6 +684,19 @@ export function Sessions() {
           )
         }
       />
+
+      {/* The live feed is dead until the operator retries: the socket exhausted its attempts, or the
+          server closed it. Without this the cards freeze on their last pushed status and a session
+          that has since dropped is indistinguishable from a healthy idle page. */}
+      {connectionFailed && (
+        <div className="error-banner" role="alert">
+          <AlertCircle size={20} />
+          <span className="error-banner-text">{t('sessions.feedDisconnected')}</span>
+          <button className="btn-secondary" style={{ marginInlineStart: 'auto' }} onClick={reconnect}>
+            {t('common.refresh')}
+          </button>
+        </div>
+      )}
 
       <div className="filters-bar">
         <div className="search-input">
@@ -456,11 +749,7 @@ export function Sessions() {
               <button className="btn-secondary" onClick={() => setShowCreateModal(false)}>
                 {t('common.cancel')}
               </button>
-              <button
-                className="btn-primary"
-                onClick={handleCreate}
-                disabled={creating || !canCreateSession(newSessionName, existingSessionNames)}
-              >
+              <button className="btn-primary" onClick={handleCreate} disabled={createDisabled}>
                 {creating ? <Loader2 className="animate-spin" size={16} /> : t('common.create')}
               </button>
             </>
@@ -476,16 +765,47 @@ export function Sessions() {
               const value = e.target.value.toLowerCase().replace(/\s+/g, '-');
               setNewSessionName(value);
             }}
-            onKeyDown={e => e.key === 'Enter' && handleCreate()}
+            onKeyDown={e => e.key === 'Enter' && !createDisabled && handleCreate()}
           />
           <p className="input-hint">
             <Trans i18nKey="sessions.create.hint" components={{ code: <code /> }} />
           </p>
           {nameIssues.includes('format') && <p className="input-error">{t('sessions.create.invalidChars')}</p>}
+          {nameIssues.includes('too-short') && <p className="input-error">{t('sessions.create.tooShort')}</p>}
           {nameIssues.includes('too-long') && (
             <p className="input-error">{t('sessions.create.tooLong', { length: newSessionName.length })}</p>
           )}
           {nameIssues.includes('duplicate') && <p className="input-error">{t('sessions.create.duplicate')}</p>}
+          {/* The API refuses proxyUrl from a key below ADMIN, so the section is not offered. */}
+          {canEditProxy && (
+            <div className="proxy-form-section">
+              <label className="detail-toggle-row" htmlFor="create-use-proxy">
+                <span>{t('sessions.proxy.enabled')}</span>
+                <input
+                  id="create-use-proxy"
+                  type="checkbox"
+                  checked={useProxy}
+                  onChange={e => setUseProxy(e.target.checked)}
+                />
+              </label>
+              {useProxy && (
+                <>
+                  <label htmlFor="create-proxy-url">{t('sessions.proxy.url')}</label>
+                  <input
+                    id="create-proxy-url"
+                    type="text"
+                    placeholder={t('sessions.proxy.urlPlaceholder')}
+                    value={createProxyUrl}
+                    onChange={e => setCreateProxyUrl(e.target.value)}
+                  />
+                  {createProxyInvalid && createProxyUrl.trim() && (
+                    <p className="input-error">{t('sessions.proxy.invalidUrl')}</p>
+                  )}
+                  <p className="input-hint">{t('sessions.proxy.createHint')}</p>
+                </>
+              )}
+            </div>
+          )}
         </Modal>
       )}
 
@@ -554,6 +874,11 @@ export function Sessions() {
               // Pairing Code Content
               <div className="pairing-container" role="tabpanel">
                 {pairingError && <div className="pairing-error">{pairingError}</div>}
+                {/* The guards behind this button check the session's state, never the number: a code
+                    requested for a number linked elsewhere has been seen to unlink that device on the
+                    whatsapp-web.js engine. Shown on both engines, since the page cannot tell which one
+                    a session runs without another round-trip, and the copy names the engine. */}
+                <div className="pairing-warning">{t('sessions.pairing.relinkWarning')}</div>
 
                 {!pairingCode ? (
                   <div className="pairing-form">
@@ -635,11 +960,11 @@ export function Sessions() {
       {selectedSession && (
         <Modal
           open
-          onClose={() => setSelectedSession(null)}
+          onClose={() => setSelectedSessionId(null)}
           title={t('sessions.details.title')}
           closeLabel={t('common.close')}
           footer={
-            <button className="btn-secondary" onClick={() => setSelectedSession(null)}>
+            <button className="btn-secondary" onClick={() => setSelectedSessionId(null)}>
               {t('common.close')}
             </button>
           }
@@ -682,7 +1007,7 @@ export function Sessions() {
                       type="checkbox"
                       aria-labelledby="auto-reject-calls-label"
                       checked={sessionConfig.autoRejectCalls}
-                      disabled={!canWrite || savingConfig}
+                      disabled={!canWrite || savingConfigIds.has(selectedSession.id)}
                       onChange={e => void handleAutoRejectToggle(e.target.checked)}
                     />
                     <span className="toggle-slider"></span>
@@ -692,6 +1017,110 @@ export function Sessions() {
               </div>
             )}
           </div>
+        </Modal>
+      )}
+
+      {proxySession && (
+        <Modal
+          open
+          onClose={() => setProxySession(null)}
+          title={
+            <span className="modal-title">
+              {t('sessions.proxy.title')}
+              <span className="session-name">{proxySession.name}</span>
+            </span>
+          }
+          closeLabel={t('common.close')}
+          footer={
+            <>
+              <button className="btn-secondary" onClick={() => setProxySession(null)}>
+                {t('common.cancel')}
+              </button>
+              {canEditProxy && !proxyLoadFailed && (
+                <button
+                  className="btn-primary"
+                  onClick={() => void handleProxySave()}
+                  disabled={proxySaving || proxyLoading}
+                >
+                  {proxySaving ? <Loader2 className="animate-spin" size={16} /> : t('common.save')}
+                </button>
+              )}
+            </>
+          }
+        >
+          {proxyLoading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}>
+              <Loader2 className="animate-spin" size={24} />
+            </div>
+          ) : proxyLoadFailed ? (
+            // No form at all: an editable form defaulting to "off" invites a Save that clears a
+            // proxy nobody could read back, credentials included.
+            <div className="detail-grid proxy-form-section">
+              <div className="detail-item">
+                <span className="detail-value">{t('dashboard.loadError')}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="detail-grid proxy-form-section">
+              <div className="detail-item">
+                <span className="detail-label">{t('sessions.proxy.status')}</span>
+                <span className="detail-value">
+                  {proxyInfo?.enabled
+                    ? t('sessions.proxy.configured', {
+                        host: proxyInfo.proxyHost ?? '—',
+                        type: proxyInfo.proxyType ?? 'http',
+                      })
+                    : t('sessions.proxy.noProxy')}
+                </span>
+                {proxyInfo?.hasCredentials ? (
+                  <small className="detail-hint">{t('sessions.proxy.hasCredentials')}</small>
+                ) : null}
+              </div>
+              <div className="detail-item detail-item-toggle">
+                <div className="detail-toggle-row">
+                  <span className="detail-label" id="proxy-enabled-label">
+                    {t('sessions.proxy.enabled')}
+                  </span>
+                  <label className="toggle-switch">
+                    <input
+                      type="checkbox"
+                      aria-labelledby="proxy-enabled-label"
+                      checked={proxyEnabled}
+                      disabled={!canEditProxy || proxySaving}
+                      onChange={e => setProxyEnabled(e.target.checked)}
+                    />
+                    <span className="toggle-slider"></span>
+                  </label>
+                </div>
+              </div>
+              {proxyEnabled && (
+                <>
+                  <div className="detail-item">
+                    <label className="detail-label" htmlFor="proxy-url">
+                      {t('sessions.proxy.url')}
+                    </label>
+                    <input
+                      id="proxy-url"
+                      type="text"
+                      placeholder={
+                        proxyInfo?.enabled
+                          ? t('sessions.proxy.urlKeepPlaceholder', { host: proxyInfo.proxyHost ?? '' })
+                          : t('sessions.proxy.urlPlaceholder')
+                      }
+                      value={proxyUrl}
+                      disabled={!canEditProxy || proxySaving}
+                      onChange={e => {
+                        setProxyUrl(e.target.value);
+                        setProxyUrlError(null);
+                      }}
+                    />
+                    {proxyUrlError ? <p className="input-error">{proxyUrlError}</p> : null}
+                  </div>
+                </>
+              )}
+              <p className="input-hint">{t('sessions.proxy.hint')}</p>
+            </div>
+          )}
         </Modal>
       )}
 
@@ -707,7 +1136,11 @@ export function Sessions() {
               <button className="btn-secondary" onClick={() => setDeleteConfirmId(null)}>
                 {t('common.cancel')}
               </button>
-              <button className="btn-danger" onClick={() => handleDelete(deleteConfirmId)}>
+              <button
+                className="btn-danger"
+                onClick={() => handleDelete(deleteConfirmId)}
+                disabled={deletingId !== null}
+              >
                 {t('common.delete')}
               </button>
             </>
@@ -736,7 +1169,11 @@ export function Sessions() {
               <button className="btn-secondary" onClick={() => setKillConfirmId(null)}>
                 {t('common.cancel')}
               </button>
-              <button className="btn-danger" onClick={() => handleForceKill(killConfirmId)}>
+              <button
+                className="btn-danger"
+                onClick={() => handleForceKill(killConfirmId)}
+                disabled={killingId !== null}
+              >
                 {t('sessions.forceKill.confirm')}
               </button>
             </>
@@ -801,17 +1238,21 @@ export function Sessions() {
                 <span className={`status-pill ${session.status}`}>{formatStatus(session.status)}</span>
               </div>
 
-              {session.status === 'initializing' || session.status === 'qr_ready' ? (
+              {awaitsPairing(session) ? (
                 <div className="qr-placeholder">
                   <QrCode size={80} className="qr-icon" />
                   <p>{session.status === 'qr_ready' ? t('sessions.qr.scanToConnect') : t('sessions.qr.preparing')}</p>
-                  <button
-                    className="btn-sm"
-                    onClick={() => handleShowQR(session.id)}
-                    disabled={session.status !== 'qr_ready'}
-                  >
-                    {session.status === 'qr_ready' ? t('sessions.qr.showQr') : t('sessions.qr.loading')}
-                  </button>
+                  {/* The QR is operator-only over REST and the socket, so a read-only key would open a
+                      modal that never gets a code. */}
+                  {canWrite && (
+                    <button
+                      className="btn-sm"
+                      onClick={() => handleShowQR(session.id)}
+                      disabled={session.status !== 'qr_ready'}
+                    >
+                      {session.status === 'qr_ready' ? t('sessions.qr.showQr') : t('sessions.qr.loading')}
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="session-info">
@@ -850,9 +1291,13 @@ export function Sessions() {
               )}
 
               <div className="card-actions">
-                <button className="btn-action" onClick={() => setSelectedSession(session)}>
+                <button className="btn-action" onClick={() => setSelectedSessionId(session.id)}>
                   <Eye size={16} />
                   {t('sessions.actions.view')}
+                </button>
+                <button className="btn-action" onClick={() => setProxySession(session)}>
+                  <Globe size={16} />
+                  {t('sessions.actions.proxy')}
                 </button>
                 {canWrite && isSessionStarted(session) ? (
                   <button className="btn-action" onClick={() => handleStop(session.id)}>
@@ -860,12 +1305,20 @@ export function Sessions() {
                     {t('sessions.actions.stop')}
                   </button>
                 ) : canWrite && (session.status === 'created' || session.status === 'disconnected') ? (
-                  <button className="btn-action" onClick={() => handleStart(session.id)}>
+                  <button
+                    className="btn-action"
+                    onClick={() => handleStart(session.id)}
+                    disabled={startingIds.has(session.id)}
+                  >
                     <Play size={16} />
                     {t('sessions.actions.start')}
                   </button>
                 ) : canWrite ? (
-                  <button className="btn-action" onClick={() => handleStart(session.id)}>
+                  <button
+                    className="btn-action"
+                    onClick={() => handleStart(session.id)}
+                    disabled={startingIds.has(session.id)}
+                  >
                     <RefreshCw size={16} />
                     {t('sessions.actions.reconnect')}
                   </button>

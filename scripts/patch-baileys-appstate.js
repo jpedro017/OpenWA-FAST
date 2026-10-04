@@ -33,8 +33,15 @@ const CHATS_PATH = path.join('lib', 'Socket', 'chats.js');
 const LOOP_FIND = `                const decoded = await extractSyncdPatches(result, config?.options);
                 for (const key in decoded) {`;
 
+/**
+ * The apply function's stand-down predicate: present exactly when LOOP_REPLACE was written.
+ * Interpolated below rather than restated, the way patch-baileys-newsletter-create.js does it, so
+ * the marker and the text that carries it cannot drift apart.
+ */
+const PATCHED_MARKER = 'OpenWA: query() resolves undefined on its own timeout';
+
 const LOOP_REPLACE = `                const decoded = await extractSyncdPatches(result, config?.options);
-                // OpenWA: query() resolves undefined on its own timeout, which decodes to {}. Every
+                // ${PATCHED_MARKER}, which decodes to {}. Every
                 // exit below — including the attemptsMap guard — is inside this for-in, so an empty
                 // decode would otherwise spin the while loop for the life of the socket.
                 if (!Object.keys(decoded).length) {
@@ -46,10 +53,10 @@ const LOOP_REPLACE = `                const decoded = await extractSyncdPatches(
 function applyAppStatePatch(baileysDir = DEFAULT_BAILEYS) {
   const file = path.join(baileysDir, CHATS_PATH);
   if (!fs.existsSync(file)) {
-    return { skipped: true, reason: `${CHATS_PATH} not found — nothing to patch` };
+    throw new Error(`@whiskeysockets/baileys ${CHATS_PATH} not found at ${file}`);
   }
   const source = fs.readFileSync(file, 'utf8');
-  if (source.includes('OpenWA: query() resolves undefined on its own timeout')) {
+  if (source.includes(PATCHED_MARKER)) {
     return { skipped: true, reason: 'already patched' };
   }
   const occurrences = source.split(LOOP_FIND).length - 1;
@@ -80,4 +87,17 @@ function run() {
 
 if (require.main === module) run();
 
-module.exports = { applyAppStatePatch, LOOP_FIND, LOOP_REPLACE };
+/**
+ * The stand-down branch above as a predicate, for the startup guard (engine-patch-status.ts).
+ * Unreadable reads as applied: a tree we cannot inspect is not evidence of a broken one, and a
+ * missing chats.js already fails the image build, where the apply function refuses it.
+ */
+function isApplied(baileysDir = DEFAULT_BAILEYS) {
+  try {
+    return fs.readFileSync(path.join(baileysDir, CHATS_PATH), 'utf8').includes(PATCHED_MARKER);
+  } catch {
+    return true;
+  }
+}
+
+module.exports = { applyAppStatePatch, isApplied, PATCHED_MARKER, LOOP_FIND, LOOP_REPLACE };

@@ -48,6 +48,7 @@ function makeMessaging(): { messaging: BaileysMessaging; sock: { sendMessage: je
   const sock = { sendMessage: jest.fn().mockResolvedValue({ key: { id: 'M1' }, messageTimestamp: 1 }) };
   const host = {
     ensureReady: jest.fn(),
+    sessionProxyUrl: () => undefined,
     getSocket: () => sock as unknown as WASocket,
     logger,
     toNeutralJid: (j: string) => j,
@@ -57,7 +58,12 @@ function makeMessaging(): { messaging: BaileysMessaging; sock: { sendMessage: je
     toUnixSeconds: () => 1,
     loadLib: () => Promise.resolve({} as never),
     getStoredMessage: () => Promise.resolve(undefined),
+    wasDeletedForEveryone: () => false,
+    pendingEditOf: () => undefined,
+    markDeletedForEveryone: () => undefined,
     putStoredMessage: () => undefined,
+    recordMessage: () => undefined,
+    rememberOwnSend: () => undefined,
     recordLidMapping: () => undefined,
     getOnMessageCreate: () => undefined,
     mapMessage: () => Promise.resolve({} as never),

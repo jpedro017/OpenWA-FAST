@@ -16,16 +16,17 @@ export function sessionTools(session: SessionService): AnyToolDescriptor[] {
     defineTool({
       name: 'SessionFindAll',
       description:
-        'List the WhatsApp sessions this API key may access (id, name, status). Use to discover available sessions before calling session-scoped tools. Supports limit/offset paging.',
+        'List the WhatsApp sessions this API key may access (id, name, status). Use to discover available sessions before calling session-scoped tools. Supports limit/offset paging and an exact, case-sensitive name filter.',
       tier: 'read',
       inputSchema: z.object({
         limit: z.number().int().min(1).max(1000).optional(),
         offset: z.number().int().min(0).optional(),
+        name: z.string().min(1).describe('Exact session name (case-sensitive)').optional(),
       }),
       handler: (input, apiKey) =>
         session
-          .findAll(apiKey.allowedSessions, { limit: input.limit, offset: input.offset })
-          .then(ss => ss.map(s => SessionResponseDto.fromEntity(s, session.isActive(s.id)))),
+          .findAll(apiKey.allowedSessions, { limit: input.limit, offset: input.offset, name: input.name })
+          .then(ss => ss.map(s => SessionResponseDto.fromEntity(s, session.engineLoaded(s)))),
     }),
     defineTool({
       name: 'SessionFindOne',
@@ -34,7 +35,7 @@ export function sessionTools(session: SessionService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({ sessionId }),
       handler: input =>
-        session.findOne(input.sessionId).then(s => SessionResponseDto.fromEntity(s, session.isActive(s.id))),
+        session.findOne(input.sessionId).then(s => SessionResponseDto.fromEntity(s, session.engineLoaded(s))),
     }),
     defineTool({
       name: 'SessionGetChats',
@@ -67,7 +68,7 @@ export function sessionTools(session: SessionService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        chatId: z.string().describe('Chat JID (e.g. 1234567890@c.us)'),
+        chatId: z.string().min(1).describe('Chat JID (e.g. 1234567890@c.us)'),
       }),
       handler: input => session.subscribeToPresence(input.sessionId, input.chatId).then(() => ({ success: true })),
     }),
@@ -81,7 +82,7 @@ export function sessionTools(session: SessionService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        chatId: z.string().describe('Chat JID (e.g. 1234567890@c.us)'),
+        chatId: z.string().min(1).describe('Chat JID (e.g. 1234567890@c.us)'),
       }),
       handler: input => session.getPresence(input.sessionId, input.chatId),
     }),
@@ -93,7 +94,7 @@ export function sessionTools(session: SessionService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        chatId: z.string().describe('Chat JID (e.g. 1234567890@c.us)'),
+        chatId: z.string().min(1).describe('Chat JID (e.g. 1234567890@c.us)'),
         messageIds: z
           // The element rule comes from the DTO rather than being restated here: the REST body
           // rejects a whitespace-only id, and this path reaches the engine without the DTO at all.
@@ -103,7 +104,7 @@ export function sessionTools(session: SessionService): AnyToolDescriptor[] {
           .optional()
           .describe(
             'Specific message IDs to acknowledge. Baileys acknowledges individual messages, so without ' +
-              'this only the newest message still held in memory gets a receipt.',
+              'this only the newest received message still held in memory gets a receipt.',
           ),
       }),
       handler: input =>
@@ -117,7 +118,7 @@ export function sessionTools(session: SessionService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        chatId: z.string().describe('Chat JID (e.g. 1234567890@c.us)'),
+        chatId: z.string().min(1).describe('Chat JID (e.g. 1234567890@c.us)'),
       }),
       handler: input => session.markUnread(input.sessionId, input.chatId).then(success => ({ success })),
     }),
@@ -129,7 +130,7 @@ export function sessionTools(session: SessionService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        chatId: z.string().describe('Chat JID (e.g. 1234567890@c.us)'),
+        chatId: z.string().min(1).describe('Chat JID (e.g. 1234567890@c.us)'),
         state: z
           .enum(['typing', 'recording', 'paused'])
           .describe("'typing' or 'recording' shows the indicator; 'paused' clears it"),

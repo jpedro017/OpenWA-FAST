@@ -26,6 +26,19 @@ describe('buildMessageMetadata', () => {
     expect(buildMessageMetadata(msg({ call }))).toEqual({ call });
   });
 
+  it('stores prompt buttons', () => {
+    const buttons = [
+      { id: 'yes', text: 'Sim' },
+      { id: 'no', text: 'Não' },
+    ];
+
+    expect(buildMessageMetadata(msg({ buttons }))).toEqual({ buttons });
+  });
+
+  it('ignores an empty buttons array', () => {
+    expect(buildMessageMetadata(msg({ buttons: [] }))).toBeUndefined();
+  });
+
   it('stores every present field together', () => {
     const built = buildMessageMetadata(
       msg({
@@ -33,16 +46,16 @@ describe('buildMessageMetadata', () => {
         media: { mimetype: 'image/png' },
         quotedMessage: { id: 'q' },
         call: { video: false, missed: false },
+        buttons: [{ id: 'ok', text: 'OK' }],
       } as Partial<IncomingMessage>),
     );
 
-    expect(Object.keys(built!).sort()).toEqual(['call', 'media', 'quotedMessage']);
+    expect(Object.keys(built!).sort()).toEqual(['buttons', 'call', 'media', 'quotedMessage']);
   });
 
   describe('omitted-media synthesis', () => {
-    // A wwjs own-send echo whose media download failed and the history backfill both arrive without
-    // the payload; without a marker the row renders as an empty bubble and drops out of the by-type
-    // stats.
+    // The history backfill arrives without the payload; without a marker the row renders as an empty
+    // bubble and drops out of the by-type stats.
     it.each([...MEDIA_MESSAGE_TYPES])('synthesizes a placeholder for a media-typed %s when asked', type => {
       expect(buildMessageMetadata(msg({ type: type as MessageType }), true)).toEqual({
         media: { mimetype: '', omitted: true },

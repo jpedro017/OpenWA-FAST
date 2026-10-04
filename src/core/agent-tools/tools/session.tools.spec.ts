@@ -24,26 +24,52 @@ async function run(tool: AnyToolDescriptor, input: unknown): Promise<unknown> {
 }
 
 describe('sessionTools', () => {
+  // engineLoaded, not isActive: a session a live peer node runs has no engine in this process, and
+  // an MCP call is never forwarded to the owner, so isActive would report it as stopped.
   it('SessionFindAll scopes by the key allowedSessions and maps entities to DTOs', async () => {
-    const findAll = jest.fn().mockResolvedValue([{ id: 's1', name: 'main', status: 'ready' }]);
-    const isActive = jest.fn().mockReturnValue(true);
-    const out = (await run(makeTools({ findAll, isActive } as unknown as SessionService).get('SessionFindAll')!, {
-      limit: 5,
-    })) as Array<{ id: string; engineLoaded: boolean }>;
+    const row = { id: 's1', name: 'main', status: 'ready' };
+    const findAll = jest.fn().mockResolvedValue([row]);
+    const isActive = jest.fn().mockReturnValue(false);
+    const engineLoaded = jest.fn().mockReturnValue(true);
+    const out = (await run(
+      makeTools({ findAll, isActive, engineLoaded } as unknown as SessionService).get('SessionFindAll')!,
+      { limit: 5 },
+    )) as Array<{ id: string; engineLoaded: boolean }>;
     expect(findAll).toHaveBeenCalledWith(null, { limit: 5, offset: undefined });
-    expect(isActive).toHaveBeenCalledWith('s1');
+    expect(engineLoaded).toHaveBeenCalledWith(row);
     expect(out).toEqual([expect.objectContaining({ id: 's1', engineLoaded: true })]);
   });
 
+  it('SessionFindAll forwards the name filter together with a scoped key allowlist', async () => {
+    const findAll = jest.fn().mockResolvedValue([]);
+    const auth = { ...makeAuth(), validateApiKey: jest.fn().mockResolvedValue({ id: 'k1', allowedSessions: ['s1'] }) };
+    const tool = makeTools({ findAll, isActive: jest.fn() } as unknown as SessionService).get('SessionFindAll')!;
+
+    await expect(invokeTool(tool, { name: 'other-bot' }, 'key', auth as unknown as AuthService)).resolves.toEqual([]);
+    expect(findAll).toHaveBeenCalledWith(['s1'], { limit: undefined, offset: undefined, name: 'other-bot' });
+  });
+
+  it('SessionFindAll rejects an empty name before reaching the service', async () => {
+    const findAll = jest.fn();
+    const tool = makeTools({ findAll } as unknown as SessionService).get('SessionFindAll')!;
+
+    await expect(run(tool, { name: '' })).rejects.toThrow();
+    expect(findAll).not.toHaveBeenCalled();
+  });
+
   it('SessionFindOne delegates to findOne and maps to the response DTO', async () => {
-    const findOne = jest.fn().mockResolvedValue({ id: 's1', name: 'main', status: 'ready' });
+    const row = { id: 's1', name: 'main', status: 'ready' };
+    const findOne = jest.fn().mockResolvedValue(row);
     const isActive = jest.fn().mockReturnValue(false);
-    const out = (await run(makeTools({ findOne, isActive } as unknown as SessionService).get('SessionFindOne')!, {
-      sessionId: 's1',
-    })) as { id: string; engineLoaded: boolean };
+    const engineLoaded = jest.fn().mockReturnValue(true);
+    const out = (await run(
+      makeTools({ findOne, isActive, engineLoaded } as unknown as SessionService).get('SessionFindOne')!,
+      { sessionId: 's1' },
+    )) as { id: string; engineLoaded: boolean };
     expect(findOne).toHaveBeenCalledWith('s1');
+    expect(engineLoaded).toHaveBeenCalledWith(row);
     expect(out.id).toBe('s1');
-    expect(out.engineLoaded).toBe(false);
+    expect(out.engineLoaded).toBe(true);
   });
 
   it('SessionGetChats delegates to getChats with paging', async () => {

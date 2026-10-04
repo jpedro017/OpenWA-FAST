@@ -1,7 +1,8 @@
 import { BlockList, isIPv4, isIPv6, type LookupFunction } from 'net';
 import { lookup } from 'dns/promises';
 import { type LookupAddress, type LookupOptions } from 'dns';
-import { Agent, fetch as undiciFetch, Headers, type RequestInit, type Response } from 'undici';
+import { Agent, fetch as undiciFetch, Headers, type Dispatcher, type RequestInit, type Response } from 'undici';
+import { createProxyDispatcher } from './proxy-dispatcher';
 
 /** Thrown when an outbound URL is blocked by the SSRF guard. */
 export class SsrfBlockedError extends Error {
@@ -189,7 +190,17 @@ export function isBlockedAddress(ip: string): boolean {
       if (hextets[0] === 0x2002) {
         return isBlockedAddress(hextetsToV4(hextets[1], hextets[2])); // 6to4
       }
-      if (hextets[0] === 0x64 && hextets[1] === 0xff9b) {
+      // NAT64 /96: the well-known 64:ff9b::/96 and the local-use 64:ff9b:1::/96 (RFC 8215). Any other
+      // 64:ff9b layout (a /48 local-use prefix embeds the IPv4 in the middle hextets) falls through to
+      // the reserved-range check below and is blocked.
+      if (
+        hextets[0] === 0x64 &&
+        hextets[1] === 0xff9b &&
+        hextets[2] <= 1 &&
+        hextets[3] === 0 &&
+        hextets[4] === 0 &&
+        hextets[5] === 0
+      ) {
         return isBlockedAddress(hextetsToV4(hextets[6], hextets[7])); // NAT64
       }
       if (hextets.slice(0, 6).every(h => h === 0) && (hextets[6] | hextets[7]) !== 0) {
@@ -252,10 +263,13 @@ export function assertNoRedirect(response: { status: number; type?: string }, ur
 /** Default DNS resolution deadline (ms) — generous for healthy resolvers; bounds a hang. */
 const DEFAULT_DNS_TIMEOUT_MS = 10000;
 
+/** Node clamps a longer timer delay to 1 ms, which would fail every lookup at once. */
+const MAX_TIMER_MS = 2147483647;
+
 function resolveDnsTimeoutMs(): number {
   const raw = process.env.SSRF_DNS_TIMEOUT_MS;
   const n = raw !== undefined ? Number(raw) : NaN;
-  return Number.isInteger(n) && n > 0 ? n : DEFAULT_DNS_TIMEOUT_MS;
+  return Number.isInteger(n) && n > 0 && n <= MAX_TIMER_MS ? n : DEFAULT_DNS_TIMEOUT_MS;
 }
 
 /** Redirect hops followed on the guarded download path before the chain is refused. */
@@ -310,9 +324,9 @@ async function lookupWithDeadline(host: string, signal?: AbortSignal | null): Pr
  *
  * Returns the vetted resolved addresses so a caller can PIN the connection to them — defeating the
  * DNS-rebinding window where the address validated here differs from the one `fetch` would re-resolve.
- * Returns null when there is nothing to pin: an allowlisted host (trusted — deliberately left
- * unpinned, since the operator opts in to whatever its DNS returns) or a literal IP (no DNS, so no
- * rebind is possible — fetch connects straight to the validated literal).
+ * Hosts in `SSRF_ALLOWED_HOSTS` skip the block check but are still resolved, and their addresses are
+ * returned for pinning, so an allowlisted name cannot rebind after validation. Returns null only for a
+ * literal IP (no DNS, so no rebind is possible; fetch connects straight to the validated literal).
  */
 export async function resolveSafeFetchTarget(
   rawUrl: string,
@@ -450,12 +464,44 @@ function nextRedirectHopInit(init: RequestInit, status: number, nextUrl: string,
 }
 
 /**
+ * The dispatcher one guarded request rides, destroyed by the caller once the request settles.
+ *
+ * With a session proxy the request leaves through it, whatever the guard decided: the proxy is the
+ * session's egress and a fetch that quietly went direct would put the gateway's own address on the
+ * wire (#1626). What the guard can still enforce there is narrower than on the direct path, and
+ * worth stating exactly:
+ *
+ * - The scheme check and the blocked-address check on the URL itself run unchanged, so `file:`,
+ *   `http://169.254.169.254/` and a name resolving into a reserved range are refused before any
+ *   socket is opened, proxy or not.
+ * - Destination PINNING survives only through SOCKS, which carries the destination address in the
+ *   request. The whole vetted list goes over, to be dialled in order, so the address-family failover
+ *   the direct path gets from happy-eyeballs is not lost to a proxy that can route only one of them.
+ *   An HTTP/HTTPS proxy is handed the destination by name (the CONNECT line for an https
+ *   destination, the absolute-form request line for an http one) and resolves it with its own
+ *   resolver, so the vetted address cannot be expressed and a DNS rebind between check and connect
+ *   is not structurally preventable.
+ *
+ * Without a proxy the behaviour is byte-identical to before: the pinned `Agent` for a vetted
+ * hostname, and no dispatcher at all for an IP literal or an unguarded fetch.
+ */
+function requestDispatcher(proxyUrl: string | undefined, target: LookupAddress[] | null): Dispatcher | undefined {
+  if (proxyUrl) {
+    return createProxyDispatcher(proxyUrl, { pinnedAddresses: target?.map(({ address }) => address) });
+  }
+  return target ? new Agent({ connect: { lookup: pinnedLookup(target) } }) : undefined;
+}
+
+/**
  * Perform an SSRF-safe fetch and hand the response to `use`, then tear down the per-request
- * connection. The host is validated and resolved ONCE; the connection is pinned to the vetted IP(s)
- * via an undici dispatcher so it cannot be re-resolved to an internal address between check and
- * connect (DNS-rebinding TOCTOU). The original hostname is preserved for TLS SNI and the Host header,
- * so virtual hosting and certificate validation are unaffected, and ALL vetted addresses are offered
- * so A-record failover still works. Redirects are refused (the guard only validated the original host).
+ * connection. The host is validated and resolved ONCE; a direct or SOCKS-proxied connection is
+ * pinned to the vetted IP(s) via an undici dispatcher so it cannot be re-resolved to an internal
+ * address between check and connect (DNS-rebinding TOCTOU). The original hostname is preserved for
+ * TLS SNI and the Host header, so virtual hosting and certificate validation are unaffected, and ALL
+ * vetted addresses are offered so A-record failover still works (behind a SOCKS proxy the same list
+ * is dialled in order). Behind an HTTP/HTTPS proxy nothing is pinned: the name goes to the proxy,
+ * which resolves it itself, so that path keeps the check but not the rebind protection. Redirects
+ * are refused (the guard only validated the original host).
  *
  * `use` must read everything it needs from the response before returning — the dispatcher (and its
  * sockets) is destroyed once `use` settles, so a still-streaming body would be cut off. Unread
@@ -464,20 +510,33 @@ function nextRedirectHopInit(init: RequestInit, status: number, nextUrl: string,
  *
  * @param opts.guard - when false (the WEBHOOK_SSRF_PROTECT opt-out), skips validation/pinning and
  *   performs a plain redirect-following fetch. Defaults to true (always guard).
+ * @param opts.proxyUrl - the egress proxy every request of this fetch must leave through; see
+ *   {@link requestDispatcher} for what the guard can still enforce behind one.
  */
 export async function withSafeFetch<T>(
   rawUrl: string,
   init: RequestInit,
   use: (response: Response) => Promise<T> | T,
-  opts: { guard?: boolean; followRedirects?: boolean } = {},
+  opts: { guard?: boolean; followRedirects?: boolean; proxyUrl?: string } = {},
 ): Promise<T> {
   const guard = opts.guard ?? true;
   if (!guard) {
     // Redirect-following is a separate decision from SSRF protection: an operator who disabled the
     // guard (closed network) did not opt into chasing 3xx chains to arbitrary hosts. Fail loudly
     // unless WEBHOOK_SSRF_REDIRECTS=true says otherwise.
+    //
+    // The proxy still applies: turning the guard off says nothing about which address the request
+    // may leave from, so an unguarded fetch for a proxied session is proxied too.
     const follow = process.env.WEBHOOK_SSRF_REDIRECTS === 'true';
-    return useAndSettleBody(await undiciFetch(rawUrl, { ...init, redirect: follow ? 'follow' : 'error' }), use);
+    const dispatcher = requestDispatcher(opts.proxyUrl, null);
+    try {
+      return await useAndSettleBody(
+        await undiciFetch(rawUrl, { ...init, redirect: follow ? 'follow' : 'error', dispatcher }),
+        use,
+      );
+    } finally {
+      if (dispatcher) await dispatcher.destroy().catch(() => undefined);
+    }
   }
 
   if (opts.followRedirects) {
@@ -503,7 +562,7 @@ export async function withSafeFetch<T>(
         throw new Error(`Refusing redirect that downgrades from https to http: ${currentUrl}`);
       }
       if (current.protocol === 'https:') sawSecureHop = true;
-      const dispatcher = target ? new Agent({ connect: { lookup: pinnedLookup(target) } }) : undefined;
+      const dispatcher = requestDispatcher(opts.proxyUrl, target);
       try {
         const response = await undiciFetch(currentUrl, { ...hopInit, redirect: 'manual', dispatcher });
         if (!REDIRECT_STATUSES.has(response.status)) {
@@ -529,7 +588,7 @@ export async function withSafeFetch<T>(
   }
 
   const target = await resolveSafeFetchTarget(rawUrl, init.signal);
-  const dispatcher = target ? new Agent({ connect: { lookup: pinnedLookup(target) } }) : undefined;
+  const dispatcher = requestDispatcher(opts.proxyUrl, target);
   try {
     const response = await undiciFetch(rawUrl, { ...init, redirect: 'manual', dispatcher });
     try {

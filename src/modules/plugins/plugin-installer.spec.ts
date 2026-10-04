@@ -94,11 +94,36 @@ describe('parsePluginPackage', () => {
     expect(() => parsePluginPackage(zipOf({ 'index.js': 'x' }))).toThrow(/no manifest/i);
   });
 
+  it('rejects bytes that are not a zip at all with a 400', () => {
+    expect(() => parsePluginPackage(Buffer.from('not a zip at all'))).toThrow(BadRequestException);
+  });
+
+  it('rejects an archive whose trailer parses but whose directory does not, with a 400', () => {
+    // adm-zip's constructor reads only the end-of-central-directory record; the central directory
+    // is parsed lazily by getEntries(). An archive corrupted between the two throws out of
+    // getEntries ('Invalid CEN header'), which used to escape as a plain Error and reach the
+    // caller as a 500 for what is an unreadable upload.
+    const good = zipOf({ 'manifest.json': JSON.stringify(validManifest), 'index.js': 'x' });
+    const bad = Buffer.from(good);
+    const eocd = bad.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    bad.writeUInt32LE(0xdeadbeef, bad.readUInt32LE(eocd + 16)); // clobber the first CEN signature
+
+    expect(() => parsePluginPackage(bad)).toThrow(BadRequestException);
+    expect(() => parsePluginPackage(bad)).toThrow(/not a valid \.zip archive/i);
+  });
+
   it('rejects a manifest missing a required field', () => {
     const bad = { ...validManifest, main: undefined };
     expect(() => parsePluginPackage(zipOf({ 'manifest.json': JSON.stringify(bad), 'index.js': 'x' }))).toThrow(
       /required field: main/i,
     );
+  });
+
+  it('rejects a package that needs a newer OpenWA with a 400', () => {
+    const bad = { ...validManifest, minOpenWAVersion: '999.0.0' };
+    const zip = zipOf({ 'manifest.json': JSON.stringify(bad), 'index.js': 'x' });
+    expect(() => parsePluginPackage(zip)).toThrow(BadRequestException);
+    expect(() => parsePluginPackage(zip)).toThrow(/requires OpenWA >= 999\.0\.0/);
   });
 
   it('rejects a non-string required field (numeric main) with a clean 400, not a TypeError/500', () => {
@@ -164,6 +189,36 @@ describe('parsePluginPackage', () => {
     z.addFile('evil.js', Buffer.from('pwned'));
     z.getEntries().find(e => e.entryName === 'evil.js')!.entryName = '../evil.js';
     expect(() => parsePluginPackage(z.toBuffer())).toThrow(/unsafe path/i);
+  });
+
+  it('rejects two entries that normalize to the same path, so the validated manifest is the one written', () => {
+    const z = new AdmZip();
+    z.addFile('manifest.json', Buffer.from(JSON.stringify(validManifest)));
+    z.addFile('index.js', Buffer.from('x'));
+    z.addFile('other.json', Buffer.from(JSON.stringify({ ...validManifest, id: 'other-id' })));
+    z.getEntries().find(e => e.entryName === 'other.json')!.entryName = 'z/../manifest.json';
+    expect(() => parsePluginPackage(z.toBuffer())).toThrow(/duplicate path/i);
+  });
+
+  it('rejects entries that differ only in case (one file on a case-insensitive filesystem)', () => {
+    const buf = zipOf({ 'manifest.json': JSON.stringify(validManifest), 'index.js': 'x', 'INDEX.js': 'y' });
+    expect(() => parsePluginPackage(buf)).toThrow(/duplicate path/i);
+  });
+
+  it('rejects entries that collide only under Unicode case folding (long s folds to s)', () => {
+    const other = JSON.stringify({ ...validManifest, id: 'other-id' });
+    const buf = zipOf({ 'manifest.json': JSON.stringify(validManifest), 'index.js': 'x', 'manife\u017Ft.json': other });
+    expect(() => parsePluginPackage(buf)).toThrow(/duplicate path/i);
+  });
+
+  it('rejects entries that differ only in Unicode normalization (NFC vs NFD)', () => {
+    const buf = zipOf({
+      'manifest.json': JSON.stringify(validManifest),
+      'index.js': 'x',
+      'caf\u00e9.js': 'a',
+      'cafe\u0301.js': 'b',
+    });
+    expect(() => parsePluginPackage(buf)).toThrow(/duplicate path/i);
   });
 
   it('rejects a package missing its declared main file', () => {

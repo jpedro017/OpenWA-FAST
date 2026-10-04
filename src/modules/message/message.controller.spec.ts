@@ -1,8 +1,15 @@
 import { StreamableFile } from '@nestjs/common';
 import { RESPONSE_PASSTHROUGH_METADATA } from '@nestjs/common/constants';
+import { Test } from '@nestjs/testing';
+import request from 'supertest';
+import type { Server } from 'http';
 import { MessageController } from './message.controller';
-import type { MessageService } from './message.service';
-import type { BulkMessageService } from './bulk-message.service';
+import { MessageService } from './message.service';
+import { BulkMessageService } from './bulk-message.service';
+import { ChatScopeService } from '../auth/chat-scope.service';
+import { CHAT_SCOPED_KEY } from '../auth/decorators/auth.decorators';
+import type { ApiKey } from '../auth/entities/api-key.entity';
+import type { SendBulkMessageDto } from './dto/bulk-message.dto';
 import type { Response } from 'express';
 
 /**
@@ -16,6 +23,7 @@ describe('MessageController — stored media download', () => {
   const controller = new MessageController(
     { getChatMedia } as unknown as MessageService,
     {} as unknown as BulkMessageService,
+    new ChatScopeService(),
   );
 
   /**
@@ -61,5 +69,156 @@ describe('MessageController — stored media download', () => {
 
     expect(body).toBeInstanceOf(StreamableFile);
     expect(body.getStream().read()).toEqual(Buffer.from('GIF89a'));
+  });
+});
+
+/**
+ * `inlineMedia` is an OPT-OUT, unlike every other boolean on this controller, so the parse reads the
+ * same string pair the other way round. Inverting it would quietly strip media from every default
+ * read, which no other suite would notice: the service takes a boolean and cannot tell who set it.
+ */
+describe('MessageController - inlineMedia is opt-out', () => {
+  const getMessages = jest.fn().mockResolvedValue({ messages: [], total: 0 });
+  const controller = new MessageController(
+    { getMessages } as unknown as MessageService,
+    {} as unknown as BulkMessageService,
+    new ChatScopeService(),
+  );
+
+  const inlineMediaFor = async (raw?: string): Promise<boolean> => {
+    getMessages.mockClear();
+    await controller.getMessages('session-1', undefined, undefined, undefined, undefined, undefined, raw);
+    const [, options] = getMessages.mock.calls[0] as [string, { inlineMedia: boolean }];
+    return options.inlineMedia;
+  };
+
+  it.each([undefined, 'true', '1', '', 'no', 'False'])('keeps media inline for %p', async raw => {
+    expect(await inlineMediaFor(raw)).toBe(true);
+  });
+
+  it.each(['false', '0'])('omits media for %p', async raw => {
+    expect(await inlineMediaFor(raw)).toBe(false);
+  });
+
+  const afterFor = async (raw?: string): Promise<string | undefined> => {
+    getMessages.mockClear();
+    await controller.getMessages('session-1', undefined, undefined, undefined, undefined, raw, undefined);
+    const [, options] = getMessages.mock.calls[0] as [string, { after?: string }];
+    return options.after;
+  };
+
+  /**
+   * The service only skips the keyset branch on `undefined`. A blank reached the anchor lookup,
+   * matched no row, and answered 400 for what is an ordinary unfiltered first page: a client
+   * templating a cursor it has not got yet sends exactly that.
+   */
+  it.each([undefined, '', '   '])('treats a blank after as absent for %p', async raw => {
+    expect(await afterFor(raw)).toBeUndefined();
+  });
+
+  it('passes a real cursor through, trimmed', async () => {
+    expect(await afterFor('db-42')).toBe('db-42');
+    expect(await afterFor('  db-42  ')).toBe('db-42');
+  });
+});
+
+/**
+ * A key restricted to selected chats reads stored history only for a chat it names: the guard fences
+ * the ?chatId= it sends, and the handler refuses the same key when it names none, which the service
+ * would otherwise read as every chat in the session.
+ */
+describe('MessageController - stored history for a chat-restricted key', () => {
+  const getMessages = jest.fn().mockResolvedValue({ messages: [], total: 0 });
+  const controller = new MessageController(
+    { getMessages } as unknown as MessageService,
+    {} as unknown as BulkMessageService,
+    new ChatScopeService(),
+  );
+  const restricted = { allowedChats: ['1@c.us'] } as ApiKey;
+  const list = (chatId: string | undefined, apiKey?: ApiKey) =>
+    controller.getMessages('s1', chatId, undefined, undefined, undefined, undefined, undefined, apiKey);
+
+  beforeEach(() => getMessages.mockClear());
+
+  it('is fenced', () => {
+    expect(
+      Reflect.getMetadata(
+        CHAT_SCOPED_KEY,
+        Object.getOwnPropertyDescriptor(MessageController.prototype, 'getMessages')!.value as object,
+      ),
+    ).toBe('fenced');
+  });
+
+  it.each([undefined, ''])('refuses a restricted key with chatId %p before reading', async chatId => {
+    await expect(list(chatId, restricted)).rejects.toThrow('chatId is required for a key restricted to selected chats');
+    expect(getMessages).not.toHaveBeenCalled();
+  });
+
+  it('reads the named chat for a restricted key, passing chatId through as sent', async () => {
+    await list('1@c.us', restricted);
+    expect(getMessages).toHaveBeenCalledWith('s1', expect.objectContaining({ chatId: '1@c.us' }));
+  });
+
+  it('leaves an unrestricted key free to list every chat', async () => {
+    await list(undefined, { allowedChats: null } as ApiKey);
+    expect(getMessages).toHaveBeenCalledWith('s1', expect.objectContaining({ chatId: undefined }));
+  });
+});
+
+/**
+ * A caller may pick its own batchId. 'history' shares the two-segment shape of ':chatId/history',
+ * and an id with a reserved character must survive the statusUrl handed back on creation.
+ */
+describe('MessageController - caller-supplied batch ids', () => {
+  const bulk = {
+    getBatchStatus: jest.fn().mockResolvedValue({ batchId: 'history', status: 'processing' }),
+    createBatch: jest.fn().mockResolvedValue({ batchId: 'run/1?x', status: 'pending', messages: [] }),
+  };
+  const messages = { getChatHistory: jest.fn().mockResolvedValue([]) };
+
+  it("routes GET batch/history to the batch status, not the history of chat 'batch'", async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [MessageController],
+      providers: [
+        { provide: MessageService, useValue: messages },
+        { provide: BulkMessageService, useValue: bulk },
+        ChatScopeService,
+      ],
+    }).compile();
+    const app = moduleRef.createNestApplication();
+    await app.init();
+    try {
+      await request(app.getHttpServer() as Server)
+        .get('/sessions/s1/messages/batch/history')
+        .expect(200);
+      expect(bulk.getBatchStatus).toHaveBeenCalledWith('s1', 'history');
+      expect(messages.getChatHistory).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('percent-encodes the batch id in the returned statusUrl', async () => {
+    const controller = new MessageController(
+      messages as unknown as MessageService,
+      bulk as unknown as BulkMessageService,
+      new ChatScopeService(),
+    );
+
+    const res = await controller.sendBulk('s1', {} as SendBulkMessageDto);
+
+    expect(res.statusUrl).toBe('/api/sessions/s1/messages/batch/run%2F1%3Fx');
+  });
+});
+
+// MessageService.getEngine() answers 400 for a session with no live engine; clients generated from
+// the OpenAPI contract need it declared on the read routes too.
+describe('MessageController OpenAPI error responses', () => {
+  it.each(['getChatHistory', 'getReactions'])('%s declares 400', method => {
+    const responses = Reflect.getMetadata(
+      'swagger/apiResponse',
+      Object.getOwnPropertyDescriptor(MessageController.prototype, method)!.value as object,
+    ) as Record<string, unknown>;
+    expect(Object.keys(responses)).toContain('400');
   });
 });

@@ -5,8 +5,6 @@ import {
   IsNotEmpty,
   IsOptional,
   MaxLength,
-  IsUrl,
-  ValidateIf,
   IsArray,
   ArrayMaxSize,
   IsBoolean,
@@ -15,6 +13,8 @@ import {
 import { Type } from 'class-transformer';
 import { IsMentionWidConstraint } from './is-mention-wid.validator';
 import { ToStrictBoolean } from '../../../common/utils/strict-boolean';
+import { IsMediaUrl } from '../../../common/media/media-url';
+import { stripBase64DataUri } from '../media-cap.util';
 
 export const MENTIONS_DESCRIPTION =
   'WIDs to @mention (e.g. ["62811@c.us"]). The text/caption must also contain the @<number> token.';
@@ -41,6 +41,12 @@ export const CUSTOM_PREVIEW_DESCRIPTION_MAX_LENGTH = 1024;
 // (src/core/agent-tools/tools/message.tools.ts) so MCP and REST enforce the same limit.
 export const MESSAGE_TEXT_MAX_LENGTH = 4096;
 
+// The cap on a prompt choice's id. It must equal BUTTON_TEXT_MAX_LENGTH in the Baileys message
+// mapper, which refuses to offer any inbound choice whose id is longer, so an id past this bound
+// can never name a choice that exists. Validating it against the text cap instead accepted such a
+// request and let the engine answer a confusing "unknown button" a few layers later.
+export const BUTTON_ID_MAX_LENGTH = 256;
+
 /**
  * Shared wording for the quoted-send field (issue #1271). One constant rather than five copies so
  * the two engine caveats — different id dialects, and Baileys' store requirement — cannot drift
@@ -57,6 +63,7 @@ export class CustomLinkPreviewDto {
   @ApiProperty({
     description: 'The URL as it appears in the message text — WhatsApp anchors the preview to it.',
     example: 'https://example.com/launch',
+    maxLength: CUSTOM_PREVIEW_URL_MAX_LENGTH,
   })
   @IsString()
   @IsNotEmpty()
@@ -99,7 +106,13 @@ export class SendTextMessageDto {
   @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
   text!: string;
 
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)
@@ -187,8 +200,9 @@ export class SendMediaMessageDto {
     example: 'https://example.com/image.jpg',
   })
   @IsOptional()
-  @IsUrl()
-  @ValidateIf((o: SendMediaMessageDto) => !o.base64)
+  // base64 wins when it holds data, so a url next to it is not fetched and not checked; a base64 that
+  // is only a data-URI prefix strips to nothing, and then the url is what gets sent.
+  @IsMediaUrl<SendMediaMessageDto>({ ignoreWhen: o => !!stripBase64DataUri(o.base64) })
   url?: string;
 
   @ApiPropertyOptional({
@@ -196,7 +210,6 @@ export class SendMediaMessageDto {
   })
   @IsOptional()
   @IsString()
-  @ValidateIf((o: SendMediaMessageDto) => !o.url)
   base64?: string;
 
   @ApiPropertyOptional({
@@ -211,6 +224,7 @@ export class SendMediaMessageDto {
     description:
       "Filename for the media. Only rendered on document sends — defaults to 'file' when omitted (a URL-based document send on whatsapp-web.js first derives the URL basename)",
     example: 'image.jpg',
+    maxLength: 255,
   })
   @IsOptional()
   @IsString()
@@ -227,7 +241,13 @@ export class SendMediaMessageDto {
   @MaxLength(1024)
   caption?: string;
 
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MENTIONS_MAX)
@@ -323,9 +343,9 @@ export class MessageResponseDto {
   @ApiProperty({
     description:
       'The message id, assigned when the gateway accepts the message for sending. A 201 here means the ' +
-      'message was handed to the WhatsApp client — it does NOT confirm delivery. WhatsApp does not reject ' +
-      'an unregistered recipient synchronously, so a message to a number that is not on WhatsApp still ' +
-      'returns 201 with a valid messageId; whether it later delivers, stalls, or is reported as an error ' +
+      'message was handed to the WhatsApp client — it does NOT confirm delivery. On Baileys a message to a ' +
+      'number that is not on WhatsApp still returns 201 with a valid messageId (whatsapp-web.js answers ' +
+      '400); whether it later delivers, stalls, or is reported as an error ' +
       'reaches you asynchronously, if at all. To confirm a number is on WhatsApp before ' +
       'sending, use GET /api/sessions/{sessionId}/contacts/check/{number}; track real delivery via the ' +
       'message `status` field (sent → delivered → read, or failed if WhatsApp reports an error for it). ' +

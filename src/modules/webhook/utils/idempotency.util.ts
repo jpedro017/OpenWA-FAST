@@ -88,6 +88,12 @@ export function generateIdempotencyKey(event: string, data: Record<string, unkno
       // always sends 'logged out'), which would otherwise collapse every disconnect onto one key.
       return `disc_${toStr(data.sessionId)}_${hashData({ reason: data.reason })}${occurrence}`;
 
+    case 'session.reconnect_loop':
+      // Salted per occurrence: once the backoff hits its cap, a later outage that loops to the same
+      // attempt count produces a byte-identical payload, and that second alert must not collapse
+      // onto the first at the receiver or in the outbox and failure tables.
+      return `loop_${toStr(data.sessionId)}_${toStr(data.attempts)}${occurrence}`;
+
     case 'session.restriction':
       // Keyed on what changed (`kind` is null when a restriction is lifted) and salted per
       // occurrence: an account that is restricted, freed and restricted again for the same cause
@@ -107,8 +113,10 @@ export function generateIdempotencyKey(event: string, data: Record<string, unkno
       // Keyed on the chat and salted per occurrence. Only genuine state CHANGES are dispatched, and
       // a contact who types, stops, and types again produces the same payload each time — content
       // hashing would collapse that back into one delivery and hide the very transitions the event
-      // exists to report.
-      return `pres_${toStr(data.sessionId)}_${toStr(data.chatId)}${occurrence}`;
+      // exists to report. The participants are hashed in as well: two group members changing state
+      // in the same millisecond are two events and must not share a key. Pre-stringified for the
+      // same reason as group.update below.
+      return `pres_${toStr(data.sessionId)}_${toStr(data.chatId)}_${hashData({ participants: JSON.stringify(data.participants ?? null) })}${occurrence}`;
 
     case 'group.join':
       // A membership change carries no unique id and repeats with identical content (the same user

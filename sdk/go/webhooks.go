@@ -18,13 +18,16 @@ func (s *WebhooksService) ListAll(ctx context.Context, query *DeliveryFailureQue
 	return out, err
 }
 
-// DeliveryFailures returns deliveries that were ATTEMPTED and failed — the diagnostic for a webhook
-// that stopped arriving. Requires an ADMIN-level key.
+// DeliveryFailures returns deliveries the gateway gave up on or could not dispatch: the diagnostic
+// for a webhook that stopped arriving. Rows with Attempts > 0 exhausted their retries against the
+// receiver. Rows with Attempts == 0 were not given up after retries: the payload was over the size
+// cap or could not be serialized after the webhook:before hooks, dispatch capacity was shed, or
+// shutdown interrupted the delivery (possibly between retries, after earlier attempts were sent). A
+// row is removed once a later replay delivers the event. Requires an ADMIN-level key.
 //
-// A delivery a smart filter suppressed never reaches this log. The response has no published schema,
-// so it decodes into a generic value.
-func (s *WebhooksService) DeliveryFailures(ctx context.Context, query *DeliveryFailureQuery) (any, error) {
-	var out any
+// A delivery a smart filter suppressed never reaches this log. Most recent first.
+func (s *WebhooksService) DeliveryFailures(ctx context.Context, query *DeliveryFailureQuery) ([]WebhookDeliveryFailure, error) {
+	var out []WebhookDeliveryFailure
 	err := s.client.do(ctx, "GET", "/api/webhooks/delivery-failures", query.values(), nil, &out)
 	return out, err
 }

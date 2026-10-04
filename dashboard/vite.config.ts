@@ -20,6 +20,8 @@ const { version: pkgVersion } = JSON.parse(
 export default defineConfig({
   plugins: [react()],
   appType: 'spa', // Enable SPA fallback for client-side routing
+  // Fonts stay files: a small subset inlined as a data: URI is blocked by the gateway CSP (font-src 'self').
+  build: { assetsInlineLimit: file => (file.endsWith('.woff2') ? false : undefined) },
   define: {
     __APP_VERSION__: JSON.stringify(process.env.APP_VERSION || pkgVersion),
     __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
@@ -27,7 +29,9 @@ export default defineConfig({
   server: {
     port: 2886,
     proxy: {
-      '/api': {
+      // With the trailing slash: Vite matches a plain key as a string prefix, so '/api' also
+      // captured the SPA route /api-keys and a reload of that page went to the backend.
+      '/api/': {
         target: 'http://localhost:2785',
         changeOrigin: true,
         secure: false,

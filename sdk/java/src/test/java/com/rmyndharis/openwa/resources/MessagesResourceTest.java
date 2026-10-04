@@ -8,6 +8,7 @@ import com.rmyndharis.openwa.ClientConfig;
 import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.BinaryResponse;
 import com.rmyndharis.openwa.http.HttpMethod;
+import com.rmyndharis.openwa.model.BatchCancelResponse;
 import com.rmyndharis.openwa.model.BulkMessageContent;
 import com.rmyndharis.openwa.model.BulkMessageItem;
 import com.rmyndharis.openwa.model.BulkMessageType;
@@ -19,6 +20,7 @@ import com.rmyndharis.openwa.model.MessageHistoryQuery;
 import com.rmyndharis.openwa.model.PinMessageRequest;
 import com.rmyndharis.openwa.model.ReactMessageRequest;
 import com.rmyndharis.openwa.model.ReplyMessageRequest;
+import com.rmyndharis.openwa.model.ClickButtonRequest;
 import com.rmyndharis.openwa.model.SendBulkRequest;
 import com.rmyndharis.openwa.model.SendContactRequest;
 import com.rmyndharis.openwa.model.SendLocationRequest;
@@ -269,6 +271,22 @@ class MessagesResourceTest {
     }
 
     @Test
+    void clickButtonHitsClickButtonPath() {
+        tx.respond(200, MSG);
+        client.messages.clickButton(
+            "s",
+            ClickButtonRequest.builder()
+                .chatId("628@c.us")
+                .messageId("prompt-1")
+                .buttonId("yes")
+                .text("Sim")
+                .build());
+        assertEquals("http://h/api/sessions/s/messages/click-button", tx.lastRequest().url());
+        assertTrue(tx.lastRequest().body().contains("prompt-1"));
+        assertTrue(tx.lastRequest().body().contains("yes"));
+    }
+
+    @Test
     void forwardHitsForwardPath() {
         tx.respond(200, MSG);
         client.messages.forward(
@@ -351,8 +369,13 @@ class MessagesResourceTest {
 
     @Test
     void cancelBatchHitsCancelPath() {
-        tx.respond(200, "{\"batchId\":\"b1\",\"status\":\"cancelled\"}");
-        client.messages.cancelBatch("s", "b1");
+        tx.respond(
+            200,
+            "{\"batchId\":\"b1\",\"status\":\"cancelled\","
+                + "\"progress\":{\"total\":2,\"sent\":1,\"failed\":0,\"pending\":0,\"cancelled\":1}}");
+        BatchCancelResponse res = client.messages.cancelBatch("s", "b1");
+        assertEquals("b1", res.batchId());
+        assertEquals(1, res.progress().cancelled());
         assertEquals("http://h/api/sessions/s/messages/batch/b1/cancel", tx.lastRequest().url());
         assertEquals(HttpMethod.POST, tx.lastRequest().method());
     }

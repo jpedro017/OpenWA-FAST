@@ -100,8 +100,9 @@ export function registerWwebjsMessageEvents(client: Client, host: WwebjsEngineHo
       const incomingMessage = buildIncomingMessageBase(msg);
       // Enrich with the media payload through the same capped path the incoming handler uses —
       // the base builder is sync and carries none, so a phone-sent image would otherwise persist
-      // and render as a bare 📎 marker even though the media is downloadable right here.
-      if (msg.hasMedia) {
+      // and render as a bare 📎 marker even though the media is downloadable right here. Not for an own
+      // status post: the echo consumer drops those, so the download would only hold a limiter slot.
+      if (msg.hasMedia && !incomingMessage.isStatusBroadcast) {
         try {
           incomingMessage.media = await host.capInboundMediaFor(msg);
         } catch (error) {
@@ -142,7 +143,6 @@ export function registerWwebjsMessageEvents(client: Client, host: WwebjsEngineHo
 
   client.on('message_revoke_everyone', (after, before) => {
     try {
-      const selfWid = host.getSelfWid();
       // Emit structured data only; the engine layer never produces a localized
       // display string. The dashboard renders the localized "message deleted" text.
       //
@@ -161,7 +161,9 @@ export function registerWwebjsMessageEvents(client: Client, host: WwebjsEngineHo
       const payload: RevokedMessage = {
         id: afterId?._serialized ?? afterId?.$1 ?? '',
         revokedId: beforeId?._serialized ?? beforeId?.$1,
-        chatId: after.from === selfWid ? after.to : after.from,
+        // Direction flag, as Message._getChatId: an own message in a LID chat carries the own LID as
+        // `from`, which never equals the phone-dialect account wid.
+        chatId: after.fromMe ? after.to : after.from,
         from: after.from,
         to: after.to,
         type: 'revoked',

@@ -7,6 +7,7 @@ import com.rmyndharis.openwa.http.HttpMethod;
 import com.rmyndharis.openwa.model.DeliveryFailureQuery;
 import com.rmyndharis.openwa.model.CreateWebhookRequest;
 import com.rmyndharis.openwa.model.UpdateWebhookRequest;
+import com.rmyndharis.openwa.model.WebhookDeliveryFailure;
 import com.rmyndharis.openwa.model.WebhookResponse;
 import com.rmyndharis.openwa.model.WebhookTestResult;
 import java.util.List;
@@ -28,14 +29,18 @@ public final class WebhooksResource {
     }
 
     /**
-     * Deliveries that were ATTEMPTED and failed — the diagnostic for a webhook that stopped arriving.
-     * Requires an ADMIN-level key.
+     * Deliveries the gateway gave up on or could not dispatch: the diagnostic for a webhook that
+     * stopped arriving. Rows with {@code attempts > 0} exhausted their retries against the receiver.
+     * Rows with {@code attempts == 0} were not given up after retries: the payload was over the size
+     * cap or could not be serialized after the webhook:before hooks, dispatch capacity was shed, or
+     * shutdown interrupted the delivery (possibly between retries, after earlier attempts were sent).
+     * A row is removed once a later replay delivers the event. Requires an ADMIN-level key.
      *
-     * <p>A delivery a smart filter suppressed never reaches this log. The response has no published
-     * schema, so it is returned as a raw JSON tree.
+     * <p>A delivery a smart filter suppressed never reaches this log. Most recent first.
      */
-    public Object deliveryFailures(DeliveryFailureQuery query) {
-        return client.request(HttpMethod.GET, "/api/webhooks/delivery-failures", query, null, Object.class);
+    public List<WebhookDeliveryFailure> deliveryFailures(DeliveryFailureQuery query) {
+        return client.requestList(
+            HttpMethod.GET, "/api/webhooks/delivery-failures", query, null, WebhookDeliveryFailure.class);
     }
 
     /** List all webhooks for a session. */
@@ -60,7 +65,10 @@ public final class WebhooksResource {
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/webhooks", null, body, WebhookResponse.class);
     }
 
-    /** Update a webhook. */
+    /**
+     * Update a webhook. Fields left null are not sent and stay unchanged. To remove every filter,
+     * set {@code filters(new WebhookFilters(List.of()))}; {@code filters(null)} keeps the current ones.
+     */
     public WebhookResponse update(String sessionId, String id, UpdateWebhookRequest body) {
         return client.request(
             HttpMethod.PUT,

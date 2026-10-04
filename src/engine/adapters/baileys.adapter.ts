@@ -1,5 +1,5 @@
-import * as path from 'path';
 import { ChatLabelsUnsupportedError } from '../../common/errors/chat-labels-unsupported.error';
+import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { isChannelJid } from '../identity/wa-id';
 import type * as BaileysLib from '@whiskeysockets/baileys';
 import type { WASocket } from '@whiskeysockets/baileys';
@@ -10,6 +10,7 @@ import { BaileysEvents } from './baileys-events';
 import { BaileysGroups } from './baileys-groups';
 import { BaileysHistory, toUnixSeconds } from './baileys-history';
 import { type BaileysEngineHost } from './baileys-host';
+import { OwnSendRegistry } from './baileys-own-sends';
 import { BaileysLifecycle } from './baileys-lifecycle';
 import { BaileysMessaging } from './baileys-messaging';
 import { BaileysStatus } from './baileys-status';
@@ -48,9 +49,13 @@ import {
   StatusPostOptions,
 } from '../interfaces/whatsapp-engine.interface';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
-import { NotFoundException } from '@nestjs/common';
+import { EngineRefusedError } from '../../common/errors/engine-refused.error';
+import { EngineNotSentError } from '../../common/errors/engine-not-sent.error';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { createLogger } from '../../common/services/logger.service';
 import { BaileysAdapterConfig } from '../types/baileys.types';
+import { baileysAuthDir } from '../auth-dir-paths';
 import { BaileysSessionStore } from './baileys-session-store';
 import { inboundMediaConcurrency } from './inbound-media-cap';
 import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
@@ -93,12 +98,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
   private set sock(value: WASocket | null) {
     this.lifecycle.sock = value;
   }
-  /** Unix-seconds timestamp of the last 'open' connection.update — the events delegate's
-   *  live-vs-history discriminator, read live; the value is owned by the lifecycle delegate. */
-  private get connectedAt(): number {
-    return this.lifecycle.connectedAt;
-  }
-  /** Live-call cache handle — the map is owned by the events delegate (call events + rejectCall);
+  /** Live-call cache handle: the map is owned by the events delegate (call events + rejectCall);
    *  lifecycle teardown clears it so a late rejectCall() reports not-found on a dead socket. The
    *  adapter keeps this alias for the unmodified spec, which reads `adapter.liveCalls` via a cast. */
   private get liveCalls(): Map<string, { callFrom: string; expiresAt: number }> {
@@ -110,35 +110,46 @@ export class BaileysAdapter implements IWhatsAppEngine {
     return this.lifecycle.loadLib();
   }
 
+  /** Ids of the messages this session sent through the API, until each one's library echo returns. */
+  private readonly ownSends = new OwnSendRegistry();
+
   constructor(private readonly config: BaileysAdapterConfig) {
     // Isolate each session's auth state under its own subdirectory of the shared auth dir.
-    this.authPath = path.join(config.authDir, config.sessionId);
-    this.sessionStore = new BaileysSessionStore(config.lidMappingStore, config.sessionId);
+    this.authPath = baileysAuthDir(config.authDir, config.sessionId);
+    this.sessionStore = new BaileysSessionStore(config.lidMappingStore, config.sessionId, config.chatStateStore);
     // Constructed before messaging: the messaging delegate's own-send echo maps through
     // events.mapMessage (and the lifecycle delegate clears that same live-call cache on teardown).
     // One host literal for every delegate (the wwebjs-host pattern): a new cross-cutting member
     // is added once here, not to nine per-delegate bags. Each delegate keeps its own narrow Host
     // interface, which this literal satisfies structurally - least privilege stays enforceable.
     const delegates: { events?: BaileysEvents } = {};
-    const connectedAt = (): number => this.connectedAt;
     const host: BaileysEngineHost = {
-      // An object-literal getter's `this` is the literal itself, so the live connectedAt read goes
-      // through the arrow closure above, which captures the adapter.
-      get connectedAt() {
-        return connectedAt();
+      // Read after a delegate's awaits too, when a stop or logout may have torn the socket down since
+      // its readiness check: that is a not-ready session (409), not a null dereference (500).
+      getSocket: () => {
+        if (!this.sock) throw new EngineNotReadyError();
+        return this.sock;
       },
-      getSocket: () => this.sock!,
       getSocketOrNull: () => this.sock,
       logger: this.logger,
       toNeutralJid: jid => this.sessionStore.toNeutralJid(jid),
       normalizedSelfJid: () => this.normalizedSelfJid(),
       loadLib: () => this.loadLib(),
+      getFetchDispatcher: () => this.lifecycle.fetchDispatcher(),
+      sessionProxyUrl: () => this.config.proxyUrl,
       toUnixSeconds,
       inboundLimiter: this.inboundLimiter,
       recordKeyLidMappings: key => this.sessionStore.recordKeyLidMappings(key),
       recordMessage: msg => this.sessionStore.recordMessage(msg),
       recordMessageEdit: (chatId, messageId, text) => this.sessionStore.recordMessageEdit(chatId, messageId, text),
       putStoredMessage: msg => this.config.messageStore?.put(this.config.dbSessionId, msg),
+      updateStoredMessage: (messageId, change) =>
+        this.config.messageStore?.update(this.config.dbSessionId, messageId, change),
+      wasDeletedForEveryone: messageId => this.events.wasDeletedForEveryone(messageId),
+      markDeletedForEveryone: messageId => this.events.markDeletedForEveryone(messageId),
+      pendingEditOf: (messageId, target) => this.events.pendingEditOf(messageId, target),
+      rememberOwnSend: id => this.ownSends.remember(id),
+      consumeOwnSend: id => this.ownSends.consume(id),
       getOnMessage: () => this.callbacks.onMessage,
       getOnMessageCreate: () => this.callbacks.onMessageCreate,
       getOnMessageRevoked: () => this.callbacks.onMessageRevoked,
@@ -151,6 +162,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
       getOnCallOutcome: () => this.callbacks.onCallOutcome,
       ensureReady: () => this.ensureReady(),
       toEngineJid: jid => this.sessionStore.toEngineJid(jid),
+      chatJid: chatId => this.sessionStore.chatJid(chatId),
       getEphemeralExpiration: chatId => this.sessionStore.getEphemeralExpiration(chatId),
       getStoredMessage: messageId => this.config.messageStore?.getMessage(this.config.dbSessionId, messageId),
       getStoredMessages: messageIds => this.config.messageStore?.getMessages(this.config.dbSessionId, messageIds),
@@ -158,12 +170,16 @@ export class BaileysAdapter implements IWhatsAppEngine {
         this.sessionStore.addLidMappings([{ lid: `${lid.split('@')[0].split(':')[0]}@lid`, pn }]),
       mapMessage: (msg, contentType, opts) => this.events.mapMessage(msg, contentType, opts),
       listContacts: () => this.sessionStore.listContacts(),
+      contactCount: () => this.sessionStore.listContacts().length,
       findContact: contactId => this.sessionStore.findContact(contactId),
       resolvePhone: contactId => this.sessionStore.resolvePhone(contactId),
+      findPersistedLidPhone: lid => this.config.lidMappingStore?.findPhoneForLid?.(lid) ?? Promise.resolve(null),
       listChats: () => this.sessionStore.listChats(),
       lastMessage: chatId => this.sessionStore.lastMessage(chatId),
+      lastInboundMessage: chatId => this.sessionStore.lastInboundMessage(chatId),
       upsertContacts: records => this.sessionStore.upsertContacts(records),
       upsertChats: records => this.sessionStore.upsertChats(records),
+      removeChats: ids => this.sessionStore.removeChats(ids),
       extractEphemeralDuration: msg => this.sessionStore.extractEphemeralDuration(msg),
       getOnHistoryMessages: () => this.callbacks.onHistoryMessages,
       authPath: this.authPath,
@@ -183,14 +199,18 @@ export class BaileysAdapter implements IWhatsAppEngine {
       logContactEvent: (event, records) => this.events.logContactEvent(event, records),
       handleGroupParticipantsUpdate: event => this.events.handleGroupParticipantsUpdate(event),
       handleGroupsUpdate: updates => this.events.handleGroupsUpdate(updates),
+      handleGroupsUpsert: groups => this.events.handleGroupsUpsert(groups),
       handleGroupJoinRequest: event => this.events.handleGroupJoinRequest(event),
       handleCallEvents: calls => this.events.handleCallEvents(calls),
       handlePresenceUpdate: update => this.events.handlePresenceUpdate(update),
+      fenceStoredWrites: () => this.events.fenceStoredWrites(),
       captureHistoryMessages: messages => this.history.captureHistoryMessages(messages),
       hydrateNames: () => this.history.hydrateNames(),
+      restoreAddressbookSnapshot: () => this.history.restoreAddressbookSnapshot(),
       getOnQRCode: () => this.callbacks.onQRCode,
       getOnReady: () => this.callbacks.onReady,
       getOnDisconnected: () => this.callbacks.onDisconnected,
+      getOnReconnecting: () => this.callbacks.onReconnecting,
       getOnError: () => this.callbacks.onError,
       getOnStateChanged: () => this.callbacks.onStateChanged,
       getOnCredentialTeardownStarted: () => this.callbacks.onCredentialTeardownStarted,
@@ -343,6 +363,10 @@ export class BaileysAdapter implements IWhatsAppEngine {
 
   async unpinMessage(chatId: string, messageId: string): Promise<void> {
     return this.messaging.unpinMessage(chatId, messageId);
+  }
+
+  async clickButton(chatId: string, messageId: string, buttonId: string, text?: string): Promise<MessageResult> {
+    return this.messaging.clickButton(chatId, messageId, buttonId, text);
   }
 
   async editMessage(chatId: string, messageId: string, body: string, mentions?: string[]): Promise<MessageResult> {
@@ -538,7 +562,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
     return this.contacts.clearChatMessages(chatId);
   }
 
-  // ----- Gated: not supported by this minimal slice (no store) -----
+  // ----- Gated: unsupported on Baileys (reasons inline) -----
   /* eslint-disable @typescript-eslint/no-unused-vars */
 
   getMessageReactions(_chatId: string, _messageId: string): Promise<MessageReaction[]> {
@@ -580,9 +604,10 @@ export class BaileysAdapter implements IWhatsAppEngine {
   // WhatsApp Business only — Baileys rejects these on personal accounts. The label must already
   // exist (use getLabels on an engine that lists them); addChatLabel/removeChatLabel associate it
   // with a chat, they do not create/edit the label definition.
-  // Fold @c.us -> @s.whatsapp.net first: chatModify (which both calls wrap) keys the label
-  // app-state index by the RAW jid, so a neutral @c.us would label a phantom chat the phone never
-  // reads — reported as success. Same class of no-op the deleteForMe/star folds fixed.
+  // Resolve to the jid the chat is keyed under first (its lid for a lid-migrated contact, the engine
+  // form for a chat the store does not know): chatModify (which both calls wrap) keys the label
+  // app-state index by the RAW jid, so any other spelling labels a phantom chat the phone never
+  // reads, reported as success.
   /**
    * Labels are a Business-account chat feature and WhatsApp has no concept of labelling a channel.
    * whatsapp-web.js refuses a channel jid outright; this engine forwarded it and answered success
@@ -598,7 +623,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
     this.ensureReady();
     this.assertLabelable(chatId);
     await withQueryDeadline(
-      this.sock!.addChatLabel(this.sessionStore.toEngineJid(chatId), labelId),
+      this.sock!.addChatLabel(this.sessionStore.chatJid(chatId), labelId),
       BAILEYS_QUERY_BUDGET_MS,
       'WhatsApp did not confirm the chat label add in time',
     );
@@ -607,7 +632,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
     this.ensureReady();
     this.assertLabelable(chatId);
     await withQueryDeadline(
-      this.sock!.removeChatLabel(this.sessionStore.toEngineJid(chatId), labelId),
+      this.sock!.removeChatLabel(this.sessionStore.chatJid(chatId), labelId),
       BAILEYS_QUERY_BUDGET_MS,
       'WhatsApp did not confirm the chat label removal in time',
     );
@@ -627,7 +652,9 @@ export class BaileysAdapter implements IWhatsAppEngine {
     this.ensureReady();
     // Unset fields are passed through as undefined rather than stripped: the protobuf encoder skips
     // a field that is `!= null` false, exactly as it skips a missing one (WAProto/index.js,
-    // LabelEditAction.encode), so an omitted name really does leave the stored name alone. Colour 0
+    // LabelEditAction.encode). That does not make the write partial: the patch is an app-state SET
+    // on ['label_edit', id], which replaces the stored action whole, so an omitted name is not kept
+    // (Utils/chat-utils.js builds it with OP.SET and the receiver applies it without a merge). Colour 0
     // is a real WhatsApp colour and survives that check — which is why it must never be tested for
     // truthiness on the way here.
     await withQueryDeadline(
@@ -729,7 +756,14 @@ export class BaileysAdapter implements IWhatsAppEngine {
     return this.catalog.getProduct(productId);
   }
   async sendProduct(chatId: string, productId: string, body?: string): Promise<MessageResult> {
-    const product = await this.catalog.getProduct(productId);
+    const product = await this.catalog.getProduct(productId).catch((error: unknown) => {
+      // Still 403, but no longer an EngineRefusedError: the send breaker counts WhatsApp refusing a
+      // send, and a catalog read it refused says nothing about the account's send standing.
+      if (error instanceof EngineRefusedError) throw new ForbiddenException(error.message);
+      // A lookup that timed out or was throttled failed before the message was handed to WhatsApp.
+      if (error instanceof EngineTransportError) throw new EngineNotSentError(error.message);
+      throw error;
+    });
     if (!product) {
       throw new NotFoundException(`Product ${productId} not found in the session catalog`);
     }
