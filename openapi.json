@@ -6202,6 +6202,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "recover",
+            "required": false,
+            "in": "query",
+            "description": "Explicitly recover this one message from the live engine when stored bytes are missing. Default false; never reads bulk history or marks messages read.",
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -6212,6 +6221,16 @@
                 "schema": {
                   "type": "string",
                   "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "With recover=true, the session is inactive or the targeted audio fails authentication.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -6245,9 +6264,29 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The session is not connected: an engine exists for it but is not `ready`, meaning disconnected, reconnecting, or still initializing, so the request never reached WhatsApp. Wait for `ready` and retry. A session that was never started answers `400` instead, and the session lifecycle routes answer `409` for a conflicting state rather than this. One window answers this while the session still reads `ready`: WhatsApp Web periodically reloads its own page and the engine re-injects into it, and for those few seconds the answer is a `409` naming the reload; retry shortly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The active engine cannot serve this operation. It is part of the engine contract, but the engine currently running has no implementation for it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         },
-        "summary": "Download a message’s stored media",
+        "summary": "Download stored media, with explicit targeted live recovery",
         "tags": [
           "messages"
         ]
@@ -17302,7 +17341,7 @@
             "in": "query",
             "description": "Message type filter",
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/Object"
             }
           },
           {
@@ -24780,6 +24819,10 @@
             "description": "Per-instance config slice passed to the adapter."
           }
         }
+      },
+      "Object": {
+        "type": "object",
+        "properties": {}
       },
       "SearchHitDto": {
         "type": "object",

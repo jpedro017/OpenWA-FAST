@@ -222,3 +222,44 @@ describe('MessageController OpenAPI error responses', () => {
     expect(Object.keys(responses)).toContain('400');
   });
 });
+
+describe('MessageController opt-in targeted media recovery', () => {
+  it.each([undefined, 'false', '0', 'false-ish'])('keeps stored-only behavior for recover=%s', async recover => {
+    const getChatMedia = jest.fn().mockResolvedValue({ buffer: Buffer.from('audio'), mimetype: 'audio/ogg' });
+    const controller = new MessageController(
+      { getChatMedia } as unknown as MessageService,
+      {} as BulkMessageService,
+      new ChatScopeService(),
+    );
+    const on = jest.fn();
+    const res = { set: jest.fn(), on } as unknown as Response;
+    await controller.getChatMedia('session', 'chat', 'message', res, recover);
+    expect(getChatMedia).toHaveBeenCalledWith('session', 'chat', 'message');
+    expect(on).not.toHaveBeenCalled();
+  });
+
+  it.each(['true', '1'])(
+    'requests targeted recovery only for explicit recover=%s and wires disconnect',
+    async recover => {
+      const getChatMedia = jest.fn().mockResolvedValue({ buffer: Buffer.from('audio'), mimetype: 'audio/ogg' });
+      const controller = new MessageController(
+        { getChatMedia } as unknown as MessageService,
+        {} as BulkMessageService,
+        new ChatScopeService(),
+      );
+      let close!: () => void;
+      const res = {
+        set: jest.fn(),
+        on: jest.fn((_event: string, listener: () => void) => {
+          close = listener;
+        }),
+      } as unknown as Response;
+      await controller.getChatMedia('session', 'chat', 'message', res, recover);
+      const options = (getChatMedia.mock.calls as unknown[][])[0][3] as { recover: boolean; signal: AbortSignal };
+      expect(options.recover).toBe(true);
+      expect(options.signal.aborted).toBe(false);
+      close();
+      expect(options.signal.aborted).toBe(true);
+    },
+  );
+});

@@ -12,12 +12,12 @@ import {
   PollInput,
   Quotable,
 } from '../interfaces/whatsapp-engine.interface';
-import { MessageWithReactions, SerializedWid } from '../types/whatsapp-web-js.types';
+import { MessageWithReactions, SerializedWid, readWid } from '../types/whatsapp-web-js.types';
 import { BadRequestException, NotImplementedException } from '@nestjs/common';
 import { MessageNotFoundError } from '../../common/errors/message-not-found.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
 import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
-import { chatKind, userPart } from '../identity/wa-id';
+import { chatKind, userPart, toNeutralJid } from '../identity/wa-id';
 import {
   chatHistoryMediaBudgetBytes,
   coerceDeclaredSize,
@@ -30,6 +30,7 @@ import { EngineNotSupportedError } from '../../common/errors/engine-not-supporte
 import { RecipientUnreachableError } from '../../common/errors/recipient-unreachable.error';
 import { type WwebjsEngineHost, withPage } from './wwebjs-host';
 import { toCapturedPageError } from './wwebjs-lifecycle';
+import { recoverWwebjsAudioMedia } from './wwebjs-native-audio';
 
 /**
  * Map a whatsapp-web.js MessageAck integer to the neutral DeliveryStatus.
@@ -757,6 +758,31 @@ export class WwebjsMessaging {
       });
     }
     return result;
+  }
+
+  async getMessageMedia(
+    chatIds: readonly string[],
+    messageId: string,
+    signal?: AbortSignal,
+  ): Promise<IncomingMessage['media']> {
+    this.host.ensureReady();
+    signal?.throwIfAborted();
+    const message = await this.withPage('getMessageMedia', () => this.client().getMessageById(messageId));
+    signal?.throwIfAborted();
+    if (!message || readWid(message.id) !== messageId) throw new MessageNotFoundError(messageId, chatIds[0] ?? '');
+    const remote = readWid(message.id.remote);
+    if (!remote || !chatIds.some(chatId => toNeutralJid(chatId) === toNeutralJid(remote))) {
+      throw new MessageNotFoundError(messageId, chatIds[0] ?? '');
+    }
+    if (!message.hasMedia || message.type === MessageTypes.REVOKED) return undefined;
+    const downloadAudio = ['audio', 'ptt'].includes(message.type)
+      ? () => recoverWwebjsAudioMedia(message, this.host.config.proxy?.url, signal)
+      : undefined;
+    const media = downloadAudio
+      ? await this.host.capInboundMediaFor(message, undefined, downloadAudio)
+      : await this.host.capInboundMediaFor(message);
+    signal?.throwIfAborted();
+    return media;
   }
 
   async getChatHistory(

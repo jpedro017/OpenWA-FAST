@@ -213,7 +213,8 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       reportIfPageTransportError: (error, context) => this.reportIfPageTransportError(error, context),
       ensureNotChannelRecipient: chatId => this.ensureNotChannelRecipient(chatId),
       getNumberId: number => this.getNumberId(number),
-      capInboundMediaFor: (msg, maxBytesOverride) => this.capInboundMediaFor(msg, maxBytesOverride),
+      capInboundMediaFor: (msg, maxBytesOverride, downloadOverride) =>
+        this.capInboundMediaFor(msg, maxBytesOverride, downloadOverride),
       config: this.config,
       getCallbacks: () => this.callbacks,
     };
@@ -287,6 +288,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   private async capInboundMediaFor(
     msg: Message,
     maxBytesOverride?: number,
+    downloadOverride?: () => Promise<MessageMedia | null | undefined>,
   ): Promise<IncomingMessage['media'] | undefined> {
     if (!isMediaDownloadEnabled()) {
       return declaredOnlyMedia(msg);
@@ -333,13 +335,15 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       // as a rejection, which boundedReady adopts and rethrows past the only exit that builds the marker,
       // leaving every call site to emit with no media field at all. It is the same "no usable media"
       // outcome as the timeout below, so it takes the same null sentinel.
-      const download = msg.downloadMedia().catch((error: unknown) => {
-        this.logger.warn('Inbound media download failed; emitting the omitted marker', {
-          msgId,
-          error: String(error),
+      const download = (downloadOverride ? downloadOverride() : msg.downloadMedia())
+        .then(media => media ?? null)
+        .catch((error: unknown) => {
+          this.logger.warn('Inbound media download failed; emitting the omitted marker', {
+            msgId,
+            error: String(error),
+          });
+          return null;
         });
-        return null;
-      });
       resolveBounded(
         withInboundDownloadTimeout(download, inboundMediaTimeoutMs(), () =>
           this.logger.warn(
@@ -716,6 +720,14 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   }
 
   // ========== Gap Quick Wins Implementation ==========
+
+  getMessageMedia(
+    chatIds: readonly string[],
+    messageId: string,
+    signal?: AbortSignal,
+  ): Promise<IncomingMessage['media']> {
+    return this.messaging.getMessageMedia(chatIds, messageId, signal);
+  }
 
   getChatHistory(
     chatId: string,

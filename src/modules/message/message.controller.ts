@@ -660,10 +660,17 @@ export class MessageController {
   // declaration order — Nest/Express match on segment count first.
   @ChatScoped('fenced')
   @Get(':chatId/:messageId/media')
-  @ApiOperation({ summary: 'Download a message’s stored media' })
+  @ApiOperation({ summary: 'Download stored media, with explicit targeted live recovery' })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'chatId', description: 'Chat ID containing the message' })
   @ApiParam({ name: 'messageId', description: 'WhatsApp message ID whose media to download' })
+  @ApiQuery({
+    name: 'recover',
+    required: false,
+    type: Boolean,
+    description:
+      'Explicitly recover this one message from the live engine when stored bytes are missing. Default false; never reads bulk history or marks messages read.',
+  })
   @ApiResponse({
     status: 200,
     description:
@@ -678,13 +685,25 @@ export class MessageController {
       'payload was over the cap when it was stored (size-only marker), it was a URL-based API send ' +
       '(those bytes are never stored), or the message is not in this gateway’s history.',
   })
+  @ApiResponse({
+    status: 400,
+    description: 'With recover=true, the session is inactive or the targeted audio fails authentication.',
+  })
+  @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
+  @ApiResponse({ status: 501, description: ENGINE_NOT_SUPPORTED_501 })
   async getChatMedia(
     @Param('sessionId') sessionId: string,
     @Param('chatId') chatId: string,
     @Param('messageId') messageId: string,
     @Res({ passthrough: true }) res: Response,
+    @Query('recover') recover?: string,
   ): Promise<StreamableFile> {
-    const { buffer, mimetype } = await this.messageService.getChatMedia(sessionId, chatId, messageId);
+    const requestedRecovery = recover === 'true' || recover === '1';
+    const abort = new AbortController();
+    if (requestedRecovery) res.on('close', () => abort.abort());
+    const { buffer, mimetype } = requestedRecovery
+      ? await this.messageService.getChatMedia(sessionId, chatId, messageId, { recover: true, signal: abort.signal })
+      : await this.messageService.getChatMedia(sessionId, chatId, messageId);
     // attachment + nosniff together: the mimetype is already reduced to an inert set, and forcing a
     // download means even a mistake there cannot render as active content on the API origin. The
     // dashboard renders chat media from the inline copy, so nothing depends on inline display here.

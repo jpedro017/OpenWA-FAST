@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { EngineRegistry } from '../../engine/engine-registry.service';
 import { MessageProjector } from '../session/message-projector.service';
 import { SendTextMessageDto, SendMediaMessageDto, SendAudioMessageDto, MessageResponseDto } from './dto';
@@ -18,6 +18,7 @@ import { MessageSendService, SaveOutgoingMessageData } from './message-send.serv
 // Type-only: the module binds this class to PLUGIN_MESSAGE_PORT with a `useExisting` alias, which
 // TypeScript does not check, so `implements` is what keeps the two in step.
 import type { PluginMessagePort } from '../../core/plugins/plugin-host-ports';
+import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 
 // Re-exported for existing importers (bulk send shares the rendered-template cap with the send path).
 export { DEFAULT_TEMPLATE_RENDER_MAX_CHARS } from './message-send.service';
@@ -521,6 +522,7 @@ export class MessageService implements PluginMessagePort {
     sessionId: string,
     chatId: string,
     messageId: string,
+    options?: { recover?: boolean; signal?: AbortSignal },
   ): Promise<{ buffer: Buffer; mimetype: string }> {
     const chatIds = await this.resolveJidCandidates(chatId);
     const media = await this.chatMediaArchive?.getMedia(sessionId, chatIds, messageId);
@@ -557,9 +559,40 @@ export class MessageService implements PluginMessagePort {
       // base64 would serve garbage, so report it as absent. Same discriminator as the send path.
       /^https?:\/\//i.test(inline.data)
     ) {
+      if (options?.recover && row && row.type !== 'revoked') {
+        return this.recoverChatMedia(sessionId, chatIds, row, options.signal);
+      }
       throw new NotFoundException('No media stored for this message');
     }
     return { buffer: Buffer.from(inline.data, 'base64'), mimetype: inertMimetype(inline.mimetype) };
+  }
+
+  /** Opt-in read only: no history sync, projector, hooks, read receipts or AI dispatch. */
+  private async recoverChatMedia(
+    sessionId: string,
+    chatIds: string[],
+    row: Message,
+    signal?: AbortSignal,
+  ): Promise<{ buffer: Buffer; mimetype: string }> {
+    const engine = this.getEngine(sessionId);
+    if (!engine.getMessageMedia) throw new EngineNotSupportedError('getMessageMedia');
+    const media = await engine.getMessageMedia(chatIds, row.waMessageId, signal);
+    signal?.throwIfAborted();
+    if (!media?.data || media.omitted || !media.mimetype || MEDIA_URL_POINTER.test(media.data)) {
+      throw new NotFoundException('Media unavailable for this message');
+    }
+    const readCurrent = () =>
+      this.messageRepository.findOne({
+        where: { id: row.id, sessionId, chatId: In(chatIds), waMessageId: row.waMessageId, type: Not('revoked') },
+      });
+    const current = await readCurrent();
+    if (!current) throw new NotFoundException('No media stored for this message');
+    // The existing archive writer is opt-in and CASes only file pointers on a
+    // non-revoked row. Do not replace metadata, previews or the stored timeline.
+    await this.chatMediaArchive?.archive({ ...current, metadata: { media } });
+    signal?.throwIfAborted();
+    if (!(await readCurrent())) throw new NotFoundException('No media stored for this message');
+    return { buffer: Buffer.from(media.data, 'base64'), mimetype: inertMimetype(media.mimetype) };
   }
 
   /** Maximum messages a single getChatHistory call may request from the engine. */

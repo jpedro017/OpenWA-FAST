@@ -197,6 +197,12 @@ export const CURATED_CAPABILITY_EXCEPTIONS: Record<string, MethodCapability> = {
     evidence:
       'baileys only fetchMessageHistory(count,oldestKey,oldestTs) (Socket/business.d.ts:25) returns a sync-token string; messages arrive later via messaging-history.set event — no synchronous per-chat fetchMessages; wwjs Chat.fetchMessages (Chat.js)',
   },
+  getMessageMedia: {
+    wwjs: { status: 'supported' },
+    baileys: { status: 'not-available', rootCause: 'adapter-gap' },
+    evidence:
+      'wwjs Client.getMessageById followed by the bounded Message.downloadMedia path; Baileys downloadMediaMessage exists but targeted retrieval from its message store is not wired for this opt-in read',
+  },
   getChatLabels: {
     wwjs: { status: 'supported' },
     baileys: { status: 'not-available', rootCause: 'library-limitation' },

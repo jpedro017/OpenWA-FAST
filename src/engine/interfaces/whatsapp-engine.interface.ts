@@ -1098,6 +1098,17 @@ export interface MessageOperationsCapability {
  */
 export interface ChatHistoryCapability {
   /**
+   * Explicit recovery of ONE message's media. Callers supply the authorized chat's
+   * equivalent ids; adapters must fence the message's actual chat before download.
+   * Optional for older engine plugins; absence means the operation is unavailable.
+   */
+  getMessageMedia?(
+    chatIds: readonly string[],
+    messageId: string,
+    signal?: AbortSignal,
+  ): Promise<IncomingMessage['media']>;
+
+  /**
    * Read a chat's most recent `limit` messages, returned oldest first (ascending timestamp). When
    * `includeMedia` downloads blobs, an optional `mediaMaxBytes` tightens the declared-size pre-gate
    * below the global MEDIA_DOWNLOAD_MAX_BYTES —

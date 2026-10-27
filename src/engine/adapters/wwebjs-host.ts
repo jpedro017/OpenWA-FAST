@@ -1,4 +1,4 @@
-import { type Client, type Message } from 'whatsapp-web.js';
+import { type Client, type Message, type MessageMedia } from 'whatsapp-web.js';
 import { type EngineEventCallbacks, type IncomingMessage } from '../interfaces/whatsapp-engine.interface';
 import { type createLogger } from '../../common/services/logger.service';
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
@@ -20,7 +20,11 @@ export interface WwebjsEngineHost {
   reportIfPageTransportError(error: unknown, context: string): void;
   ensureNotChannelRecipient(chatId: string): void;
   getNumberId(number: string): Promise<string | null>;
-  capInboundMediaFor(msg: Message, maxBytesOverride?: number): Promise<IncomingMessage['media'] | undefined>;
+  capInboundMediaFor(
+    msg: Message,
+    maxBytesOverride?: number,
+    downloadOverride?: () => Promise<MessageMedia | null | undefined>,
+  ): Promise<IncomingMessage['media'] | undefined>;
   readonly config: WhatsAppWebJsConfig;
   /** Live callbacks bag — read per event, since initialize() installs it after delegates are built. */
   getCallbacks(): EngineEventCallbacks;

@@ -583,6 +583,13 @@ export class BaileysAdapter implements IWhatsAppEngine {
   votePoll(_chatId: string, _pollMessageId: string, _options: string[]): Promise<void> {
     return this.unsupported('votePoll');
   }
+  getMessageMedia(
+    _chatIds: readonly string[],
+    _messageId: string,
+    _signal?: AbortSignal,
+  ): Promise<IncomingMessage['media']> {
+    return this.unsupported('getMessageMedia');
+  }
   getChatHistory(
     _chatId: string,
     _limit?: number,
