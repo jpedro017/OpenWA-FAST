@@ -238,6 +238,20 @@ export interface SessionStatsOverview {
 // ── Message ───────────────────────────────────────────────────────
 
 /** Returned by every send operation. */
+/** Persistent identity for one text send, including retries after a lost HTTP response. */
+export interface IdempotentTextRequest extends SendTextRequest {
+  requestId: string;
+}
+
+export interface IdempotentTextProtocol {
+  protocol: 'openwa-idempotent-text-v1';
+  receipt?: { requestId: string; messageId: string; timestamp: number } | null;
+}
+
+export type IdempotentTextResult =
+  | { status: 'sent'; messageId: string; timestamp: number }
+  | { status: 'pending' | 'ambiguous' | 'refused'; error: string };
+
 export interface MessageResponse {
   messageId: string;
   /** Unix timestamp in seconds. */

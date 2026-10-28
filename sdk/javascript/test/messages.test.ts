@@ -7,6 +7,20 @@ function client(t: MockTransport): OpenWAClient {
 }
 
 describe('MessagesResource — exact paths', () => {
+  it('preserves the idempotent identity and reads an echo receipt without POST', async () => {
+    const t = new MockTransport()
+      .on('POST', /send-text-idempotent$/, { body: { status: 'sent', messageId: 'wa1', timestamp: 1 } })
+      .on('GET', /send-text-idempotent$/, { body: { protocol: 'openwa-idempotent-text-v1', receipt: { requestId: 'turn1', messageId: 'wa1', timestamp: 1 } } });
+    const c = client(t);
+    const body = { requestId: 'turn1', chatId: 'a@c.us', text: 'hi', quotedMessageId: 'quoted' };
+    expect(await c.messages.sendTextIdempotent('a/b', body)).toEqual({ status: 'sent', messageId: 'wa1', timestamp: 1 });
+    expect(t.lastCall!.url).toBe('http://x/api/sessions/a%2Fb/messages/send-text-idempotent');
+    expect(t.lastCall!.body).toEqual(body);
+    const result = await c.messages.textIdempotency('a/b', 'a@c.us', 'wa1');
+    expect(new URL(t.lastCall!.url).searchParams.get('messageId')).toBe('wa1');
+    expect(result.receipt?.requestId).toBe('turn1');
+  });
+
   it('sendText posts to /messages/send-text (NOT /messages/text)', async () => {
     const t = new MockTransport().on('POST', /send-text$/, { body: { messageId: 'm1', timestamp: 1 } });
     await client(t).messages.sendText('s1', { chatId: 'a@c.us', text: 'hi' });

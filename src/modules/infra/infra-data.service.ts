@@ -780,6 +780,8 @@ export class InfraDataService {
         await queryRunner.query('DELETE FROM webhooks');
         await clearTable('messages');
         await clearTable('message_batches');
+        // outbound_text_requests is deliberately retained. Its importer merges archived keys;
+        // replacing them from an older snapshot would authorize a previously attempted send again.
         await clearTable('templates');
         await clearTable('baileys_stored_messages');
         // lid_mappings is not a FK to sessions, so the sessions DELETE below won't clear it; clear it

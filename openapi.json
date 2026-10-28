@@ -7006,6 +7006,164 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/messages/send-text-idempotent": {
+      "get": {
+        "operationId": "IdempotentTextController_protocol",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chatId",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "messageId",
+            "required": false,
+            "in": "query",
+            "description": "Read a confirmed request receipt for this provider message ID within the selected session and chat.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdempotentTextProtocolDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The API key is missing, unknown, revoked, or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key's role, session or chat scope, or IP allow-list does not allow this operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Check the durable idempotent text-send protocol without sending a message",
+        "tags": [
+          "messages"
+        ]
+      },
+      "post": {
+        "operationId": "IdempotentTextController_send",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdempotentTextMessageDto"
+              },
+              "examples": {
+                "minimal": {
+                  "value": {
+                    "requestId": "caller-stable-send-identity",
+                    "chatId": "628123456789@c.us",
+                    "text": "Hello from OpenWA!"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdempotentTextResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is malformed, fails validation, or carries a field the DTO does not declare",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The API key is missing, unknown, revoked, or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key's role, session or chat scope, or IP allow-list does not allow this operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The requestId was previously used with a different payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Send text once, or read the saved outcome for the same requestId and payload",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/templates": {
       "post": {
         "operationId": "TemplateController_create",
@@ -17341,7 +17499,7 @@
             "in": "query",
             "description": "Message type filter",
             "schema": {
-              "$ref": "#/components/schemas/Object"
+              "type": "string"
             }
           },
           {
@@ -20815,6 +20973,135 @@
           "statusUrl"
         ]
       },
+      "IdempotentTextReceiptDto": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "number",
+            "description": "Confirmed provider timestamp in epoch seconds."
+          }
+        },
+        "required": [
+          "requestId",
+          "messageId",
+          "timestamp"
+        ]
+      },
+      "IdempotentTextProtocolDto": {
+        "type": "object",
+        "properties": {
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "openwa-idempotent-text-v1"
+            ]
+          },
+          "receipt": {
+            "nullable": true,
+            "description": "Present only when looking up messageId, and null when no confirmed request matches this session and chat.",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/IdempotentTextReceiptDto"
+              }
+            ]
+          }
+        },
+        "required": [
+          "protocol"
+        ]
+      },
+      "IdempotentTextMessageDto": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string",
+            "description": "WhatsApp chat ID (phone@c.us for individual, groupId@g.us for groups)",
+            "example": "628123456789@c.us"
+          },
+          "text": {
+            "type": "string",
+            "description": "Text message content",
+            "example": "Hello from OpenWA!",
+            "maxLength": 4096
+          },
+          "mentions": {
+            "description": "WIDs to @mention (e.g. [\"62811@c.us\"]). The text/caption must also contain the @<number> token.",
+            "example": [
+              "628123456789@c.us"
+            ],
+            "maxItems": 1024,
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "type": "array"
+          },
+          "linkPreview": {
+            "type": "boolean",
+            "description": "Controls the URL preview, and the engines differ. On whatsapp-web.js WhatsApp Web builds one by default and `false` suppresses it. On Baileys previews are OPT-IN: `true` asks the gateway to fetch the page and attach one, while unset or `false` sends none — generating a preview is a blocking outbound fetch per URL in the text, so it is never done unless asked for.",
+            "example": false
+          },
+          "customLinkPreview": {
+            "description": "Attach a preview you supply yourself, instead of one fetched from the URL. Nothing is fetched for these, so a preview can be attached even for a URL this server cannot reach. **Baileys only** — whatsapp-web.js takes a boolean and answers `501`. Cannot be combined with `linkPreview: false`, which asks for the opposite.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CustomLinkPreviewDto"
+              }
+            ]
+          },
+          "quotedMessageId": {
+            "type": "string",
+            "description": "Quote an earlier message, turning this send into a reply. The id is engine-specific: whatsapp-web.js matches the serialized message id, Baileys matches the raw message key id and can only quote a message it has already stored. An id that cannot be resolved fails the send rather than delivering it unquoted.",
+            "example": "true_628123456789@c.us_3EB0ABCD"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Persistent caller-generated send identity. Never reuse it for another payload.",
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "chatId",
+          "text",
+          "requestId"
+        ]
+      },
+      "IdempotentTextResultDto": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "sent",
+              "pending",
+              "ambiguous",
+              "refused"
+            ]
+          },
+          "messageId": {
+            "type": "string",
+            "description": "Confirmed provider message identity; present only for sent."
+          },
+          "timestamp": {
+            "type": "number",
+            "description": "Provider timestamp in epoch seconds; present only for sent."
+          },
+          "error": {
+            "type": "string",
+            "description": "Why the send cannot currently be confirmed. No automatic engine replay occurs."
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
       "CreateTemplateDto": {
         "type": "object",
         "properties": {
@@ -21942,6 +22229,12 @@
               "type": "object"
             }
           },
+          "outboundTextRequests": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
           "lidMappings": {
             "type": "array",
             "items": {
@@ -22010,6 +22303,7 @@
           "messageBatches",
           "templates",
           "baileysStoredMessages",
+          "outboundTextRequests",
           "lidMappings",
           "chatStates",
           "pluginInstances",
@@ -22048,6 +22342,10 @@
           "baileysStoredMessages": {
             "type": "number",
             "example": 512
+          },
+          "outboundTextRequests": {
+            "type": "number",
+            "example": 0
           },
           "lidMappings": {
             "type": "number",
@@ -22097,6 +22395,7 @@
           "messageBatches",
           "templates",
           "baileysStoredMessages",
+          "outboundTextRequests",
           "lidMappings",
           "chatStates",
           "pluginInstances",
@@ -22183,7 +22482,7 @@
         "properties": {
           "tables": {
             "type": "object",
-            "description": "Every one of the 16 migration tables is emptied before the restore runs, so a key omitted here is restored EMPTY rather than left untouched. Post the whole GET /api/infra/export-data payload, not a hand-built subset.",
+            "description": "Every one of the 17 migration tables is restored. Other than outboundTextRequests, tables are emptied first, so an omitted key is restored EMPTY. Outbound request keys are merged without deleting known keys, preventing duplicate sends after an older snapshot is restored. Post the whole GET /api/infra/export-data payload, not a hand-built subset.",
             "properties": {
               "sessions": {
                 "type": "array"
@@ -22201,6 +22500,9 @@
                 "type": "array"
               },
               "baileysStoredMessages": {
+                "type": "array"
+              },
+              "outboundTextRequests": {
                 "type": "array"
               },
               "lidMappings": {
@@ -24819,10 +25121,6 @@
             "description": "Per-instance config slice passed to the adapter."
           }
         }
-      },
-      "Object": {
-        "type": "object",
-        "properties": {}
       },
       "SearchHitDto": {
         "type": "object",

@@ -11,6 +11,32 @@ type MessageResponse struct {
 	Timestamp int64  `json:"timestamp"`
 }
 
+// IdempotentTextProtocol identifies support without sending a message.
+type IdempotentTextProtocol struct {
+	Protocol string                 `json:"protocol"`
+	Receipt  *IdempotentTextReceipt `json:"receipt,omitempty"`
+}
+
+type IdempotentTextReceipt struct {
+	RequestID string `json:"requestId"`
+	MessageID string `json:"messageId"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// IdempotentTextResult confirms a send only when Status is sent.
+type IdempotentTextResult struct {
+	Status    string `json:"status"`
+	MessageID string `json:"messageId,omitempty"`
+	Timestamp *int64 `json:"timestamp,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// IdempotentTextRequest keeps the same identity and payload across retries.
+type IdempotentTextRequest struct {
+	SendTextRequest
+	RequestID string `json:"requestId"`
+}
+
 // SendTextRequest sends a plain text message.
 type SendTextRequest struct {
 	ChatID string `json:"chatId"`

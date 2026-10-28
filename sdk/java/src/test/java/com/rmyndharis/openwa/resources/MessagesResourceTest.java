@@ -29,6 +29,7 @@ import com.rmyndharis.openwa.model.SendAudioRequest;
 import com.rmyndharis.openwa.model.SendPollRequest;
 import com.rmyndharis.openwa.model.SendTemplateRequest;
 import com.rmyndharis.openwa.model.SendTextRequest;
+import com.rmyndharis.openwa.model.IdempotentTextRequest;
 import com.rmyndharis.openwa.model.StarMessageRequest;
 import com.rmyndharis.openwa.model.VotePollRequest;
 import com.rmyndharis.openwa.model.UnpinMessageRequest;
@@ -44,6 +45,20 @@ class MessagesResourceTest {
         ClientConfig.builder().baseUrl("http://h").apiKey("k").transport(tx).build());
 
     private static final String MSG = "{\"messageId\":\"m1\",\"timestamp\":123}";
+
+    @Test
+    void idempotentSendAndReadonlyReceiptKeepTheirIdentity() {
+        tx.respond(200, "{\"status\":\"sent\",\"messageId\":\"wa1\",\"timestamp\":1}");
+        var result = client.messages.sendTextIdempotent("s", new IdempotentTextRequest("turn1", new SendTextRequest("628@c.us", "hi")));
+        assertEquals("wa1", result.messageId());
+        assertTrue(tx.lastRequest().body().contains("\"requestId\":\"turn1\""));
+        assertEquals("http://h/api/sessions/s/messages/send-text-idempotent", tx.lastRequest().url());
+        tx.respond(200, "{\"protocol\":\"openwa-idempotent-text-v1\",\"receipt\":{\"requestId\":\"turn1\",\"messageId\":\"wa1\",\"timestamp\":1}}");
+        var protocol = client.messages.textIdempotency("s", "628@c.us", "wa1");
+        assertEquals(HttpMethod.GET, tx.lastRequest().method());
+        assertTrue(tx.lastRequest().url().contains("messageId=wa1"));
+        assertEquals("turn1", protocol.receipt().requestId());
+    }
 
     @Test
     void listHitsMessagesPathWithQuery() {

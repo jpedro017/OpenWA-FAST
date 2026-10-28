@@ -85,6 +85,19 @@ export interface MessageBatchRow {
   completed_at: string | null;
 }
 
+/** Durable outbound deduplication survives message retention and backup restoration. */
+export interface OutboundTextRequestRow {
+  sessionId: string;
+  requestId: string;
+  chatId: string;
+  payloadHash: string;
+  status: string;
+  messageId: string | null;
+  timestamp: number | string | null;
+  error: string | null;
+  createdAt: string;
+}
+
 // templates + baileys_stored_messages both FK sessions ON DELETE CASCADE, so import's
 // `DELETE FROM sessions` wipes them; they must be exported and re-inserted or the documented
 // backup flow loses them permanently.
@@ -261,6 +274,7 @@ export interface MigrationTables {
   webhooks: WebhookRow[];
   messages: MessageRow[];
   messageBatches: MessageBatchRow[];
+  outboundTextRequests: OutboundTextRequestRow[];
   templates: TemplateRow[];
   baileysStoredMessages: BaileysStoredMessageRow[];
   lidMappings: LidMappingRow[];

@@ -26,6 +26,9 @@ from ..types import (
     MessageHistoryQuery,
     MessageListResponse,
     MessageResponse,
+    IdempotentTextProtocol,
+    IdempotentTextResult,
+    IdempotentTextRequest,
     ReactionRecord,
     ReactMessageRequest,
     ReplyMessageRequest,
@@ -57,6 +60,13 @@ class MessagesResource:
 
     def send_image(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
         return self._send_media(session_id, "send-image", body)
+
+    def text_idempotency(self, session_id: str, chat_id: str, message_id: str | None = None) -> IdempotentTextProtocol:
+        return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/messages/send-text-idempotent", query={"chatId": chat_id, "messageId": message_id})
+
+    def send_text_idempotent(self, session_id: str, body: IdempotentTextRequest) -> IdempotentTextResult:
+        """Keep the identity and entire payload unchanged when recovering a lost response."""
+        return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/messages/send-text-idempotent", body=body)
 
     def send_video(self, session_id: str, body: SendMediaRequest) -> MessageResponse:
         return self._send_media(session_id, "send-video", body)

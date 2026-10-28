@@ -31,6 +31,7 @@ import { Session, SessionStatus } from '../session/entities/session.entity';
 import { Webhook } from '../webhook/entities/webhook.entity';
 import { Message, MessageDirection, MessageStatus } from '../message/entities/message.entity';
 import { MessageBatch, BatchStatus } from '../message/entities/message-batch.entity';
+import { OutboundTextRequest } from '../message/entities/outbound-text-request.entity';
 import { Template } from '../template/entities/template.entity';
 import { BaileysStoredMessage } from '../../engine/adapters/baileys-stored-message.entity';
 import { LidMapping } from '../../engine/identity/lid-mapping.entity';
@@ -73,6 +74,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
         Webhook,
         Message,
         MessageBatch,
+        OutboundTextRequest,
         Template,
         BaileysStoredMessage,
         LidMapping,
@@ -94,6 +96,38 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
 
   afterEach(async () => {
     await ds.destroy();
+  });
+
+  it('exports send identities and merges an older backup without forgetting newer or pending requests', async () => {
+    const repo = ds.getRepository(OutboundTextRequest);
+    const identity = { sessionId: 'session-1', requestId: 'sent-request' };
+    await repo.insert({
+      ...identity,
+      chatId: '5511999999999@c.us',
+      payloadHash: 'hash-1',
+      status: 'sent',
+      messageId: 'confirmed-id',
+      timestamp: 1793192400,
+    });
+    const archive = await controller.exportData();
+    expect(archive.counts.outboundTextRequests).toBe(1);
+    await repo.insert({
+      ...identity,
+      requestId: 'newer-pending',
+      status: 'pending',
+      chatId: '5511888888888@c.us',
+      payloadHash: 'hash-2',
+    });
+    await controller.importData({ tables: archive.tables });
+    expect(await repo.count()).toBe(2);
+    expect(await repo.findOneByOrFail(identity)).toMatchObject({ status: 'sent', messageId: 'confirmed-id' });
+    expect(await repo.findOneByOrFail({ ...identity, requestId: 'newer-pending' })).toMatchObject({
+      status: 'pending',
+    });
+    await repo.delete(identity);
+    await controller.importData({ tables: archive.tables });
+    expect(await repo.findOneByOrFail(identity)).toMatchObject({ status: 'sent', messageId: 'confirmed-id' });
+    expect(await repo.count()).toBe(2);
   });
 
   const seedSession = (id: string) =>
@@ -1471,6 +1505,7 @@ describe('InfraDataController.import/export preserves every data-DB table', () =
         Webhook,
         Message,
         MessageBatch,
+        OutboundTextRequest,
         Template,
         BaileysStoredMessage,
         LidMapping,
@@ -1824,6 +1859,7 @@ describe('InfraDataController audit trail — import emits only on a committed r
         Webhook,
         Message,
         MessageBatch,
+        OutboundTextRequest,
         Template,
         BaileysStoredMessage,
         LidMapping,
@@ -2122,6 +2158,7 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
         Webhook,
         Message,
         MessageBatch,
+        OutboundTextRequest,
         Template,
         BaileysStoredMessage,
         LidMapping,
@@ -2857,6 +2894,7 @@ describe('InfraDataController.importData re-syncs plugin instance bindings', () 
         Webhook,
         Message,
         MessageBatch,
+        OutboundTextRequest,
         Template,
         BaileysStoredMessage,
         LidMapping,

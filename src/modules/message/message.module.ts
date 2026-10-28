@@ -15,18 +15,22 @@ import { Session } from '../session/entities/session.entity';
 import { SendPacingService } from './send-pacing.service';
 import { MessageBatch } from './entities/message-batch.entity';
 import { PLUGIN_MESSAGE_PORT } from '../../core/plugins/plugin-host-ports';
+import { OutboundTextRequest } from './entities/outbound-text-request.entity';
+import { IdempotentTextService } from './idempotent-text.service';
+import { IdempotentTextController } from './idempotent-text.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Message, MessageBatch, Session], 'data'),
+    TypeOrmModule.forFeature([Message, MessageBatch, Session, OutboundTextRequest], 'data'),
     SessionModule,
     TemplateModule,
     ChatMediaModule,
   ],
-  controllers: [MessageController],
+  controllers: [MessageController, IdempotentTextController],
   providers: [
     MessageService,
     MessageSendService,
+    IdempotentTextService,
     BulkMessageService,
     MessageTypeBackfillService,
     PendingMessageReaperService,

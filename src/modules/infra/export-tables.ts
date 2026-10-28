@@ -264,6 +264,10 @@ export const EXPORT_TABLES: AnyExportTable[] = [
     sessionFk: true,
   }),
 
+  // Unlike history, these keys must survive retention and restores of older snapshots. The
+  // importer merges archived keys without deleting keys this instance already knows.
+  defineExportTable({ key: 'outboundTextRequests', table: 'outbound_text_requests', optional: true }),
+
   // The persisted lid->phone resolution cache. Not a FK to sessions (provenance only), so the
   // import's `DELETE FROM sessions` never clears it — it must be exported + re-inserted explicitly
   // or a backup→restore into a fresh DB loses the whole cache (it self-heals, but lossily).

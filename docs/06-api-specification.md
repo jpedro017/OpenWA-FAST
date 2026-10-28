@@ -1663,6 +1663,62 @@ Two consequences worth knowing: a paced-out send fires **no** `message:sending` 
 `docs/19-plugin-architecture.md`), and refusals are counted in the `openwa_send_pacing_refusals_total`
 Prometheus counter, labelled by rule.
 
+#### GET /api/sessions/:sessionId/messages/send-text-idempotent?chatId=...
+
+Checks support for durable text-send identity without sending a message. Requires an API key,
+the selected session in its scope, and a non-blank `chatId` in its chat scope. Returns HTTP 200:
+
+```json
+{ "protocol": "openwa-idempotent-text-v1" }
+```
+
+Add optional `messageId` to read a confirmed API-send receipt without reserving or sending anything.
+The lookup is restricted to the exact session, chat, provider message ID, and `sent` state:
+
+```json
+{ "protocol": "openwa-idempotent-text-v1", "receipt": { "requestId": "caller-stable-send-identity", "messageId": "true_628123456789@c.us_ABC", "timestamp": 1738494000 } }
+```
+
+`receipt` is null when no confirmed request matches. Absence is not proof that the message was composed
+by a human: an API send may still be finishing or reconciling its receipt. Callers must validate the
+returned request identity against their own conversation journal before attributing an outgoing echo.
+
+#### POST /api/sessions/:sessionId/messages/send-text-idempotent
+
+**Auth:** API key (OPERATOR), scoped to the selected session and body `chatId`.
+Accepts every `SendTextMessageDto` field below plus a required, non-blank `requestId`
+of at most 200 characters. Generate the identity once for one intended send and persist it
+before the first POST. The server reserves `(sessionId, requestId)` atomically before entering
+the existing text-send path. Only the winner can call that path; concurrent and later calls
+read the saved outcome. Reusing the identity with different content or a different chat is HTTP 409.
+
+```json
+{ "requestId": "caller-stable-send-identity", "chatId": "628123456789@c.us", "text": "Hello from OpenWA!" }
+```
+
+HTTP 200 carries either a confirmed receipt or the unresolved state:
+
+```json
+{ "status": "sent", "messageId": "true_628123456789@c.us_ABC", "timestamp": 1738494000 }
+```
+
+```json
+{ "status": "pending", "error": "The original send has no confirmed receipt and will not be executed again." }
+```
+
+`pending` means the original owner has not persisted a final outcome. Retry the **same POST with the
+same identity and payload** to read its eventual receipt, including after a proxy 502 or a lost HTTP
+response. If no original request reached the gateway, that retry can win the first reservation.
+`ambiguous` means the engine may have accepted the message but its outcome is unconfirmed;
+`refused` is reserved for a confirmed permanent refusal. Neither permits a new automatic send.
+The current implementation conservatively records errors from the canonical send path as ambiguous.
+
+Reservations have no automatic expiry and survive message retention, restarts, and backup import.
+A crash after the engine accepts a message but before its receipt is persisted can leave a request
+pending indefinitely. It requires operator reconciliation; the gateway never re-enters the engine
+for that identity. Do not switch to a new identity or the legacy route to recover an uncertain send.
+The older `send-text` endpoint below retains its existing behavior.
+
 #### POST /api/sessions/:sessionId/messages/send-text
 
 Send a plain text message.
@@ -5664,7 +5720,7 @@ Export every row of the 16 migration tables from the Data DB as JSON. Read-only,
 >
 > This bounds the media, not the export — a large enough text-only history still exceeds the import limit, because every row costs a few hundred bytes of scaffolding whatever was said. For a backup that keeps everything, use `scripts/backup.sh`: it snapshots the database file itself (and `pg_dump`s Postgres), so inline media rides along regardless of this budget.
 
-The migration set (`MigrationTables`) is, in payload-key order: `sessions`, `webhooks`, `messages`, `messageBatches`, `templates`, `baileysStoredMessages`, `lidMappings`, `chatStates`, `pluginInstances`, `conversationMappings`, `ingressEvents`, `webhookDeliveryFailures`, `webhookOutboxEvents`, `integrationDeliveryFailures`, `statusUpdates`, `automationRules`.
+The migration set (`MigrationTables`) is, in payload-key order: `sessions`, `webhooks`, `messages`, `messageBatches`, `templates`, `baileysStoredMessages`, `outboundTextRequests`, `lidMappings`, `chatStates`, `pluginInstances`, `conversationMappings`, `ingressEvents`, `webhookDeliveryFailures`, `webhookOutboxEvents`, `integrationDeliveryFailures`, `statusUpdates`, `automationRules`.
 
 **Response** `200`
 
@@ -5692,6 +5748,7 @@ The migration set (`MigrationTables`) is, in payload-key order: `sessions`, `web
     "webhooks": [],
     "messages": [],
     "messageBatches": [],
+    "outboundTextRequests": [],
     "templates": [],
     "baileysStoredMessages": [],
     "lidMappings": [],
@@ -5710,6 +5767,7 @@ The migration set (`MigrationTables`) is, in payload-key order: `sessions`, `web
     "webhooks": 0,
     "messages": 0,
     "messageBatches": 0,
+    "outboundTextRequests": 0,
     "templates": 0,
     "baileysStoredMessages": 0,
     "lidMappings": 0,
@@ -5740,23 +5798,24 @@ Rows are raw DB column shapes (e.g. `messageBatches` rows use snake_case columns
 
 #### POST /api/infra/import-data
 
-Replace all Data DB rows with the supplied export. **Destructive and transactional (all-or-nothing).**
+Restore the Data DB from the supplied export. **Destructive and transactional (all-or-nothing).** Outbound text request identities are merged conservatively so a restore cannot authorize an already attempted send again.
 
-> **The replace covers all 16 migration tables, not just the ones you send.** Inside the transaction every table in the migration set is emptied first and only then re-populated from the payload, so a table you omit ends up **empty**, not untouched. Always restore a payload produced by `GET /api/infra/export-data` of the same or a newer build — a hand-built body carrying only a subset silently wipes the rest.
+> **The restore covers all 17 migration tables, not just the ones you send.** All except `outboundTextRequests` are emptied first and re-populated from the payload, so omitting one of those tables leaves it **empty**. Outbound request identities are merged without deleting known keys; a local key wins over an archived key. Always restore a payload produced by `GET /api/infra/export-data` of the same or a newer build.
 
 **Auth:** API key (ADMIN)
 
 **Request body** — `ImportDataDto`. Post the whole export file: alongside `tables`, `force` and `stopOrphans`, the DTO accepts and ignores the export's `exportedAt`, `dataDbType`, `counts`, `skippedTables` and `omittedInlineMedia`. Any other property is rejected with `400`.
 
-| Field                         | Type                | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ----------------------------- | ------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tables`                      | object              | Yes      | Container of per-table row arrays, keyed exactly as the export's `tables`. Absent, `null` or not an object is rejected `400` before the restore runs                                                                                                                                                                                                                                                                                                                              |
-| `tables.sessions`             | `SessionRow[]`      | No       | Inserted first; a row whose `id` or `name` is not a safe directory name refuses the whole restore before any engine is stopped or the transaction opens (`imported:false`, the row named in `warnings`; see the orphan-engine pre-flight below). An ACTIVE status in the backup (`ready`, `initializing`, ...) describes the source host's engines: restored as `disconnected` (a notice counts them), unless the session is held by a live peer whose claim the import preserves |
-| `tables.webhooks`             | `WebhookRow[]`      | No       | Export rows omit `secret`/`headers`; an absent key restores as `null`/`{}`                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `tables.messageBatches`       | `MessageBatchRow[]` | No       | snake_case columns                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `tables.*` (the remaining 13) | `Row[]`             | No       | Same keys as the export; an omitted table restores **zero** rows into an emptied table                                                                                                                                                                                                                                                                                                                                                                                            |
-| `stopOrphans`                 | boolean             | No       | Stop the running engines for sessions the backup does not contain, inside this request and before the replace (best-effort, time-bounded per engine). Preferred over `force`                                                                                                                                                                                                                                                                                                      |
-| `force`                       | boolean             | No       | Legacy escape hatch: proceed despite orphaned engines and leave them running until a process restart (`restartRequired: true`)                                                                                                                                                                                                                                                                                                                                                    |
+| Field                         | Type                       | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------- | -------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tables`                      | object                     | Yes      | Container of per-table row arrays, keyed exactly as the export's `tables`. Absent, `null` or not an object is rejected `400` before the restore runs                                                                                                                                                                                                                                                                                                                              |
+| `tables.sessions`             | `SessionRow[]`             | No       | Inserted first; a row whose `id` or `name` is not a safe directory name refuses the whole restore before any engine is stopped or the transaction opens (`imported:false`, the row named in `warnings`; see the orphan-engine pre-flight below). An ACTIVE status in the backup (`ready`, `initializing`, ...) describes the source host's engines: restored as `disconnected` (a notice counts them), unless the session is held by a live peer whose claim the import preserves |
+| `tables.webhooks`             | `WebhookRow[]`             | No       | Export rows omit `secret`/`headers`; an absent key restores as `null`/`{}`                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `tables.messageBatches`       | `MessageBatchRow[]`        | No       | snake_case columns                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `tables.outboundTextRequests` | `OutboundTextRequestRow[]` | No       | Durable send identities; merged without deleting existing keys.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `tables.*` (the remaining 13) | `Row[]`                    | No       | Same keys as the export; an omitted table restores **zero** rows into an emptied table                                                                                                                                                                                                                                                                                                                                                                                            |
+| `stopOrphans`                 | boolean                    | No       | Stop the running engines for sessions the backup does not contain, inside this request and before the replace (best-effort, time-bounded per engine). Preferred over `force`                                                                                                                                                                                                                                                                                                      |
+| `force`                       | boolean                    | No       | Legacy escape hatch: proceed despite orphaned engines and leave them running until a process restart (`restartRequired: true`)                                                                                                                                                                                                                                                                                                                                                    |
 
 ```json
 {
@@ -5780,6 +5839,7 @@ Replace all Data DB rows with the supplied export. **Destructive and transaction
     "webhooks": [],
     "messages": [],
     "messageBatches": [],
+    "outboundTextRequests": [],
     "templates": [],
     "baileysStoredMessages": [],
     "lidMappings": [],
@@ -5807,6 +5867,7 @@ Replace all Data DB rows with the supplied export. **Destructive and transaction
     "webhooks": 0,
     "messages": 0,
     "messageBatches": 0,
+    "outboundTextRequests": 0,
     "templates": 0,
     "baileysStoredMessages": 0,
     "lidMappings": 0,
@@ -5835,7 +5896,7 @@ Replace all Data DB rows with the supplied export. **Destructive and transaction
 
 Because that pre-flight runs _before_ the transaction, its teardown is not covered by the rollback. A response with `imported:false` therefore still reports the engines it really stopped, and `restartRequired` on that path means only that a teardown **failed** — a cleanly stopped orphan leaves its session row intact (restart it with `POST /sessions/{sessionId}/start`), and an engine `force` left running was never orphaned after all, since the data that would have orphaned it was not replaced.
 
-Inside the transaction every migration table is emptied. `webhooks` and `sessions` are DELETEd directly, so a missing table there fails the restore; 13 more go through a tolerant helper where a _genuinely missing_ table is skipped; and `automation_rules` is emptied by the `DELETE FROM sessions` cascade rather than by the helper. Any other DELETE failure propagates to the rollback. Rows are then re-inserted, sessions first. JSON object/array fields are auto-stringified before insert, and the Postgres-form `$N` placeholders are rewritten for SQLite. Two guards return `imported:false` after a rollback: any `warnings`, and a payload that holds rows but restores **zero** of them (a wrong backup would otherwise commit a silent wipe — the response then carries `Backup contained no rows to restore; refused to replace existing data. Check the file.`). On commit the lid→phone mirror is reloaded from the restored rows.
+Inside the transaction every migration table except `outbound_text_requests` is emptied. `webhooks` and `sessions` are DELETEd directly, so a missing table there fails the restore; 13 more go through a tolerant helper where a _genuinely missing_ table is skipped; and `automation_rules` is emptied by the `DELETE FROM sessions` cascade rather than by the helper. Any other DELETE failure propagates to the rollback. Rows are then re-inserted, sessions first. Outbound text requests use `ON CONFLICT DO NOTHING`, preserving known keys even when the archive predates them. JSON object/array fields are auto-stringified before insert, and the Postgres-form `$N` placeholders are rewritten for SQLite. Two guards return `imported:false` after a rollback: any `warnings`, and a payload that holds rows but restores **zero** of them (a wrong backup would otherwise commit a silent wipe — the response then carries `Backup contained no rows to restore; refused to replace existing data. Check the file.`). On commit the lid→phone mirror is reloaded from the restored rows.
 
 On commit, plugin instance bindings are also re-applied: a session bound only by an instance the backup lacks, or restores disabled, is dropped from that plugin's active sessions and its per-session config is cleared, then every restored enabled instance is bound again. Sessions activated through `PUT /api/plugins/:id/sessions` with no instance behind them are left alone. If that re-sync fails the import still commits, with a notice and `restartRequired: true`. A restart re-applies the restored enabled instances but does not retire a binding the restore dropped, so check each plugin with `GET /api/plugins/:id` and correct it with `PUT /api/plugins/:id/sessions`, as the notice says. A session-wide (wildcard) instance's config was merged into the plugin's base config when it was bound, and a restore does not remove it; overwrite those keys with `PUT /api/plugins/:id/config`.
 

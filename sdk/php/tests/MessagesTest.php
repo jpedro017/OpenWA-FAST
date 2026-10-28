@@ -9,6 +9,20 @@ use PHPUnit\Framework\TestCase;
 
 class MessagesTest extends TestCase
 {
+    public function testIdempotentSendAndReadonlyReceipt(): void
+    {
+        $backend = (new MockBackend())->on(200, ['status' => 'sent', 'messageId' => 'wa1', 'timestamp' => 1]);
+        $backend->on(200, ['protocol' => 'openwa-idempotent-text-v1', 'receipt' => ['requestId' => 'turn1', 'messageId' => 'wa1', 'timestamp' => 1]]);
+        $client = $backend->makeClient();
+        $body = ['requestId' => 'turn1', 'chatId' => 'a@c.us', 'text' => 'hi'];
+        $this->assertSame('wa1', $client->messages->sendTextIdempotent('s1', $body)['messageId']);
+        $this->assertSame($body, $backend->lastCall()['body']);
+        $this->assertSame('/api/sessions/s1/messages/send-text-idempotent', $backend->lastCall()['path']);
+        $result = $client->messages->textIdempotency('s1', 'a@c.us', 'wa1');
+        $this->assertSame('turn1', $result['receipt']['requestId']);
+        $this->assertSame('GET', $backend->lastCall()['method']);
+    }
+
     public function testSendTextUsesSendTextPath(): void
     {
         $backend = (new MockBackend())->on(201, ['messageId' => 'm1', 'timestamp' => 1]);

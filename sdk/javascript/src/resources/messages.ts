@@ -22,6 +22,9 @@ import type {
   MessageHistoryQuery,
   MessageListResponse,
   MessageResponse,
+  IdempotentTextRequest,
+  IdempotentTextProtocol,
+  IdempotentTextResult,
   PinMessageRequest,
   ReactionRecord,
   ReactMessageRequest,
@@ -57,6 +60,24 @@ export class MessagesResource {
     return this.client.request<MessageResponse>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/messages/send-text`,
+      body,
+    });
+  }
+
+  /** Check support without sending a message. */
+  textIdempotency(sessionId: string, chatId: string, messageId?: string): Promise<IdempotentTextProtocol> {
+    return this.client.request<IdempotentTextProtocol>({
+      method: 'GET',
+      path: `/api/sessions/${encodeSegment(sessionId)}/messages/send-text-idempotent`,
+      query: { chatId, messageId },
+    });
+  }
+
+  /** Keep requestId and the complete payload unchanged when recovering a lost response. */
+  sendTextIdempotent(sessionId: string, body: IdempotentTextRequest): Promise<IdempotentTextResult> {
+    return this.client.request<IdempotentTextResult>({
+      method: 'POST',
+      path: `/api/sessions/${encodeSegment(sessionId)}/messages/send-text-idempotent`,
       body,
     });
   }

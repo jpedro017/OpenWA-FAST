@@ -1,6 +1,9 @@
 package openwa
 
-import "context"
+import (
+	"context"
+	"net/url"
+)
 
 // MessagesService sends and queries messages.
 // Backed by src/modules/message/message.controller.ts. NOTE: send paths use the
@@ -24,6 +27,30 @@ func (s *MessagesService) List(ctx context.Context, sessionID string, query *Lis
 // SendText sends a plain text message.
 func (s *MessagesService) SendText(ctx context.Context, sessionID string, body SendTextRequest) (*MessageResponse, error) {
 	return s.send(ctx, sessionID, "send-text", body)
+}
+
+// TextIdempotency checks support without sending a message.
+func (s *MessagesService) TextIdempotency(ctx context.Context, sessionID, chatID string, messageID ...string) (*IdempotentTextProtocol, error) {
+	var out IdempotentTextProtocol
+	query := url.Values{"chatId": []string{chatID}}
+	if len(messageID) > 0 {
+		query.Set("messageId", messageID[0])
+	}
+	err := s.client.do(ctx, "GET", s.base(sessionID)+"/send-text-idempotent", query, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SendTextIdempotent keeps the same identity and complete payload on retry.
+func (s *MessagesService) SendTextIdempotent(ctx context.Context, sessionID string, body IdempotentTextRequest) (*IdempotentTextResult, error) {
+	var out IdempotentTextResult
+	err := s.client.do(ctx, "POST", s.base(sessionID)+"/send-text-idempotent", nil, body, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // SendImage sends an image.

@@ -175,6 +175,7 @@ curl -X POST 'http://localhost:2785/api/infra/import-data' \
     "webhooks": [...],
     "messages": [...],
     "messageBatches": [...],
+    "outboundTextRequests": [...],
     "templates": [...],
     "baileysStoredMessages": [...],
     "lidMappings": [...],
@@ -193,6 +194,7 @@ curl -X POST 'http://localhost:2785/api/infra/import-data' \
     "webhooks": 12,
     "messages": 1500,
     "messageBatches": 3,
+    "outboundTextRequests": 3,
     "templates": 4,
     "baileysStoredMessages": 0,
     "lidMappings": 87,
@@ -212,6 +214,10 @@ curl -X POST 'http://localhost:2785/api/infra/import-data' \
 
 > [!NOTE]
 > `skippedTables` lists optional tables absent from an older schema; the import tolerates them.
+
+> Outbound text request identities (`outboundTextRequests`) are merged during restore and never
+> cleared by the import. Keys already known by the target instance take precedence over archived
+> keys, including pending requests, so restoring an older snapshot cannot cause a duplicate send.
 
 > [!NOTE]
 > **Timestamps travel as UTC.** Every stamp in the archive is ISO 8601 with an explicit `Z`, and both

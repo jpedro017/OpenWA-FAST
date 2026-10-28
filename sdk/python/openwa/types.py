@@ -344,6 +344,24 @@ class SessionStatsOverview(TypedDict, total=False):
 # ── Message ───────────────────────────────────────────────────────
 
 
+class IdempotentTextReceipt(TypedDict):
+    requestId: str
+    messageId: str
+    timestamp: int
+
+
+class IdempotentTextProtocol(TypedDict):
+    protocol: Literal['openwa-idempotent-text-v1']
+    receipt: NotRequired[Optional[IdempotentTextReceipt]]
+
+
+class IdempotentTextResult(TypedDict):
+    status: Literal['sent', 'pending', 'ambiguous', 'refused']
+    messageId: NotRequired[str]
+    timestamp: NotRequired[int]
+    error: NotRequired[str]
+
+
 class MessageResponse(TypedDict):
     messageId: str
     timestamp: int
@@ -366,6 +384,10 @@ class SendTextRequest(TypedDict):
     # Quote an earlier message, turning this send into a reply. Engine-specific: whatsapp-web.js
     # matches the serialized message id, Baileys the raw key id of a message it has already stored.
     quotedMessageId: NotRequired[str]
+
+
+class IdempotentTextRequest(SendTextRequest):
+    requestId: str
 
 
 class SendMediaRequest(TypedDict):

@@ -260,6 +260,19 @@ class TestClientCore:
 
 
 class TestMessages:
+    def test_idempotent_send_and_readonly_receipt(self):
+        backend = MockBackend().on("POST", "/send-text-idempotent", body={"status": "sent", "messageId": "wa1", "timestamp": 1})
+        backend.on("GET", "/send-text-idempotent", body={"protocol": "openwa-idempotent-text-v1", "receipt": {"requestId": "turn1", "messageId": "wa1", "timestamp": 1}})
+        client = make_client(backend)
+        result = client.messages.send_text_idempotent("s1", {"requestId": "turn1", "chatId": "a@c.us", "text": "hi"})
+        assert backend.last_call.body == {"requestId": "turn1", "chatId": "a@c.us", "text": "hi"}
+        assert result["messageId"] == "wa1"
+        protocol = client.messages.text_idempotency("s1", "a@c.us", "wa1")
+        assert backend.last_call.method == "GET"
+        assert "messageId=wa1" in backend.last_call.url
+        receipt = protocol.get("receipt")
+        assert receipt is not None and receipt["requestId"] == "turn1"
+
     def test_send_text_uses_send_text_path(self):
         backend = MockBackend().on("POST", "/send-text", body={"messageId": "m1", "timestamp": 1})
         make_client(backend).messages.send_text("s1", {"chatId": "a@c.us", "text": "hi"})

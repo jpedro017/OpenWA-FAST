@@ -48,6 +48,22 @@ class MessagesResource
      * @param array<string,mixed> $body
      * @return array<string,mixed>
      */
+    public function textIdempotency(string $sessionId, string $chatId, ?string $messageId = null): array
+    {
+        $query = ['chatId' => $chatId];
+        if ($messageId !== null) {
+            $query['messageId'] = $messageId;
+        }
+        return $this->http->request('GET', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-text-idempotent", $query);
+    }
+
+    /** Keep requestId and the complete payload unchanged on retry. @param array<string,mixed> $body */
+    public function sendTextIdempotent(string $sessionId, array $body): array
+    {
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($sessionId)}/messages/send-text-idempotent", [], $body);
+    }
+
+    /** @param array<string,mixed> $body @return array<string,mixed> */
     public function sendImage(string $sessionId, array $body): array
     {
         return $this->sendMedia($sessionId, 'send-image', $body);

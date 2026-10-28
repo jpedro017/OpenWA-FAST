@@ -16,6 +16,9 @@ import com.rmyndharis.openwa.model.ListMessagesQuery;
 import com.rmyndharis.openwa.model.MessageHistoryQuery;
 import com.rmyndharis.openwa.model.MessageListResponse;
 import com.rmyndharis.openwa.model.MessageResponse;
+import com.rmyndharis.openwa.model.IdempotentTextRequest;
+import com.rmyndharis.openwa.model.IdempotentTextResult;
+import com.rmyndharis.openwa.model.IdempotentTextProtocol;
 import com.rmyndharis.openwa.model.PinMessageRequest;
 import com.rmyndharis.openwa.model.ReactMessageRequest;
 import com.rmyndharis.openwa.model.ReactionRecord;
@@ -34,6 +37,7 @@ import com.rmyndharis.openwa.model.VotePollRequest;
 import com.rmyndharis.openwa.model.SuccessResult;
 import com.rmyndharis.openwa.model.UnpinMessageRequest;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Messages resource — sending and querying messages.
@@ -65,6 +69,26 @@ public final class MessagesResource {
             null,
             body,
             MessageResponse.class);
+    }
+
+    /** Check support without sending a message. */
+    public IdempotentTextProtocol textIdempotency(String sessionId, String chatId) {
+        return textIdempotency(sessionId, chatId, null);
+    }
+
+    /** Read a confirmed request receipt without reserving or sending a message. */
+    public IdempotentTextProtocol textIdempotency(String sessionId, String chatId, String messageId) {
+        return client.request(HttpMethod.GET,
+            "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-text-idempotent",
+            messageId == null ? Map.of("chatId", chatId) : Map.of("chatId", chatId, "messageId", messageId),
+            null, IdempotentTextProtocol.class);
+    }
+
+    /** Keep the identity and entire payload unchanged when recovering a lost response. */
+    public IdempotentTextResult sendTextIdempotent(String sessionId, IdempotentTextRequest body) {
+        return client.request(HttpMethod.POST,
+            "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-text-idempotent",
+            null, body, IdempotentTextResult.class);
     }
 
     /** Send an image (url or base64). */

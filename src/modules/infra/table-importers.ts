@@ -7,6 +7,7 @@ import type {
   WebhookRow,
   MessageRow,
   MessageBatchRow,
+  OutboundTextRequestRow,
   TemplateRow,
   BaileysStoredMessageRow,
   LidMappingRow,
@@ -284,6 +285,28 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
     ],
   }),
 
+  // Never clear these records: replacing them from an older snapshot would allow a previously
+  // accepted request to send again. Existing local keys win; absent archived keys are restored.
+  defineTableImporter({
+    key: 'outboundTextRequests',
+    label: 'outbound text request',
+    sql: `INSERT INTO outbound_text_requests ("sessionId", "requestId", "chatId", "payloadHash", status, "messageId", "timestamp", error, "createdAt")
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT ("sessionId", "requestId") DO NOTHING`,
+    id: (row: OutboundTextRequestRow) => `${row.sessionId}/${row.requestId}`,
+    map: (row: OutboundTextRequestRow) => [
+      row.sessionId,
+      row.requestId,
+      row.chatId,
+      row.payloadHash,
+      row.status,
+      row.messageId ?? null,
+      row.timestamp ?? null,
+      nulFree(row.error ?? null),
+      row.createdAt,
+    ],
+  }),
+
   // Import lid mappings (optional; not a FK, restored as a standalone cache table)
   defineTableImporter({
     key: 'lidMappings',
@@ -519,6 +542,7 @@ const EXPECTED_TABLE_KEYS: ReadonlyArray<keyof MigrationTables> = [
   'messageBatches',
   'templates',
   'baileysStoredMessages',
+  'outboundTextRequests',
   'lidMappings',
   'chatStates',
   'pluginInstances',

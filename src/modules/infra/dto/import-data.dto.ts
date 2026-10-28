@@ -42,7 +42,7 @@ const TABLE_PROPERTIES: Record<string, { type: 'array' }> = Object.fromEntries(
 export class ImportDataDto {
   @ApiProperty({
     type: 'object',
-    description: `Every one of the ${TABLE_IMPORTERS.length} migration tables is emptied before the restore runs, so a key omitted here is restored EMPTY rather than left untouched. Post the whole GET /api/infra/export-data payload, not a hand-built subset.`,
+    description: `Every one of the ${TABLE_IMPORTERS.length} migration tables is restored. Other than outboundTextRequests, tables are emptied first, so an omitted key is restored EMPTY. Outbound request keys are merged without deleting known keys, preventing duplicate sends after an older snapshot is restored. Post the whole GET /api/infra/export-data payload, not a hand-built subset.`,
     properties: TABLE_PROPERTIES,
   })
   @IsObject()

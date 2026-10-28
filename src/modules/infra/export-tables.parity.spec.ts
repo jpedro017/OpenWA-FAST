@@ -228,7 +228,12 @@ describe('the import clears every re-inserted table that DELETE FROM sessions ca
   // archive, so without an explicit clear a restore onto an instance that already holds their rows
   // collides on PK and the all-or-nothing gate rolls the whole import back (the exact restore-onto-self
   // flow). The set is derived from the registry, so a new table is covered without editing this spec.
-  const uncascaded = EXPORT_TABLES.filter(entry => !entry.sessionFk && entry.table !== 'sessions').map(e => e.table);
+  // Outbound send identities are intentionally merged, never replaced: deleting a newer key
+  // before restoring an older archive could authorize a duplicate. The real SQLite round-trip
+  // in infra-data.controller.spec.ts covers preservation of both sent and pending identities.
+  const uncascaded = EXPORT_TABLES.filter(
+    entry => !entry.sessionFk && entry.table !== 'sessions' && entry.table !== 'outbound_text_requests',
+  ).map(e => e.table);
 
   it('finds the sessions delete and at least one uncascaded table', () => {
     expect(sessionsDelete).toBeGreaterThan(-1);
